@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openHelperWindow: (kind) => ipcRenderer.invoke("openHelperWindow", kind),
   closeHelperByLabel: (label) => ipcRenderer.invoke("closeHelperByLabel", label),
   setWindowIcon: (buffer) => ipcRenderer.invoke("setWindowIcon", buffer),
+  setWindowTitle: (title) => ipcRenderer.invoke("setWindowTitle", title),
+  openFile: (filters) => ipcRenderer.invoke("openFile", filters),
+  saveFile: (content, defaultName, filters) =>
+    ipcRenderer.invoke("saveFile", content, defaultName, filters),
   startEmbeddedSignaling: () => ipcRenderer.invoke("startEmbeddedSignaling"),
   stopEmbeddedSignaling: () => ipcRenderer.invoke("stopEmbeddedSignaling"),
 });

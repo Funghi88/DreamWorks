@@ -179,7 +179,7 @@ export function drawFaceFilter(
     ctx.textBaseline = "middle";
     ctx.save();
     ctx.translate(lbPos.x, lbPos.y);
-    ctx.rotate(Math.PI); // head up (头朝上)
+    ctx.rotate(Math.PI); // head up
     ctx.fillText("🐞", 0, 0);
     ctx.restore();
   }

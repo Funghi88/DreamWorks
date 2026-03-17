@@ -13,10 +13,11 @@
     "preview": "vite preview",
     "electron": "electron .",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "pack": "npm run build && electron-builder --dir",
+    "pack": "npm run create-icns && npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "signaling": "npx tsx server/signaling-server.ts",
-    "create-app-icon": "node scripts/create-app-icon.js"
+    "create-app-icon": "node scripts/create-app-icon.js",
+    "create-icns": "node scripts/create-icns.js"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.0",
@@ -60,7 +61,7 @@
     "productName": "DreamWorks",
     "mac": {
       "category": "public.app-category.productivity",
-      "icon": "electron/icon.png",
+      "icon": "build/icon.icns",
       "target": ["dmg", "zip"]
     },
     "directories": {

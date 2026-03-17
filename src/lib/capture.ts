@@ -1,6 +1,6 @@
 /** Main capture modes (2K resolution) */
 export const CAPTURE_MODES = [
-  { id: "preview", label: "Preview (预览区截屏)", labelEn: "Preview (2K)" },
+  { id: "preview", label: "Preview (2K)" },
 ] as const;
 
 /** Preset dimensions for crop capture (e.g. social media covers) - applies to preview */

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const embeddedSignaling = require("./embedded-signaling.cjs");
@@ -42,6 +42,26 @@ function createMainWindow() {
   }
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
+
+  // Show save dialog when whiteboard exports image
+  mainWindow.webContents.session.on("will-download", (event, item) => {
+    const name = item.getFilename();
+    if (!/\.(png|svg|webp)$/i.test(name)) return;
+    item.pause();
+    dialog
+      .showSaveDialog(mainWindow, {
+        defaultPath: name,
+        filters: [{ name: "Image", extensions: ["png", "svg", "webp"] }],
+      })
+      .then(({ canceled, filePath }) => {
+        if (canceled || !filePath) {
+          item.cancel();
+        } else {
+          item.setSavePath(filePath);
+          item.resume();
+        }
+      });
+  });
 }
 
 function createHelperWindow(kind, options = {}) {
@@ -221,6 +241,57 @@ ipcMain.handle("startEmbeddedSignaling", async () => {
 });
 ipcMain.handle("stopEmbeddedSignaling", async () => {
   embeddedSignaling.stop();
+});
+
+// IPC: openFile (for whiteboard Load)
+ipcMain.handle("openFile", async (_, filters = [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }]) => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (!win) return null;
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    filters,
+    properties: ["openFile"],
+  });
+  if (canceled || !filePaths?.length) return null;
+  try {
+    const content = fs.readFileSync(filePaths[0], "utf8");
+    return { path: filePaths[0], content };
+  } catch (e) {
+    console.error("openFile:", e);
+    return null;
+  }
+});
+
+// IPC: saveFile (for whiteboard Save/Export)
+ipcMain.handle(
+  "saveFile",
+  async (
+    _,
+    content,
+    defaultName = "drawing.excalidraw",
+    filters = [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }]
+  ) => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    if (!win) return false;
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: defaultName,
+      filters,
+    });
+    if (canceled || !filePath) return false;
+    try {
+      fs.writeFileSync(filePath, content, "utf8");
+      return true;
+    } catch (e) {
+      console.error("saveFile:", e);
+      return false;
+    }
+  }
+);
+
+// IPC: setWindowTitle
+ipcMain.handle("setWindowTitle", async (_, title) => {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  win.setTitle(typeof title === "string" ? `${APP_NAME} - ${title}` : APP_NAME);
 });
 
 // IPC: setWindowIcon

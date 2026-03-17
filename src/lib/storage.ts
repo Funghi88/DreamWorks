@@ -68,6 +68,37 @@ export interface StoredSettings {
   faceFilter?: "none" | "sunglasses" | "vampire" | "heart";
   micVolume?: number;
   systemVolume?: number;
+  /** @deprecated Migrated to whiteboardProjects */
+  whiteboardData?: { elements: unknown[]; appState: Record<string, unknown> };
+  /** Whiteboard projects: one document per project */
+  whiteboardProjects?: Array<{ id: string; name: string; data: { elements: unknown[]; appState: Record<string, unknown> }; updatedAt: number }>;
+  activeProjectId?: string;
+}
+
+export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
+
+function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
+  if (!v || typeof v !== "object") return undefined;
+  const p = v as Record<string, unknown>;
+  if (!Array.isArray(p.elements) || !p.appState || typeof p.appState !== "object") return undefined;
+  const appState = p.appState as Record<string, unknown>;
+  const { collaborators: _, ...rest } = appState;
+  return { elements: p.elements, appState: rest };
+}
+
+function validProjects(v: unknown): StoredSettings["whiteboardProjects"] {
+  if (!Array.isArray(v)) return undefined;
+  const out: WhiteboardProject[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    if (typeof p.id !== "string" || typeof p.name !== "string" || typeof p.updatedAt !== "number") continue;
+    const data = validWhiteboardData(p.data);
+    if (!data) continue;
+    const name = p.name === "未命名项目" ? "Untitled" : p.name;
+    out.push({ id: p.id, name, data, updatedAt: p.updatedAt });
+  }
+  return out.length ? out : undefined;
 }
 
 function parseAndValidate(parsed: unknown): StoredSettings {
@@ -149,7 +180,35 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       p.systemVolume <= 100
         ? p.systemVolume
         : undefined,
+    whiteboardData: validWhiteboardData(p.whiteboardData),
+    whiteboardProjects: validProjects(p.whiteboardProjects),
+    activeProjectId: typeof p.activeProjectId === "string" ? p.activeProjectId : undefined,
   };
+}
+
+/** Get projects with migration from legacy whiteboardData. Call after parseAndValidate. */
+export function getWhiteboardProjects(s: StoredSettings): WhiteboardProject[] {
+  if (s.whiteboardProjects?.length) return s.whiteboardProjects;
+  if (s.whiteboardData) {
+    const migrated: WhiteboardProject = {
+      id: "migrated-" + Date.now(),
+      name: "Untitled",
+      data: s.whiteboardData,
+      updatedAt: Date.now(),
+    };
+    return [migrated];
+  }
+  return [{ id: "default", name: "Untitled", data: { elements: [], appState: {} }, updatedAt: Date.now() }];
+}
+
+export function saveWhiteboardProjects(
+  s: StoredSettings,
+  projects: WhiteboardProject[],
+  activeId: string
+): StoredSettings {
+  const next = { ...s, whiteboardProjects: projects, activeProjectId: activeId };
+  if (next.whiteboardData) delete next.whiteboardData;
+  return next;
 }
 
 export function loadSettings(): StoredSettings {
