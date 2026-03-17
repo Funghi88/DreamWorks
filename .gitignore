@@ -14,7 +14,6 @@ dist-ssr
 
 # Signing keys (never commit)
 keys/
-.tauri/*.key
 
 # Editor directories and files
 .vscode/*

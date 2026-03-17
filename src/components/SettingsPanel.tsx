@@ -1,4 +1,3 @@
-import { useState, useRef, useEffect } from "react";
 import { GlassButton } from "@/components/Glass";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -8,11 +7,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { FaceFilterType } from "@/lib/faceFilters";
+import type { RecordResolution, LetterboxBackground } from "@/lib/storage";
 import type { BeautySettings } from "@/lib/beautyEffects";
-import type { RecordResolution } from "@/lib/storage";
 import { presets } from "@/lib/beautyEffects";
-
+import type { FaceFilterType } from "@/lib/faceFilters";
 export type AvatarShape = "circle" | "rect";
 export type AvatarDecor = "none" | "simple" | "glow" | "dashed";
 
@@ -25,21 +23,25 @@ interface SettingsPanelProps {
   onAvatarDecorChange: (v: AvatarDecor) => void;
   glowColor: string;
   onGlowColorChange: (v: string) => void;
-  beautyMode: boolean;
-  onBeautyModeChange: (v: boolean) => void;
-  beautySettings: BeautySettings;
-  onBeautySettingsChange: (s: BeautySettings) => void;
-  faceFilter: FaceFilterType;
-  onFaceFilterChange: (v: FaceFilterType) => void;
   avatarImageSrc: string | null;
   onUseImage: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onClearImage: () => void;
+  beautyMode?: boolean;
+  onBeautyModeChange?: (v: boolean) => void;
+  beautySettings?: BeautySettings;
+  onBeautySettingsChange?: (v: BeautySettings) => void;
   micVolume: number;
   onMicVolumeChange: (v: number) => void;
   systemVolume: number;
   onSystemVolumeChange: (v: number) => void;
   recordResolution?: RecordResolution;
   onRecordResolutionChange?: (v: RecordResolution) => void;
+  letterboxBackground?: LetterboxBackground;
+  onLetterboxBackgroundChange?: (v: LetterboxBackground) => void;
+  letterboxCustomImage?: string | null;
+  onLetterboxCustomImageChange?: (v: string | null) => void;
+  faceFilter?: FaceFilterType;
+  onFaceFilterChange?: (v: FaceFilterType) => void;
 }
 
 export function SettingsPanel({
@@ -51,55 +53,42 @@ export function SettingsPanel({
   onAvatarDecorChange,
   glowColor,
   onGlowColorChange,
-  beautyMode,
-  onBeautyModeChange,
-  beautySettings,
-  onBeautySettingsChange,
-  faceFilter,
-  onFaceFilterChange,
   avatarImageSrc,
   onUseImage,
   onClearImage,
+  beautyMode = false,
+  onBeautyModeChange,
+  beautySettings,
+  onBeautySettingsChange,
   micVolume,
   onMicVolumeChange,
   systemVolume,
   onSystemVolumeChange,
   recordResolution,
   onRecordResolutionChange,
+  letterboxBackground,
+  onLetterboxBackgroundChange,
+  letterboxCustomImage,
+  onLetterboxCustomImageChange,
+  faceFilter = "none",
+  onFaceFilterChange,
 }: SettingsPanelProps) {
-  const [beautyExpanded, setBeautyExpanded] = useState(false);
-  const beautyCardRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!beautyMode) setBeautyExpanded(false);
-  }, [beautyMode]);
-
-  useEffect(() => {
-    if (!beautyExpanded) return;
-    const onOutside = (e: MouseEvent) => {
-      if (beautyCardRef.current && !beautyCardRef.current.contains(e.target as Node)) {
-        setBeautyExpanded(false);
-      }
-    };
-    document.addEventListener("mousedown", onOutside);
-    return () => document.removeEventListener("mousedown", onOutside);
-  }, [beautyExpanded]);
-
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 text-slate-900">
       <div className="space-y-3">
-        <span className="text-sm font-medium">Video</span>
+        <span className="text-sm font-medium text-slate-900">Video</span>
         <div className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <span className="w-14 text-sm">Size</span>
           <Slider
             value={[avatarSize]}
             onValueChange={([v]) => onAvatarSizeChange(v ?? 120)}
-            min={60}
+            min={32}
             max={280}
-            className="w-24"
+            step={4}
+            className="flex-1 min-w-0"
           />
-          <span className="w-8 text-sm tabular-nums">{avatarSize}</span>
+          <span className="w-10 text-sm tabular-nums shrink-0">{avatarSize}</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="w-14 text-sm">Shape</span>
@@ -115,7 +104,7 @@ export function SettingsPanel({
             size="sm"
             onClick={() => onAvatarShapeChange("rect")}
           >
-            Rounded
+            Landscape
           </GlassButton>
         </div>
         <div className="flex items-center gap-2">
@@ -124,10 +113,10 @@ export function SettingsPanel({
             value={avatarDecor}
             onValueChange={(v) => onAvatarDecorChange(v as AvatarDecor)}
           >
-            <SelectTrigger className="w-28 border-white/20 bg-white/10 backdrop-blur-md hover:bg-white/20">
+            <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent side="top" className="z-[100000] border-white/20 bg-white/10 backdrop-blur-xl">
+            <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
               <SelectItem value="none">None</SelectItem>
               <SelectItem value="simple">Simple</SelectItem>
               <SelectItem value="glow">Glow</SelectItem>
@@ -143,134 +132,147 @@ export function SettingsPanel({
             />
           )}
         </div>
-        <div className="flex flex-col gap-2" ref={beautyCardRef}>
-          <div className="flex items-center gap-2">
-            <span className="w-14 text-sm">Beauty</span>
-            <GlassButton
-              variant={beautyMode ? "primary" : "secondary"}
-              size="sm"
-              onClick={() => onBeautyModeChange(!beautyMode)}
-            >
-              {beautyMode ? "On" : "Off"}
-            </GlassButton>
-            {beautyMode && (
-              <GlassButton
-                variant="secondary"
-                size="sm"
-                onClick={() => setBeautyExpanded((v) => !v)}
+        {onFaceFilterChange != null && (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-14 text-sm">Effect</span>
+              <Select
+                value={faceFilter}
+                onValueChange={(v) => onFaceFilterChange(v as FaceFilterType)}
               >
-                {beautyExpanded ? "Done" : "Adjust"}
-              </GlassButton>
-            )}
+                <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="sunglasses">Sunglasses</SelectItem>
+                  <SelectItem value="vampire">🐞</SelectItem>
+                  <SelectItem value="heart">🩷</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
-          {beautyMode && beautyExpanded && (
-            <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-muted/20 p-3">
-              <span className="text-xs font-medium">Presets</span>
-              <div className="flex flex-wrap gap-1">
-                {Object.entries(presets).map(([key, preset]) => (
-                  <GlassButton
-                    key={key}
-                    variant="secondary"
-                    size="sm"
-                    className="border-border/80 shadow-xs"
-                    onClick={() => onBeautySettingsChange(preset)}
-                  >
-                    {key.charAt(0).toUpperCase() + key.slice(1)}
-                  </GlassButton>
+        )}
+        {onBeautyModeChange != null && (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-14 text-sm">Beauty</span>
+              <GlassButton
+                variant={beautyMode ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => onBeautyModeChange(!beautyMode)}
+              >
+                {beautyMode ? "On" : "Off"}
+              </GlassButton>
+              {beautyMode && onBeautySettingsChange && beautySettings && (
+                <Select
+                  value={Object.entries(presets).find(([, v]) =>
+                    JSON.stringify(v) === JSON.stringify(beautySettings)
+                  )?.[0] ?? "natural"}
+                  onValueChange={(v) => onBeautySettingsChange(presets[v] ?? presets.natural)}
+                >
+                  <SelectTrigger className="w-24 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+                    <SelectItem value="natural">Natural</SelectItem>
+                    <SelectItem value="professional">Pro</SelectItem>
+                    <SelectItem value="glamour">Glamour</SelectItem>
+                    <SelectItem value="minimal">Minimal</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            {beautyMode && onBeautySettingsChange && beautySettings && (
+              <div className="flex flex-col gap-1.5 pl-0">
+                {(["skinSmoothing", "brighten", "glow", "whiten", "contrast", "saturation"] as const).map((key) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <span className="w-14 text-xs text-slate-600">
+                      {key === "skinSmoothing" ? "Smooth" : key === "brighten" ? "Bright" : key === "glow" ? "Glow" : key === "whiten" ? "White" : key === "contrast" ? "Contrast" : "Sat"}
+                    </span>
+                    <Slider
+                      value={[beautySettings[key]]}
+                      onValueChange={([v]) => onBeautySettingsChange({ ...beautySettings, [key]: v ?? 0 })}
+                      min={0}
+                      max={100}
+                      className="flex-1"
+                    />
+                    <span className="w-6 text-xs tabular-nums">{beautySettings[key]}</span>
+                  </div>
                 ))}
               </div>
-              <span className="text-xs font-medium">Adjust</span>
-              {[
-                { key: "skinSmoothing" as const, label: "Smooth" },
-                { key: "brighten" as const, label: "Brighten" },
-                { key: "glow" as const, label: "Glow" },
-                { key: "whiten" as const, label: "Whiten" },
-                { key: "contrast" as const, label: "Contrast" },
-                { key: "saturation" as const, label: "Saturation" },
-              ].map(({ key, label }) => (
-                <div key={key} className="flex items-center gap-2">
-                  <span className="w-16 text-xs">{label}</span>
-                  <Slider
-                    value={[beautySettings[key]]}
-                    onValueChange={([v]) =>
-                      onBeautySettingsChange({ ...beautySettings, [key]: v ?? 0 })
-                    }
-                    min={0}
-                    max={100}
-                    className="flex-1"
-                  />
-                  <span className="w-6 text-xs tabular-nums">{beautySettings[key]}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
         {recordResolution != null && onRecordResolutionChange && (
           <div className="flex items-center gap-2">
-            <span className="w-14 text-sm">Quality</span>
+            <span className="w-14 text-sm">Res</span>
             <Select
               value={recordResolution}
               onValueChange={(v) => onRecordResolutionChange(v as RecordResolution)}
             >
-              <SelectTrigger className="w-28 border-white/20 bg-white/10 backdrop-blur-md hover:bg-white/20">
+              <SelectTrigger className="w-24 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[100000] border-white/20 bg-white/10 backdrop-blur-xl">
-                <SelectItem value="720p">720p</SelectItem>
+              <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
                 <SelectItem value="1080p">1080p</SelectItem>
+                <SelectItem value="2K">2K</SelectItem>
                 <SelectItem value="4K">4K</SelectItem>
               </SelectContent>
             </Select>
           </div>
         )}
-        <div className="flex items-center gap-2">
-          <span className="w-14 text-sm">Filter</span>
-          <Select
-            value={faceFilter}
-            onValueChange={(v) => onFaceFilterChange(v as FaceFilterType)}
-          >
-            <SelectTrigger className="w-36 border-white/20 bg-white/10 backdrop-blur-md hover:bg-white/20">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent side="top" className="z-[100000] max-h-[70vh] border-white/20 bg-white/10 backdrop-blur-xl">
-              <SelectItem value="none">
-                <span className="text-muted-foreground">None</span>
-              </SelectItem>
-              <SelectItem value="glasses">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#1a1a1a]" />
-                Sunglasses
-              </SelectItem>
-              <SelectItem value="heart">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#e74c3c]" />
-                Heart
-              </SelectItem>
-              <SelectItem value="star">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#f39c12]" />
-                Star
-              </SelectItem>
-              <SelectItem value="mustache">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#3d2318]" />
-                Mustache
-              </SelectItem>
-              <SelectItem value="cat">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#FFB6C1]" />
-                Cat
-              </SelectItem>
-              <SelectItem value="panda">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#1a1a1a]" />
-                Panda
-              </SelectItem>
-              <SelectItem value="vampire">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#8B0000]" />
-                Vampire
-              </SelectItem>
-              <SelectItem value="fairy">
-                <span className="mr-2 inline-block size-2.5 rounded-full bg-[#FFD700]" />
-                Fairy
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        {letterboxBackground != null && onLetterboxBackgroundChange && (
+          <div className="flex items-center gap-2">
+            <span className="w-14 text-sm">Bg</span>
+            <Select
+              value={letterboxBackground}
+              onValueChange={(v) => onLetterboxBackgroundChange(v as LetterboxBackground)}
+            >
+              <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+                <SelectItem value="black">Black</SelectItem>
+                <SelectItem value="custom">Upload image</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+        {onLetterboxCustomImageChange && onLetterboxBackgroundChange && (
+          <div className="flex items-center gap-2">
+            <span className="w-14 text-sm">Custom</span>
+            <label className="cursor-pointer text-xs text-slate-600 hover:text-slate-900">
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) {
+                    const r = new FileReader();
+                    r.onload = () => {
+                      onLetterboxCustomImageChange(r.result as string);
+                      onLetterboxBackgroundChange("custom");
+                    };
+                    r.readAsDataURL(f);
+                  }
+                  e.target.value = "";
+                }}
+              />
+              Upload bg
+            </label>
+            {letterboxCustomImage && (
+              <button
+                type="button"
+                className="text-xs text-slate-600 hover:text-slate-900"
+                onClick={() => onLetterboxCustomImageChange(null)}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <span className="w-14 text-sm">Source</span>
           <label className="cursor-pointer">
@@ -280,7 +282,7 @@ export function SettingsPanel({
               className="hidden"
               onChange={onUseImage}
             />
-            <span className="glass-panel inline-flex h-8 cursor-pointer items-center justify-center rounded-lg border border-white/20 px-3 text-sm font-medium backdrop-blur-md hover:bg-white/20">
+            <span className="inline-flex h-8 cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-900 hover:bg-slate-100">
               Use image
             </span>
           </label>
@@ -293,7 +295,7 @@ export function SettingsPanel({
         </div>
       </div>
       <div className="space-y-3">
-        <span className="text-sm font-medium">Audio</span>
+        <span className="text-sm font-medium text-slate-900">Audio</span>
         <div className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <span className="w-14 text-sm">Mic</span>

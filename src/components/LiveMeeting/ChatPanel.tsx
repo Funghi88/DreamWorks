@@ -54,14 +54,7 @@ export function ChatPanel({ socket, roomId, userName: _userName, isOpen, onClose
 
   useEffect(() => {
     if (isOpen) {
-      if (typeof window !== "undefined" && "__TAURI__" in window) {
-        import("@tauri-apps/api/webview")
-          .then(({ getCurrentWebview }) => getCurrentWebview().setFocus())
-          .then(() => inputRef.current?.focus())
-          .catch(() => {});
-      } else {
-        inputRef.current?.focus();
-      }
+      inputRef.current?.focus();
     }
   }, [isOpen]);
 

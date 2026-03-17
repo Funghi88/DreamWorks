@@ -7,23 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish:
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            args: ""
-          - platform: windows-latest
-            args: ""
-
-    runs-on: ${{ matrix.platform }}
+  build:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -33,41 +18,17 @@ jobs:
           node-version: lts/*
           cache: npm
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Install Ubuntu dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Install Windows MSVC target
-        if: matrix.platform == 'windows-latest'
-        run: rustup target add x86_64-pc-windows-msvc
-
       - name: Install dependencies
         run: npm ci
-
-      - name: Update updater config
-        run: node scripts/update-updater-config.js
 
       - name: Set signaling URL
         run: echo "VITE_SIGNALING_URL=${{ secrets.VITE_SIGNALING_URL != '' && secrets.VITE_SIGNALING_URL || 'https://dreamwork-signaling.onrender.com' }}" >> $GITHUB_ENV
 
-      - uses: tauri-apps/tauri-action@v0.6.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSPHRASE }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build
+        run: npm run build
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: "DreamWork v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
-          args: ${{ matrix.args }}
+          name: dist
+          path: dist/

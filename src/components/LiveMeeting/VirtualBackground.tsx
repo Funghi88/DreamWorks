@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { FilesetResolver, ImageSegmenter } from "@mediapipe/tasks-vision";
-
-type BackgroundMode = "none" | "blur" | "color";
+import type { BackgroundMode } from "./useVirtualBackground";
 
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm";
 const SEGMENTER_MODEL =
@@ -213,10 +212,4 @@ export function VirtualBackground({
       style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 1 }}
     />
   );
-}
-
-export function useVirtualBackground() {
-  const [mode, setMode] = useState<BackgroundMode>("none");
-  const [color, setColor] = useState("#1e293b");
-  return { mode, setMode, color, setColor };
 }

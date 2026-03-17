@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type { AvatarShape, AvatarDecor } from "./SettingsPanel";
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -22,7 +22,9 @@ interface CircularWebcamProps {
   useImgForDisplay?: boolean;
   /** Camera stream - set directly so video works when component mounts in any layout */
   cameraStream?: MediaStream | null;
-  avatarSize: number;
+  /** Width and height for the avatar (rect=landscape, circle=square) */
+  avatarWidth: number;
+  avatarHeight: number;
   avatarShape: AvatarShape;
   avatarDecor: AvatarDecor;
   glowColor: string;
@@ -44,7 +46,8 @@ export function CircularWebcam({
   useImgForDisplay = false,
   externalVideoRef,
   cameraStream,
-  avatarSize,
+  avatarWidth,
+  avatarHeight,
   avatarShape,
   avatarDecor,
   glowColor,
@@ -60,40 +63,88 @@ export function CircularWebcam({
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const imgAltRef = useRef<HTMLImageElement | null>(null);
+  const showImgARef = useRef(true);
+
   useEffect(() => {
     const el = videoElRef.current;
     if (el && cameraStream) {
+      el.setAttribute("playsinline", "");
+      el.setAttribute("webkit-playsinline", "");
       el.srcObject = cameraStream;
-      el.play().catch(() => {});
+      el.onloadedmetadata = () => {
+        setTimeout(() => el.play().catch(() => {}), 50);
+      };
+      if (el.readyState >= 1) el.play().catch(() => {});
     }
   }, [cameraStream]);
 
   // Canvas draw loop when useCanvasForDisplay (fixes WebView video not rendering)
   useEffect(() => {
     if (!useCanvasForDisplay || avatarImageSrc) return;
-    const video = externalVideoRef?.current ?? videoElRef.current;
+    // Prefer video that has decoded (readyState>=2); else in-component, else external
+    const inComp = videoElRef.current;
+    const ext = externalVideoRef?.current;
+    const video =
+      (ext && ext.readyState >= 2 && ext.videoWidth > 0 ? ext : null) ??
+      (inComp && inComp.readyState >= 2 && inComp.videoWidth > 0 ? inComp : null) ??
+      (inComp?.srcObject ? inComp : ext ?? inComp);
     const canvas = canvasRef.current;
     if (!video || !canvas || !cameraStream) return;
     let id: number;
-    let frameCount = 0;
+    let imgPending = false;
     const draw = () => {
       if (video.readyState >= 2 && video.videoWidth > 0) {
         const ctx = canvas.getContext("2d");
         if (ctx) {
-          const w = video.videoWidth;
-          const h = video.videoHeight;
-          if (canvas.width !== w || canvas.height !== h) {
-            canvas.width = w;
-            canvas.height = h;
+          const cw = Math.max(avatarWidth, 64);
+          const ch = Math.max(avatarHeight, 64);
+          if (canvas.width !== cw || canvas.height !== ch) {
+            canvas.width = cw;
+            canvas.height = ch;
           }
-          ctx.drawImage(video, 0, 0);
-          if (useImgForDisplay && (frameCount++ % 3 === 0)) {
-            try {
-              const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
-              setImgSrc(dataUrl);
-            } catch {
-              /* ignore */
+          ctx.clearRect(0, 0, cw, ch);
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const s = Math.max(cw / vw, ch / vh);
+          const sw = vw * s;
+          const sh = vh * s;
+          const dx = (cw - sw) / 2;
+          const dy = (ch - sh) / 2;
+          ctx.save();
+          if (avatarShape === "circle") {
+            const r = Math.min(cw, ch) / 2;
+            ctx.beginPath();
+            ctx.arc(cw / 2, ch / 2, r, 0, Math.PI * 2);
+            ctx.closePath();
+            ctx.clip();
+            ctx.fillStyle = "transparent";
+            ctx.beginPath();
+            ctx.arc(cw / 2, ch / 2, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.drawImage(video, 0, 0, vw, vh, dx, dy, sw, sh);
+          ctx.restore();
+          if (useImgForDisplay && !imgPending) {
+            const imgA = imgRef.current;
+            const imgB = imgAltRef.current;
+            const target = showImgARef.current ? imgB : imgA;
+            if (target) {
+              try {
+                imgPending = true;
+                target.onload = () => {
+                  imgPending = false;
+                  if (imgA && imgB) {
+                    const showA = !showImgARef.current;
+                    showImgARef.current = showA;
+                    imgA.style.opacity = showA ? "1" : "0";
+                    imgB.style.opacity = showA ? "0" : "1";
+                  }
+                };
+                target.src = canvas.toDataURL("image/png");
+              } catch {
+                imgPending = false;
+              }
             }
           }
         }
@@ -102,7 +153,7 @@ export function CircularWebcam({
     };
     id = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(id);
-  }, [useCanvasForDisplay, useImgForDisplay, cameraStream, avatarImageSrc, externalVideoRef]);
+  }, [useCanvasForDisplay, useImgForDisplay, cameraStream, avatarImageSrc, externalVideoRef, avatarShape, avatarWidth, avatarHeight]);
 
   const shapeClass = avatarShape === "circle" ? "rounded-full" : "rounded-2xl";
   const borderClass =
@@ -110,7 +161,9 @@ export function CircularWebcam({
       ? "border-4 border-white"
       : avatarDecor === "dashed"
         ? "border border-dashed border-white"
-        : "border-[3px] border-white/90";
+        : avatarDecor === "glow"
+          ? "border-[3px] border-white/90"
+          : "";
   const shadowClass =
     avatarDecor === "glow"
       ? ""
@@ -120,14 +173,18 @@ export function CircularWebcam({
 
   return (
     <div
-      ref={pipRef}
-      className={`absolute overflow-hidden cursor-grab touch-none select-none z-[100] ${shapeClass} ${borderClass} ${shadowClass}`}
+      ref={(el) => {
+        if (pipRef && "current" in pipRef) {
+          (pipRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+        }
+      }}
+      className={`absolute overflow-hidden cursor-grab touch-none select-none z-[100] bg-transparent ${shapeClass} ${borderClass} ${shadowClass}`}
       style={{
         touchAction: "none",
         left: pipPos.x,
         top: pipPos.y,
-        width: avatarSize,
-        height: avatarSize,
+        width: avatarWidth,
+        height: avatarHeight,
         opacity: hidden || forceCanvasDisplay ? 0.01 : 1,
         pointerEvents: "auto",
         zIndex: 9999,
@@ -157,20 +214,53 @@ export function CircularWebcam({
         />
       ) : useCanvasForDisplay ? (
         <>
+          {/* Hidden video in same DOM tree as canvas - avoids cross-context issues in WebView */}
+          <video
+            ref={(el) => {
+              videoElRef.current = el;
+              if (cameraVideoRef && el) {
+                if (typeof cameraVideoRef === "function") cameraVideoRef(el);
+                else (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+              }
+              if (el && cameraStream) {
+                el.setAttribute("playsinline", "");
+                el.setAttribute("webkit-playsinline", "");
+                el.srcObject = cameraStream;
+                el.onloadedmetadata = () => {
+                  setTimeout(() => el.play().catch(() => {}), 50);
+                };
+                if (el.readyState >= 1) el.play().catch(() => {});
+              }
+            }}
+            autoPlay
+            muted
+            playsInline
+            className="absolute w-[320px] h-[240px] pointer-events-none"
+            style={{ left: 0, top: 0, opacity: 1, zIndex: -1, transform: "translate3d(0,0,0)" }}
+            aria-hidden
+          />
           <canvas
             ref={canvasRef}
             className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-            style={useImgForDisplay ? { display: "none" } : beautyMode ? { filter: beautyFilter } : undefined}
+            style={beautyMode ? { filter: beautyFilter } : undefined}
           />
-          {useImgForDisplay && imgSrc && (
-            <img
-              ref={imgRef}
-              src={imgSrc}
-              alt=""
-              className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-              style={beautyMode ? { filter: beautyFilter } : undefined}
-              draggable={false}
-            />
+          {useImgForDisplay && (
+            <>
+              <img
+                ref={imgRef}
+                alt=""
+                className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+                style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 1 }}
+                draggable={false}
+              />
+              <img
+                ref={imgAltRef}
+                alt=""
+                className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+                style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 0 }}
+                draggable={false}
+              />
+            </>
           )}
         </>
       ) : (

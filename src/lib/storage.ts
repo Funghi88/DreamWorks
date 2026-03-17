@@ -1,5 +1,11 @@
 const KEY = "dreamwork-settings";
 
+function getElectronAPI(): { getSettings: () => Promise<unknown>; saveSettings: (s: unknown) => Promise<void> } | null {
+  if (typeof window === "undefined") return null;
+  const api = (window as unknown as { electronAPI?: { getSettings?: unknown; saveSettings?: unknown } }).electronAPI;
+  return api?.getSettings && api?.saveSettings ? (api as { getSettings: () => Promise<unknown>; saveSettings: (s: unknown) => Promise<void> }) : null;
+}
+
 function validNum(n: unknown, min: number, max: number): number | undefined {
   return typeof n === "number" && n >= min && n <= max ? n : undefined;
 }
@@ -27,16 +33,6 @@ function validBeautySettings(s: unknown): StoredBeautySettings | undefined {
 
 export type StoredAvatarShape = "circle" | "rect";
 export type StoredAvatarDecor = "none" | "simple" | "glow" | "dashed";
-export type StoredFaceFilter =
-  | "none"
-  | "glasses"
-  | "heart"
-  | "star"
-  | "mustache"
-  | "cat"
-  | "panda"
-  | "vampire"
-  | "fairy";
 
 export interface StoredBeautySettings {
   skinSmoothing: number;
@@ -47,16 +43,21 @@ export interface StoredBeautySettings {
   saturation: number;
 }
 
-export type RecordResolution = "720p" | "1080p" | "4K";
+export type RecordResolution = "1080p" | "2K" | "4K";
+
+export type LetterboxBackground = "black" | "custom";
 
 export interface StoredSettings {
   glowColor?: string;
   pipPos?: { x: number; y: number };
   fullPagePipPos?: { x: number; y: number };
   recordResolution?: RecordResolution;
+  letterboxBackground?: LetterboxBackground;
+  letterboxCustomImage?: string;
   previewPosition?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
   fullPagePreviewPos?: { x: number; y: number };
   sidebarWidth?: number;
+  previewWidth?: number;
   whiteboardHeight?: number;
   avatarSize?: number;
   avatarShape?: StoredAvatarShape;
@@ -64,88 +65,121 @@ export interface StoredSettings {
   avatarImageSrc?: string;
   beautyMode?: boolean;
   beautySettings?: StoredBeautySettings;
-  faceFilter?: StoredFaceFilter;
+  faceFilter?: "none" | "sunglasses" | "vampire" | "heart";
   micVolume?: number;
   systemVolume?: number;
+}
+
+function parseAndValidate(parsed: unknown): StoredSettings {
+  if (!parsed || typeof parsed !== "object") return {};
+  const p = parsed as Record<string, unknown>;
+  return {
+    glowColor: typeof p.glowColor === "string" ? p.glowColor : undefined,
+    pipPos:
+      p.pipPos && typeof (p.pipPos as { x?: number; y?: number }).x === "number" && typeof (p.pipPos as { x?: number; y?: number }).y === "number"
+        ? (p.pipPos as { x: number; y: number })
+        : undefined,
+    fullPagePipPos:
+      p.fullPagePipPos && typeof (p.fullPagePipPos as { x?: number; y?: number }).x === "number" && typeof (p.fullPagePipPos as { x?: number; y?: number }).y === "number"
+        ? (p.fullPagePipPos as { x: number; y: number })
+        : undefined,
+    recordResolution: p.recordResolution === "1080p" || p.recordResolution === "2K" || p.recordResolution === "4K" ? (p.recordResolution as RecordResolution) : undefined,
+    letterboxBackground:
+      p.letterboxBackground && ["black", "custom"].includes(p.letterboxBackground as string)
+        ? (p.letterboxBackground as LetterboxBackground)
+        : undefined,
+    letterboxCustomImage:
+      typeof p.letterboxCustomImage === "string" &&
+      (p.letterboxCustomImage.startsWith("data:image/") || p.letterboxCustomImage.startsWith("blob:"))
+        ? p.letterboxCustomImage
+        : undefined,
+    previewPosition:
+      p.previewPosition &&
+      ["top-left", "top-right", "bottom-left", "bottom-right"].includes(p.previewPosition as string)
+        ? (p.previewPosition as "top-left" | "top-right" | "bottom-left" | "bottom-right")
+        : undefined,
+    fullPagePreviewPos:
+      p.fullPagePreviewPos &&
+      typeof (p.fullPagePreviewPos as { x?: number; y?: number }).x === "number" &&
+      typeof (p.fullPagePreviewPos as { x?: number; y?: number }).y === "number"
+        ? (p.fullPagePreviewPos as { x: number; y: number })
+        : undefined,
+    sidebarWidth:
+      typeof p.sidebarWidth === "number" && p.sidebarWidth >= 240 && p.sidebarWidth <= 600
+        ? p.sidebarWidth
+        : undefined,
+    previewWidth:
+      typeof p.previewWidth === "number" && p.previewWidth >= 80 && p.previewWidth <= 600
+        ? p.previewWidth
+        : undefined,
+    whiteboardHeight:
+      typeof p.whiteboardHeight === "number" && p.whiteboardHeight >= 120 && p.whiteboardHeight <= 800
+        ? p.whiteboardHeight
+        : undefined,
+    avatarSize:
+      typeof p.avatarSize === "number" && p.avatarSize >= 32 && p.avatarSize <= 280
+        ? p.avatarSize
+        : undefined,
+    avatarShape:
+      p.avatarShape === "circle" || p.avatarShape === "rect"
+        ? (p.avatarShape as StoredAvatarShape)
+        : undefined,
+    avatarDecor:
+      p.avatarDecor &&
+      ["none", "simple", "glow", "dashed"].includes(p.avatarDecor as string)
+        ? (p.avatarDecor as StoredAvatarDecor)
+        : undefined,
+    avatarImageSrc:
+      typeof p.avatarImageSrc === "string" && p.avatarImageSrc.startsWith("data:image/")
+        ? p.avatarImageSrc
+        : undefined,
+    beautyMode: typeof p.beautyMode === "boolean" ? p.beautyMode : undefined,
+    beautySettings: validBeautySettings(p.beautySettings),
+    faceFilter:
+      p.faceFilter && ["none", "sunglasses", "vampire", "heart"].includes(p.faceFilter as string)
+        ? (p.faceFilter as "none" | "sunglasses" | "vampire" | "heart")
+        : undefined,
+    micVolume:
+      typeof p.micVolume === "number" && p.micVolume >= 0 && p.micVolume <= 100
+        ? p.micVolume
+        : undefined,
+    systemVolume:
+      typeof p.systemVolume === "number" &&
+      p.systemVolume >= 0 &&
+      p.systemVolume <= 100
+        ? p.systemVolume
+        : undefined,
+  };
 }
 
 export function loadSettings(): StoredSettings {
   try {
     const s = localStorage.getItem(KEY);
     if (!s) return {};
-    const parsed = JSON.parse(s) as StoredSettings;
-    return {
-      glowColor: typeof parsed.glowColor === "string" ? parsed.glowColor : undefined,
-      pipPos:
-        parsed.pipPos && typeof parsed.pipPos.x === "number" && typeof parsed.pipPos.y === "number"
-          ? parsed.pipPos
-          : undefined,
-      fullPagePipPos:
-        parsed.fullPagePipPos && typeof parsed.fullPagePipPos.x === "number" && typeof parsed.fullPagePipPos.y === "number"
-          ? parsed.fullPagePipPos
-          : undefined,
-      recordResolution:
-        parsed.recordResolution && ["720p", "1080p", "4K"].includes(parsed.recordResolution)
-          ? (parsed.recordResolution as RecordResolution)
-          : undefined,
-      previewPosition:
-        parsed.previewPosition &&
-        ["top-left", "top-right", "bottom-left", "bottom-right"].includes(parsed.previewPosition)
-          ? (parsed.previewPosition as "top-left" | "top-right" | "bottom-left" | "bottom-right")
-          : undefined,
-      fullPagePreviewPos:
-        parsed.fullPagePreviewPos &&
-        typeof parsed.fullPagePreviewPos.x === "number" &&
-        typeof parsed.fullPagePreviewPos.y === "number"
-          ? parsed.fullPagePreviewPos
-          : undefined,
-      sidebarWidth:
-        typeof parsed.sidebarWidth === "number" && parsed.sidebarWidth >= 240 && parsed.sidebarWidth <= 600
-          ? parsed.sidebarWidth
-          : undefined,
-      whiteboardHeight:
-        typeof parsed.whiteboardHeight === "number" && parsed.whiteboardHeight >= 120 && parsed.whiteboardHeight <= 800
-          ? parsed.whiteboardHeight
-          : undefined,
-      avatarSize:
-        typeof parsed.avatarSize === "number" && parsed.avatarSize >= 60 && parsed.avatarSize <= 280
-          ? parsed.avatarSize
-          : undefined,
-      avatarShape:
-        parsed.avatarShape === "circle" || parsed.avatarShape === "rect"
-          ? parsed.avatarShape
-          : undefined,
-      avatarDecor:
-        parsed.avatarDecor &&
-        ["none", "simple", "glow", "dashed"].includes(parsed.avatarDecor)
-          ? parsed.avatarDecor
-          : undefined,
-      avatarImageSrc:
-        typeof parsed.avatarImageSrc === "string" && parsed.avatarImageSrc.startsWith("data:image/")
-          ? parsed.avatarImageSrc
-          : undefined,
-      beautyMode: typeof parsed.beautyMode === "boolean" ? parsed.beautyMode : undefined,
-      beautySettings: validBeautySettings(parsed.beautySettings),
-      faceFilter:
-        parsed.faceFilter &&
-        ["none", "glasses", "heart", "star", "mustache", "cat", "panda", "vampire", "fairy"].includes(
-          parsed.faceFilter
-        )
-          ? parsed.faceFilter
-          : undefined,
-      micVolume:
-        typeof parsed.micVolume === "number" && parsed.micVolume >= 0 && parsed.micVolume <= 100
-          ? parsed.micVolume
-          : undefined,
-      systemVolume:
-        typeof parsed.systemVolume === "number" &&
-        parsed.systemVolume >= 0 &&
-        parsed.systemVolume <= 100
-          ? parsed.systemVolume
-          : undefined,
-    };
+    return parseAndValidate(JSON.parse(s));
   } catch {
     return {};
+  }
+}
+
+/** Load settings from Electron file storage. Use on app mount when in Electron. */
+export async function loadSettingsAsync(): Promise<StoredSettings> {
+  const api = getElectronAPI();
+  if (!api) return loadSettings();
+  try {
+    const raw = await api.getSettings();
+    let s = parseAndValidate(raw);
+    // Migrate from localStorage if file was empty (first run after upgrade)
+    if (Object.keys(s).length === 0) {
+      const fromLocal = loadSettings();
+      if (Object.keys(fromLocal).length > 0) {
+        s = fromLocal;
+        api.saveSettings(s).catch(() => {});
+      }
+    }
+    return s;
+  } catch {
+    return loadSettings();
   }
 }
 
@@ -154,5 +188,9 @@ export function saveSettings(settings: StoredSettings) {
     localStorage.setItem(KEY, JSON.stringify(settings));
   } catch {
     /* ignore */
+  }
+  const api = getElectronAPI();
+  if (api) {
+    api.saveSettings(settings).catch(() => {});
   }
 }

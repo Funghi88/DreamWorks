@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DreamWorks Recording Monitor</title>
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      .stage {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 2px;
+        pointer-events: auto;
+      }
+      .pip {
+        position: absolute;
+        inset: 0;
+        border-radius: 999px;
+        border: 2px solid rgba(255,255,255,.95);
+        background: transparent;
+        box-shadow: none;
+        cursor: move;
+        user-select: none;
+        will-change: transform, left, top;
+        backface-visibility: hidden;
+        overflow: hidden;
+        app-region: drag;
+        -webkit-app-region: drag;
+      }
+      .pip img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .close {
+        position: absolute;
+        right: -2px;
+        top: -2px;
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.8);
+        background: rgba(0,0,0,.62);
+        color: #fff;
+        font-size: 12px;
+        line-height: 18px;
+        text-align: center;
+        cursor: pointer;
+        app-region: no-drag;
+        -webkit-app-region: no-drag;
+      }
+    </style>
+  </head>
+  <body data-tauri-drag-region>
+    <div class="stage" id="stage">
+      <div id="pip" class="pip" data-tauri-drag-region>
+        <img id="pipImage" alt="" draggable="false" />
+        <button id="close" class="close" type="button">x</button>
+      </div>
+    </div>
+    <script>
+      const channel = new BroadcastChannel("dreamwork-monitor");
+      const stage = document.getElementById("stage");
+      const pip = document.getElementById("pip");
+      const pipImage = document.getElementById("pipImage");
+      const closeBtn = document.getElementById("close");
+      let cameraFrameData = "";
+
+      function renderPip() {
+        const rect = stage.getBoundingClientRect();
+        const maxSize = Math.min(rect.width, rect.height) - 4;
+        const sizePx = Math.max(64, Math.min(96, maxSize));
+        pip.style.width = `${sizePx}px`;
+        pip.style.height = `${sizePx}px`;
+        pip.style.left = `${Math.max(0, Math.round((rect.width - sizePx) / 2))}px`;
+        pip.style.top = `${Math.max(0, Math.round((rect.height - sizePx) / 2))}px`;
+        if (cameraFrameData) {
+          if (pipImage.src !== cameraFrameData) pipImage.src = cameraFrameData;
+        }
+      }
+
+      channel.onmessage = (event) => {
+        const data = event.data || {};
+        if (data.type !== "monitor-frame") return;
+        if (typeof data.cameraFrameData === "string" && data.cameraFrameData.startsWith("data:image/")) {
+          cameraFrameData = data.cameraFrameData;
+        }
+        renderPip();
+      };
+
+      closeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        channel.postMessage({ type: "monitor-close" });
+        if (window.close) window.close();
+      });
+      pip.addEventListener("pointerdown", () => {
+        channel.postMessage({ type: "monitor-drag-start" });
+      });
+
+      // Use -webkit-app-region: drag to move this floating window across desktop.
+      window.addEventListener("resize", renderPip);
+      renderPip();
+    </script>
+  </body>
+</html>

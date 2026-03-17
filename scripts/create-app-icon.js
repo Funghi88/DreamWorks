@@ -3,7 +3,7 @@
  * Create app icon from an avatar image.
  * Usage: node scripts/create-app-icon.js [input.png] [--circle]
  *   --circle: crop to circle (default: fill entire square)
- * Output: src-tauri/app-icon.png (1024x1024)
+ * Output: electron/icon.png (1024x1024)
  */
 import sharp from "sharp";
 import { existsSync } from "fs";
@@ -15,7 +15,7 @@ const root = join(__dirname, "..");
 const args = process.argv.slice(2);
 const useCircle = args.includes("--circle");
 const input = args.find((a) => !a.startsWith("--")) || join(root, "avatar-source.png");
-const output = join(root, "src-tauri", "app-icon.png");
+const output = join(root, "electron", "icon.png");
 
 if (!existsSync(input)) {
   console.error("Input not found:", input);

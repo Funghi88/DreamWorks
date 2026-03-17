@@ -1,112 +1,200 @@
-# DreamWork
+# DreamWorks
 
-Lightweight screen recorder with circular webcam overlay and whiteboard. Built with Tauri + React for a small footprint (~3–7MB vs Electron's 150MB+).
+> Lightweight screen recorder with circular webcam PiP, whiteboard, and live meeting. Built with Electron + React.  
+> 轻量级录屏 + 圆形摄像头画中画 + 白板 + 在线会议。基于 Electron + React 构建。
 
-## Run
+---
+
+## 中文
+
+### 我们为什么要做这个软件
+
+在远程协作和内容创作中，我们常常需要同时展示屏幕、摄像头和手绘思路，但现有工具要么功能割裂，要么体积臃肿、体验卡顿。**DreamWorks** 希望把录屏、画中画、白板和在线会议整合进一个应用，让演示和会议更顺畅、更专注。
+
+**DreamWorks 能帮你：**
+
+- 一键录屏 + 摄像头画中画，无需切换多个软件
+- 用白板实时画图、标注，配合屏幕共享讲清楚想法
+- 在**同一局域网**内发起免费会议，无需依赖云服务
+- 导出 WebM / MP4，方便分享和存档
+
+### 核心优势
+
+**丝滑体验**
+
+- 界面简洁，操作路径短：屏幕 → 摄像头 → 录制，三步即可开始
+- 白板、录屏、会议在同一窗口内切换，减少打断感
+- 圆形画中画可拖拽定位，适配不同演示场景
+
+**Mac 系统兼容性**
+
+DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
+
+
+| 系统版本                       | 支持情况  |
+| -------------------------- | ----- |
+| **macOS 11 (Big Sur)**     | ✅ 支持  |
+| **macOS 12 (Monterey)**    | ✅ 支持  |
+| **macOS 13 (Ventura)**     | ✅ 支持  |
+| **macOS 14 (Sonoma)**      | ✅ 支持  |
+| **macOS 15 (Sequoia)**     | ✅ 支持  |
+| macOS 10.15 (Catalina) 及更早 | ❌ 不支持 |
+
+
+支持 **Intel** 与 **Apple Silicon (M1/M2/M3)** 架构。
+
+### 功能概览
+
+1. **Capture Screen** — 系统选择器选择屏幕、窗口或应用
+2. **Start Camera** — 圆形画中画，可拖拽调整位置
+3. **Whiteboard** — Excalidraw 白板，支持绘图、标注
+4. **Live Meeting** — WebRTC 视频会议，支持聊天、屏幕共享、录制、虚拟背景、实时转录
+5. **Record** — 录制屏幕 + 摄像头合成画面，支持保存 WebM / MP4
+
+### 本地使用指南
+
+**环境要求**：Node.js 18+，npm 或 yarn
+
+**安装与运行：**
 
 ```bash
+git clone https://github.com/Funghi88/DreamWorks.git
+cd DreamWorks
 npm install
-npm run tauri dev
-```
-
-To test in a regular browser (helps isolate Tauri/WebView issues):
-```bash
-npm run dev:web
-```
-Then open http://localhost:5173 (uses port 5173 so it doesn't conflict with `npm run tauri dev` on 1420)
-
-**Live Meeting** (requires signaling server):
-```bash
-# Terminal 1 - Start signaling server
-npm run signaling
-
-# Terminal 2 - Start app
-npm run tauri dev
-```
-
-In production (desktop + web), the app connects to a deployed signaling server. Deploy via Render Blueprint (see Deploy to Web) — it runs both the app and signaling server.
-
-**Test Live Meeting with multiple users** (dev mode):
-```bash
-# Terminal 1
-npm run signaling
-
-# Terminal 2 - Use browser for easy multi-tab testing
 npm run dev
 ```
-Then open http://localhost:1420 in **2+ browser tabs** (or windows). In each tab:
-1. Enter a different name (e.g. "Alice", "Bob")
-2. Use the same Room ID (copy from first tab, or both click "New" and paste one ID)
-3. Click Join Meeting
 
-You can also use an incognito/private window, or a different browser (Chrome + Safari) for separate camera/mic sessions.
+应用会在 Electron 窗口中打开。
 
-## Build .app / .dmg (macOS)
+**仅 Web 模式（无 Electron）：** `npm run dev:web`，然后访问 [http://localhost:5173](http://localhost:5173)
+
+**Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
+
+**构建 macOS 应用：** `npm run build` 后 `npm run electron`。打包可配置 electron-builder，输出至 `dist/` 和 `release/`。
+
+### 截图
+
+| 主界面 | Live Meeting | 录制与导出 |
+|--------|--------------|------------|
+| ![主界面](docs/screenshots/main.png) | ![Live Meeting](docs/screenshots/live-meeting.png) | ![录制与导出](docs/screenshots/recording.png) |
+| 录屏 + 画中画 + 白板 | 视频会议界面（Local 模式） | 录制控制与导出 |
+
+
+### 项目进展
+
+**Live Meeting 功能状态：** 加入/创建房间 ✅、音视频通话 ✅、屏幕共享 ✅、文字聊天 ✅、会议内录制 ✅、虚拟背景 ✅、实时转录 ✅、**局域网模式（同一 Wi-Fi 免费会议）** ✅（Electron 内置信令）
+
+### 未来规划
+
+**核心方向：局域网免费会议** — 在同一局域网下（如不同办公楼但同一 Wi-Fi）实现完全免费的线上会议。Electron 内置信令服务，主机创建房间后分享地址，参与者通过局域网地址加入。无需云服务器、无订阅费用、低延迟、数据不出内网。
+
+**其他规划：** 白板与会议协作整合、录制导出优化、Windows/Linux 支持。
+
+### 故障排除
+
+**Capture Screen 在 macOS 上无效：** 开发时在 **系统设置 → 隐私与安全性 → 屏幕录制** 中为 **Electron** 授权；打包应用则为 **DreamWorks** 授权。
+
+---
+
+### Why We Built DreamWorks
+
+Remote collaboration and content creation often require showing your screen, camera, and hand-drawn ideas at once. Most tools either split these into separate apps or feel heavy and sluggish. **DreamWorks** brings screen capture, PiP webcam, whiteboard, and live meeting into one app—so you can present and meet without juggling windows.
+
+**What DreamWorks does for you:**
+
+- One-click screen recording with circular webcam overlay—no app switching
+- Real-time whiteboard for sketching and annotating alongside screen share
+- **Free meetings over the same LAN**—no cloud dependency
+- Export to WebM or MP4 for sharing and archiving
+
+### Core Advantages
+
+**Smooth experience**
+
+- Minimal UI with a short flow: Screen → Camera → Record
+- Whiteboard, recording, and meeting live in one window—fewer context switches
+- Draggable circular PiP that fits any layout
+
+**macOS compatibility**
+
+DreamWorks is built on **Electron 33** and supports:
+
+
+| macOS version                      | Support |
+| ---------------------------------- | ------- |
+| **macOS 11 (Big Sur)**             | ✅       |
+| **macOS 12 (Monterey)**            | ✅       |
+| **macOS 13 (Ventura)**             | ✅       |
+| **macOS 14 (Sonoma)**              | ✅       |
+| **macOS 15 (Sequoia)**             | ✅       |
+| macOS 10.15 (Catalina) and earlier | ❌       |
+
+
+Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
+
+### Features
+
+1. **Capture Screen** — System picker for screen, window, or app
+2. **Start Camera** — Circular PiP, draggable
+3. **Whiteboard** — Excalidraw overlay for drawing and annotation
+4. **Live Meeting** — WebRTC video calls with chat, screen share, recording, virtual backgrounds, live transcription
+5. **Record** — Composite screen + webcam; save as WebM or MP4
+
+### Local setup
+
+**Requirements:** Node.js 18+, npm or yarn
+
+**Install and run:**
 
 ```bash
-npm run tauri build
+git clone https://github.com/Funghi88/DreamWorks.git
+cd DreamWorks
+npm install
+npm run dev
 ```
 
-Output in `src-tauri/target/release/bundle/`:
-- **DreamWork.app** — Double-click to run
-- **DreamWork.dmg** — Installer
+The app opens in an Electron window.
 
-### Auto-updates
+**Web-only (no Electron):** Run `npm run dev:web`, then open [http://localhost:5173](http://localhost:5173)
 
-The app checks for updates on startup and installs + relaunches automatically. **One-time setup:**
+**Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
 
-1. Run `npm run tauri signer generate -- -w keys/dreamwork.key` (prompts for password), then `npm run setup-updater` — updates config with your public key
-2. Add these GitHub Secrets (Settings → Secrets → Actions):
-   - `TAURI_SIGNING_PRIVATE_KEY` — contents of `keys/dreamwork.key`
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSPHRASE` — the password you set when generating the key
-   - `VITE_SIGNALING_URL` — (optional) signaling server URL for Live Meeting; defaults to `https://dreamwork-signaling.onrender.com` if unset
-   - **macOS notarization** (optional, for installs without Gatekeeper warning): `APPLE_ID`, `APPLE_PASSWORD` (app-specific password from appleid.apple.com), `APPLE_TEAM_ID`
-3. Update `repository` in `package.json` if your repo is elsewhere (e.g. `"repository": "github.com/your-username/dreamwork"`)
-4. Release: push to the `release` branch, or create a tag (e.g. `git tag v0.1.0 && git push --tags`). Ensure `version` in `src-tauri/tauri.conf.json` matches the tag
+**Build for macOS:** Run `npm run build` then `npm run electron`. For installers, add electron-builder; output goes to `dist/` and `release/`.
 
-### How updates work
+### Screenshots
 
-- **Desktop app:** Run `npm run tauri build` locally to produce a new `.app`/`.dmg` (macOS) or `.exe` (Windows) with the latest features. Users with auto-updates enabled get new versions when you push releases to GitHub.
-- **Web (dreamwork.onrender.com):** Render deploys from your GitHub repo. It typically redeploys on each push to the connected branch. GitHub Actions passing is not required for the web deploy — Render builds from the repo directly.
-- **GitHub Actions:** The release workflow builds desktop installers for macOS, Linux, and Windows. If the Windows job fails (e.g. exit code 1), check the Actions logs. Common causes: missing `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSPHRASE` secrets, or MSVC toolchain issues on the runner.
+| Main UI | Live Meeting | Recording & Export |
+|---------|--------------|--------------------|
+| ![Main UI](docs/screenshots/main.png) | ![Live Meeting](docs/screenshots/live-meeting.png) | ![Recording](docs/screenshots/recording.png) |
+| Screen + PiP + Whiteboard | Video meeting (Local mode) | Recording controls and export |
 
-## Features
 
-1. **Capture Screen** — System picker to choose screen, window, or app to share
-2. **Start Camera** — Webcam with circular PiP; drag to reposition
-3. **Avatar** — Size, shape (circle/rounded), decor (simple/glow/dashed), or use an image
-4. **Audio** — Mic and system audio with volume sliders
-5. **Whiteboard** — Excalidraw overlay for drawing
-6. **Live Meeting** — WebRTC video conferencing with chat, screen share, recording, virtual backgrounds, live transcription (run `npm run signaling` first)
-7. **Record** — Records screen + webcam composite; Save or Copy when done
+### Project status
 
-## Troubleshooting
+**Live Meeting:** Join/create room ✅, audio/video ✅, screen share ✅, chat ✅, in-call recording ✅, virtual backgrounds ✅, live transcription ✅, **LAN mode (free same-WiFi meetings)** ✅ (embedded signaling in Electron)
 
-**"Apple cannot verify" / Gatekeeper blocks install on Mac?** Two options: (1) **Notarize** — add `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` to GitHub Secrets (requires [Apple Developer](https://developer.apple.com) $99/yr). (2) **Workaround** — right-click the app → Open → Open. Or: System Settings → Privacy & Security → scroll to the app → click "Open Anyway".
+### Roadmap
 
-**Camera not showing in full-page whiteboard?** Try running in a regular browser first (`npm run dev` → http://localhost:1420). If it works there but not in Tauri, it may be a WebView limitation on macOS. Start the camera before opening full-page whiteboard.
+**Focus: free LAN meetings** — Run meetings over the same local network (e.g. different floors or buildings on the same Wi-Fi) with no cloud. The Electron app embeds a signaling server; the host creates a room and shares the URL; participants join via the LAN address. No cloud server, no subscription, low latency, data stays on your network.
 
-## Deploy to Web (Render)
+**Planned:** Deeper whiteboard–meeting integration, recording/export improvements, Windows and Linux support.
 
-Deploy the web version to [Render](https://render.com):
+### Troubleshooting
 
-1. Push this repo to GitHub
-2. Go to [Render Dashboard](https://dashboard.render.com) → **New** → **Static Site**
-3. Connect your GitHub repo
-4. Use the `render.yaml` in the repo, or set manually:
-   - **Build command:** `npm install && npm run build`
-   - **Publish directory:** `dist`
-5. Deploy
+**Capture Screen not working on macOS:** When developing with `npm run dev`, the process runs as **Electron**. Add **Electron** under System Settings → Privacy & Security → Screen Recording. For the built app, add **DreamWorks** instead.
 
-The `render.yaml` in the repo configures this automatically when you use **Blueprint** (New → Blueprint).
+---
 
-**Note:** Screen capture, camera, and recording work in the browser. Live Meeting requires a separate signaling server. Some Tauri-specific features (e.g. auto-updates) are desktop-only.
+## Tech stack
 
-**Live Meeting not working on Render?** (1) Ensure both Blueprint services are deployed: `dreamwork` (static site) and `dreamwork-signaling` (WebSocket server). (2) If you see "Signaling server not reachable", the app could not reach `/health`—check that `dreamwork-signaling` is running in your Render dashboard and note its URL. (3) If your signaling server has a different URL, open the app with `?signaling=YOUR_FULL_URL` (e.g. `https://dreamwork.onrender.com?signaling=https://dreamwork-signaling.onrender.com`). (4) On free tier, the signaling server sleeps after ~15 min—first connection can take 30–60s. Use [UptimeRobot](https://uptimerobot.com) pinging `https://YOUR-SIGNALING-URL/health` every 10 min to keep it awake.
+- **Electron** — Desktop framework
+- **React + TypeScript + Vite** — Frontend
+- **Tailwind CSS v4 + Shadcn/UI** — Styling and components
+- **getDisplayMedia + getUserMedia + MediaRecorder + Canvas 2D** — Media and recording
 
-## Tech
+---
 
-- Tauri 2 (Rust + WebView)
-- React + TypeScript + Vite
-- Tailwind CSS v4 + Shadcn/UI
-- `getDisplayMedia` + `getUserMedia` + `MediaRecorder` + Canvas 2D
+## Related docs
+
+- [Tauri vs Electron comparison](docs/TAURI_VS_ELECTRON.md) — Framework comparison (Chinese)
+

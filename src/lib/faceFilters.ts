@@ -9,21 +9,17 @@ const MODEL_URL =
 const WASM_URL =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm";
 
-// MediaPipe face mesh indices (478 landmarks)
-const LEFT_EYE = [33, 133, 160, 159, 158, 157, 173];
-const RIGHT_EYE = [362, 263, 249, 390, 373, 374, 380];
+const LEFT_EYE = [263, 249, 390, 373, 374, 380, 381, 382, 362];
+const RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133];
 const NOSE_TIP = 4;
 const FOREHEAD = 10;
-const UPPER_LIP = [13, 14];
+// Mouth: 61/291 inner lip; 13/14 outer. 478 model may differ. Use chin (152) + nose for mouth center fallback
 const MOUTH_LEFT = 61;
 const MOUTH_RIGHT = 291;
-const FACE_LEFT = 234;
-const FACE_RIGHT = 454;
-
+const CHIN = 152;
 let faceLandmarker: FaceLandmarker | null = null;
 let lastVideoTs = 0;
 
-/** Returns strictly increasing timestamp (ms) for detectForVideo. Module-level so it survives remounts. */
 export function nextVideoTimestamp(): number {
   const ts = Math.round(performance.now());
   if (ts <= lastVideoTs) lastVideoTs += 1;
@@ -70,20 +66,11 @@ function scaleToRect(
   };
 }
 
-export type FaceFilterType =
-  | "none"
-  | "glasses"
-  | "heart"
-  | "star"
-  | "mustache"
-  | "cat"
-  | "panda"
-  | "vampire"
-  | "fairy";
+export type FaceFilterType = "none" | "sunglasses" | "vampire" | "heart";
 
 export function drawFaceFilter(
   ctx: CanvasRenderingContext2D,
-  landmarks: NormalizedLandmark[],
+  landmarks: NormalizedLandmark[] | null,
   filter: FaceFilterType,
   x: number,
   y: number,
@@ -110,71 +97,34 @@ export function drawFaceFilter(
     w,
     h
   );
-  const upperLip = scaleToRect(centerOf(landmarks, UPPER_LIP), x, y, w, h);
-  const mouthLeft = scaleToRect(
-    { x: safe(MOUTH_LEFT).x, y: safe(MOUTH_LEFT).y },
-    x,
-    y,
-    w,
-    h
-  );
-  const mouthRight = scaleToRect(
-    { x: safe(MOUTH_RIGHT).x, y: safe(MOUTH_RIGHT).y },
-    x,
-    y,
-    w,
-    h
-  );
-  const faceLeft = scaleToRect(
-    { x: safe(FACE_LEFT).x, y: safe(FACE_LEFT).y },
-    x,
-    y,
-    w,
-    h
-  );
-  const faceRight = scaleToRect(
-    { x: safe(FACE_RIGHT).x, y: safe(FACE_RIGHT).y },
-    x,
-    y,
-    w,
-    h
-  );
-  // Derive temple positions from known-good landmarks (avoids wrong indices)
-  const leftTemple = {
-    x: (forehead.x + faceLeft.x) / 2,
-    y: (forehead.y + faceLeft.y) / 2,
-  };
-  const rightTemple = {
-    x: (forehead.x + faceRight.x) / 2,
-    y: (forehead.y + faceRight.y) / 2,
-  };
 
   const eyeDist = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
-  const scale = eyeDist * 0.8;
+  const scale = eyeDist * 1.0;
   const cx = (leftEye.x + rightEye.x) / 2;
   const cy = (leftEye.y + rightEye.y) / 2;
-
-  // Face angle from eye line - rotate filter to follow head tilt
   const faceAngle = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x);
 
   ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(faceAngle);
-  ctx.translate(-cx, -cy);
+  if (filter !== "heart") {
+    ctx.translate(cx, cy);
+    ctx.rotate(faceAngle);
+    ctx.translate(-cx, -cy);
+  }
 
-  if (filter === "glasses") {
-    const glassW = eyeDist * 1.4;
-    const glassH = scale * 0.6;
-    const bridgeW = eyeDist * 0.15;
-    const cx = (leftEye.x + rightEye.x) / 2;
-    const cy = (leftEye.y + rightEye.y) / 2;
-
-    // Frame (dark)
+  if (filter === "sunglasses") {
+    // Slightly rounder (less oval), keep horizontal
+    const glassW = eyeDist * 1.5;
+    const glassH = eyeDist * 0.65;
+    const bridgeW = eyeDist * 0.18;
     ctx.strokeStyle = "#1a1a1a";
     ctx.lineWidth = Math.max(2, scale * 0.06);
     ctx.fillStyle = "rgba(0,0,0,0.35)";
 
-    // Left lens
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, -1);
+    ctx.translate(-cx, -cy);
+
     ctx.beginPath();
     ctx.ellipse(
       cx - glassW / 2 - bridgeW / 2,
@@ -188,7 +138,6 @@ export function drawFaceFilter(
     ctx.fill();
     ctx.stroke();
 
-    // Right lens
     ctx.beginPath();
     ctx.ellipse(
       cx + glassW / 2 + bridgeW / 2,
@@ -202,126 +151,39 @@ export function drawFaceFilter(
     ctx.fill();
     ctx.stroke();
 
-    // Bridge
     ctx.beginPath();
     ctx.moveTo(cx - bridgeW / 2, cy - glassH * 0.3);
     ctx.lineTo(cx + bridgeW / 2, cy - glassH * 0.3);
     ctx.stroke();
-  } else if (filter === "mustache") {
-    const mw = Math.hypot(mouthRight.x - mouthLeft.x, mouthRight.y - mouthLeft.y) * 1.2;
-    const my = (upperLip.y + nose.y) / 2;
-    const mx = (mouthLeft.x + mouthRight.x) / 2;
 
-    ctx.strokeStyle = "#2c1810";
-    ctx.fillStyle = "#3d2318";
-    ctx.lineWidth = Math.max(1, scale * 0.03);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-
-    ctx.beginPath();
-    ctx.moveTo(mx - mw / 2, my);
-    ctx.quadraticCurveTo(mx - mw / 4, my + mw * 0.15, mx, my + mw * 0.08);
-    ctx.quadraticCurveTo(mx + mw / 4, my + mw * 0.15, mx + mw / 2, my);
-    ctx.stroke();
-    ctx.fill();
+    ctx.restore();
   } else if (filter === "heart") {
-    const cx = (leftEye.x + rightEye.x) / 2;
-    const cy = (nose.y + forehead.y) / 2;
-    const s = scale * 0.4;
-    ctx.fillStyle = "#e74c3c";
-    ctx.beginPath();
-    ctx.moveTo(cx, cy + s * 0.3);
-    ctx.bezierCurveTo(cx - s, cy - s * 0.5, cx - s * 1.5, cy + s * 0.5, cx, cy + s * 1.2);
-    ctx.bezierCurveTo(cx + s * 1.5, cy + s * 0.5, cx + s, cy - s * 0.5, cx, cy + s * 0.3);
-    ctx.fill();
-  } else if (filter === "star") {
-    const cx = (leftEye.x + rightEye.x) / 2;
-    const cy = forehead.y - scale * 0.2;
-    const r = scale * 0.4;
-    ctx.fillStyle = "#f39c12";
-    ctx.beginPath();
-    for (let i = 0; i < 5; i++) {
-      const a = (i * 4 * Math.PI) / 5 - Math.PI / 2;
-      const px = cx + r * Math.cos(a);
-      const py = cy + r * Math.sin(a);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.fill();
-  } else if (filter === "cat") {
-    const earH = scale * 1.1;
-    const leftX = (forehead.x + leftTemple.x) / 2 - scale * 0.2;
-    const rightX = (forehead.x + rightTemple.x) / 2 + scale * 0.2;
-    const earY = forehead.y - scale * 0.15;
-    ctx.fillStyle = "#FFB6C1";
-    ctx.strokeStyle = "#333";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(leftX, earY + earH * 0.4);
-    ctx.lineTo(leftX - scale * 0.4, earY);
-    ctx.lineTo(leftX, earY + earH * 0.2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(rightX, earY + earH * 0.4);
-    ctx.lineTo(rightX + scale * 0.4, earY);
-    ctx.lineTo(rightX, earY + earH * 0.2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  } else if (filter === "panda") {
-    const earR = scale * 0.5;
-    const leftX = (forehead.x + faceLeft.x) / 2 - earR * 0.5;
-    const rightX = (forehead.x + faceRight.x) / 2 + earR * 0.5;
-    const earY = forehead.y - scale * 0.1;
-    ctx.fillStyle = "#1a1a1a";
-    ctx.beginPath();
-    ctx.arc(leftX, earY, earR, 0, Math.PI * 2);
-    ctx.arc(rightX, earY, earR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#1a1a1a";
-    ctx.beginPath();
-    ctx.ellipse(leftEye.x - scale * 0.15, leftEye.y, scale * 0.35, scale * 0.45, 0, 0, Math.PI * 2);
-    ctx.ellipse(rightEye.x + scale * 0.15, rightEye.y, scale * 0.35, scale * 0.45, 0, 0, Math.PI * 2);
-    ctx.fill();
+    const heartPos = scaleToRect(
+      { x: (safe(NOSE_TIP).x + safe(CHIN).x) / 2, y: Math.min(0.92, safe(CHIN).y + 0.26) },
+      x, y, w, h
+    );
+    const hx = heartPos.x;
+    const hy = heartPos.y;
+    const size = scale * 1.4;
+    ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🩷", hx, hy);
   } else if (filter === "vampire") {
-    const fangY = (upperLip.y + mouthLeft.y) / 2;
-    ctx.fillStyle = "#fff";
-    ctx.strokeStyle = "#ccc";
-    ctx.beginPath();
-    ctx.moveTo(cx - scale * 0.25, fangY);
-    ctx.lineTo(cx - scale * 0.2, fangY + scale * 0.25);
-    ctx.lineTo(cx - scale * 0.15, fangY);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(cx + scale * 0.15, fangY);
-    ctx.lineTo(cx + scale * 0.2, fangY + scale * 0.25);
-    ctx.lineTo(cx + scale * 0.25, fangY);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  } else if (filter === "fairy") {
-    const wingW = scale * 0.8;
-    const wingY = cy;
-    ctx.strokeStyle = "rgba(255,182,193,0.8)";
-    ctx.fillStyle = "rgba(255,182,193,0.3)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(cx - scale * 1.2, wingY, wingW, scale * 0.5, 0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.ellipse(cx + scale * 1.2, wingY, wingW, scale * 0.5, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#FFD700";
-    ctx.beginPath();
-    ctx.arc(cx, forehead.y - scale * 0.4, scale * 0.15, 0, Math.PI * 2);
-    ctx.fill();
+    // User's right = left in mirrored view → smaller x
+    const lbPos = scaleToRect(
+      { x: safe(CHIN).x - 0.08, y: safe(CHIN).y },
+      x, y, w, h
+    );
+    const size = scale * 0.5;
+    ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.save();
+    ctx.translate(lbPos.x, lbPos.y);
+    ctx.rotate(Math.PI); // head up (头朝上)
+    ctx.fillText("🐞", 0, 0);
+    ctx.restore();
   }
 
   ctx.restore();

@@ -3,11 +3,9 @@ import { Monitor } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { ResizeHandle } from "./ResizeHandle";
 import { SettingsPanel } from "./SettingsPanel";
+import { ExcalidrawBoard } from "./ExcalidrawBoard";
 import type { AvatarShape, AvatarDecor } from "./SettingsPanel";
-import type { FaceFilterType } from "@/lib/faceFilters";
-import type { RecordResolution } from "@/lib/storage";
-import type { BeautySettings } from "@/lib/beautyEffects";
-
+import type { RecordResolution, LetterboxBackground } from "@/lib/storage";
 interface SidebarProps {
   whiteboardHeight: number;
   onWhiteboardHeightChange: (h: number) => void;
@@ -26,12 +24,6 @@ interface SidebarProps {
   onAvatarDecorChange: (v: AvatarDecor) => void;
   glowColor: string;
   onGlowColorChange: (v: string) => void;
-  beautyMode: boolean;
-  onBeautyModeChange: (v: boolean) => void;
-  beautySettings: BeautySettings;
-  onBeautySettingsChange: (s: BeautySettings) => void;
-  faceFilter: FaceFilterType;
-  onFaceFilterChange: (v: FaceFilterType) => void;
   avatarImageSrc: string | null;
   onUseImage: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onClearImage: () => void;
@@ -41,6 +33,16 @@ interface SidebarProps {
   onSystemVolumeChange: (v: number) => void;
   recordResolution?: RecordResolution;
   onRecordResolutionChange?: (v: RecordResolution) => void;
+  letterboxBackground?: LetterboxBackground;
+  onLetterboxBackgroundChange?: (v: LetterboxBackground) => void;
+  letterboxCustomImage?: string | null;
+  onLetterboxCustomImageChange?: (v: string | null) => void;
+  beautyMode?: boolean;
+  onBeautyModeChange?: (v: boolean) => void;
+  beautySettings?: import("@/lib/beautyEffects").BeautySettings;
+  onBeautySettingsChange?: (v: import("@/lib/beautyEffects").BeautySettings) => void;
+  faceFilter?: import("@/lib/faceFilters").FaceFilterType;
+  onFaceFilterChange?: (v: import("@/lib/faceFilters").FaceFilterType) => void;
   onResetSettings?: () => void;
   onScrollToPreview?: () => void;
 }
@@ -71,7 +73,10 @@ export function Sidebar({
           <GlassButton
             variant={showWhiteboard ? "primary" : "secondary"}
             size="sm"
-            onClick={showWhiteboard ? onCloseWhiteboard : onOpenWhiteboardRequest}
+            onClick={() => {
+              if (showWhiteboard) onCloseWhiteboard();
+              else onOpenWhiteboardRequest();
+            }}
           >
             {showWhiteboard ? "Close" : "Open"}
           </GlassButton>
@@ -79,11 +84,7 @@ export function Sidebar({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {showWhiteboard && !whiteboardInPreview ? (
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg">
-              <iframe
-                src="https://excalidraw.com"
-                title="Excalidraw"
-                className="absolute inset-0 h-full w-full border-0"
-              />
+              <ExcalidrawBoard />
             </div>
           ) : showWhiteboard && whiteboardInPreview ? (
             <div className="flex min-h-[80px] flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-white/20 p-4">
@@ -150,21 +151,25 @@ export function Sidebar({
                 onAvatarDecorChange={settingsProps.onAvatarDecorChange}
                 glowColor={settingsProps.glowColor}
                 onGlowColorChange={settingsProps.onGlowColorChange}
+                avatarImageSrc={settingsProps.avatarImageSrc}
+                onUseImage={settingsProps.onUseImage}
+                onClearImage={settingsProps.onClearImage}
                 beautyMode={settingsProps.beautyMode}
                 onBeautyModeChange={settingsProps.onBeautyModeChange}
                 beautySettings={settingsProps.beautySettings}
                 onBeautySettingsChange={settingsProps.onBeautySettingsChange}
                 faceFilter={settingsProps.faceFilter}
                 onFaceFilterChange={settingsProps.onFaceFilterChange}
-                avatarImageSrc={settingsProps.avatarImageSrc}
-                onUseImage={settingsProps.onUseImage}
-                onClearImage={settingsProps.onClearImage}
                 micVolume={settingsProps.micVolume}
                 onMicVolumeChange={settingsProps.onMicVolumeChange}
                 systemVolume={settingsProps.systemVolume}
                 onSystemVolumeChange={settingsProps.onSystemVolumeChange}
                 recordResolution={settingsProps.recordResolution}
                 onRecordResolutionChange={settingsProps.onRecordResolutionChange}
+                letterboxBackground={settingsProps.letterboxBackground}
+                onLetterboxBackgroundChange={settingsProps.onLetterboxBackgroundChange}
+                letterboxCustomImage={settingsProps.letterboxCustomImage}
+                onLetterboxCustomImageChange={settingsProps.onLetterboxCustomImageChange}
               />
             )}
             {!showPip && (
