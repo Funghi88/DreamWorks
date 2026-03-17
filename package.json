@@ -13,6 +13,8 @@
     "preview": "vite preview",
     "electron": "electron .",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
     "signaling": "npx tsx server/signaling-server.ts",
     "create-app-icon": "node scripts/create-app-icon.js"
   },
@@ -24,7 +26,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
-    "electron": "^33.0.0",
     "express": "^4.21.0",
     "framer-motion": "^12.35.0",
     "lucide-react": "^0.577.0",
@@ -44,6 +45,8 @@
     "concurrently": "^9.0.0",
     "postcss": "^8.5.8",
     "shadcn": "^3.8.5",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
     "sharp": "^0.34.5",
     "tailwindcss": "^4.2.1",
     "tsx": "^4.19.0",
@@ -51,5 +54,17 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.funghi88.dreamworks",
+    "productName": "DreamWorks",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "electron/icon.png",
+      "target": ["dmg", "zip"]
+    },
+    "directories": {
+      "output": "release"
+    }
   }
 }

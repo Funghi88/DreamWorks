@@ -14,8 +14,6 @@ const RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133];
 const NOSE_TIP = 4;
 const FOREHEAD = 10;
 // Mouth: 61/291 inner lip; 13/14 outer. 478 model may differ. Use chin (152) + nose for mouth center fallback
-const MOUTH_LEFT = 61;
-const MOUTH_RIGHT = 291;
 const CHIN = 152;
 let faceLandmarker: FaceLandmarker | null = null;
 let lastVideoTs = 0;
@@ -83,14 +81,14 @@ export function drawFaceFilter(
   const safe = (i: number) => landmarks[i] ?? { x: 0.5, y: 0.5 };
   const leftEye = scaleToRect(centerOf(landmarks, LEFT_EYE), x, y, w, h);
   const rightEye = scaleToRect(centerOf(landmarks, RIGHT_EYE), x, y, w, h);
-  const nose = scaleToRect(
+  scaleToRect(
     { x: safe(NOSE_TIP).x, y: safe(NOSE_TIP).y },
     x,
     y,
     w,
     h
   );
-  const forehead = scaleToRect(
+  scaleToRect(
     { x: safe(FOREHEAD).x, y: safe(FOREHEAD).y },
     x,
     y,

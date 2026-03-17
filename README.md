@@ -70,7 +70,9 @@ npm run dev
 
 **Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
 
-**构建 macOS 应用：** `npm run build` 后 `npm run electron`。打包可配置 electron-builder，输出至 `dist/` 和 `release/`。
+**构建 macOS 应用：**
+- `npm run pack` — 生成 `.app`，输出至 `release/mac-arm64/DreamWorks.app`（可直接双击运行）
+- `npm run dist` — 生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`
 
 ### 截图
 
@@ -159,7 +161,9 @@ The app opens in an Electron window.
 
 **Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
 
-**Build for macOS:** Run `npm run build` then `npm run electron`. For installers, add electron-builder; output goes to `dist/` and `release/`.
+**Build for macOS:**
+- `npm run pack` — Produces `.app` in `release/mac-arm64/DreamWorks.app` (double-click to run)
+- `npm run dist` — Produces `.dmg` and `.zip` installers in `release/`
 
 ### Screenshots
 
