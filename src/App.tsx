@@ -10,6 +10,7 @@ import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
 import type { AvatarDecor, AvatarShape } from "@/components/SettingsPanel";
 import { beautySettingsToFilter, presets } from "@/lib/beautyEffects";
 import { loadSettings, loadSettingsAsync, saveSettings, type RecordResolution, type LetterboxBackground } from "@/lib/storage";
+import { captureFrame, getCaptureFilename, scaleTo2KAndBlob, type CapturePresetId, type CaptureModeId } from "@/lib/capture";
 import {
   initFaceLandmarker,
   nextVideoTimestamp,
@@ -756,7 +757,7 @@ export default function App() {
   const avatarHeightDisplay = avatarSizeDisplay;
 
   const drawComposite = useCallback(
-    (forceRecordRes = false) => {
+    (forceRecordRes = false, overrideRes?: { w: number; h: number }) => {
       const screenVideo = persistentScreenVideoRef.current;
       const cameraVideoMain = cameraVideoRef.current;
       const cameraVideoSource = cameraSourceVideoRef.current;
@@ -785,7 +786,10 @@ export default function App() {
       if (prevW <= 0 || prevH <= 0) return;
       // Skip camera during layout transition when preview is collapsed (avoids wrong scale/position)
       const previewStable = prevW >= 50 && prevH >= 50;
-      const res = RECORD_RESOLUTIONS[recordResolution] ?? RECORD_RESOLUTIONS["1080p"];
+      const res: { w: number; h: number } =
+        (forceRecordRes && overrideRes) ||
+        RECORD_RESOLUTIONS[recordResolution] ||
+        RECORD_RESOLUTIONS["1080p"];
       const useRecordRes = forceRecordRes || isRecording;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const w = useRecordRes ? res.w : Math.round(prevW * dpr);
@@ -1617,6 +1621,38 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const CAPTURE_RESOLUTION = { w: 2560, h: 1440 };
+  const captureScreenshot = useCallback(
+    async (presetId: CapturePresetId | CaptureModeId) => {
+      try {
+        const composite = compositeRef.current;
+        if (!composite) return;
+        drawCompositeRef.current?.(true, CAPTURE_RESOLUTION);
+        drawCompositeRef.current?.(true, CAPTURE_RESOLUTION);
+        let blob: Blob;
+        let downloadName: string;
+        if (presetId === "preview") {
+          const result = await scaleTo2KAndBlob(composite);
+          blob = result.blob;
+          downloadName = `dreamwork-preview-${result.w}x${result.h}-${Date.now()}.png`;
+        } else {
+          blob = await captureFrame(composite, presetId as CapturePresetId);
+          downloadName = getCaptureFilename(presetId as CapturePresetId);
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = downloadName;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        if (err instanceof Error && err.name === "NotAllowedError") return;
+        console.error("Capture failed:", err);
+      }
+    },
+    []
+  );
+
   const copyRecording = async (blob: Blob) => {
     try {
       await navigator.clipboard.write([
@@ -1826,15 +1862,15 @@ export default function App() {
         })
         .catch((e) => console.warn("[DreamWork] createCircularIcon failed:", e));
     } else {
-      createCircularIcon("/logo.png", 32)
+      createCircularIcon("./logo.png", 32)
         .then((fav) => {
           setFavicon(fav.dataUrl);
         })
         .catch(() => {
-          setFavicon("/logo.png");
+          setFavicon("./logo.png");
         });
       if (isElectron) {
-        fetch("/logo.png")
+        fetch("./logo.png")
           .then((r) => r.arrayBuffer())
           .then((buf) => {
             const api = (window as unknown as { electronAPI?: { setWindowIcon: (b: ArrayBuffer) => Promise<void> } }).electronAPI;
@@ -2328,7 +2364,7 @@ export default function App() {
         <div className="flex min-w-0 flex-1 items-center gap-4">
             <div className="flex shrink-0 items-center gap-2">
               <img
-                src={avatarImageSrc ?? "/logo.png"}
+                src={avatarImageSrc ?? "./logo.png"}
                 alt="DreamWorks"
                 className={`shrink-0 rounded-full object-cover ring-2 ring-white/30 ${isCompact ? "size-7" : "size-9"}`}
               />
@@ -2362,6 +2398,7 @@ export default function App() {
                 onOpenFullPageWhiteboard={closeFullPageWhiteboard}
                 onOpenLiveMeeting={() => setShowLiveMeetingModal(true)}
                 onToggleTeleprompter={handleToggleTeleprompter}
+                onCaptureScreenshot={captureScreenshot}
                 showWhiteboard={true}
                 showTeleprompter={showTeleprompter}
                 recordingTimeLabel={formatRecordingTime(recordingTime)}
@@ -2651,14 +2688,14 @@ export default function App() {
           isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"
         }`}
       >
-        <div className={`flex min-w-0 flex-1 ${isCompact ? "flex-col gap-2" : "items-center gap-4 flex-nowrap overflow-x-auto"}`}>
-          <div className="flex shrink-0 items-center gap-2 min-w-0">
+        <div className={`flex min-w-0 flex-1 ${isCompact ? "flex-col gap-2" : "flex-wrap items-center gap-3"}`}>
+          <div className="flex shrink-0 items-center gap-2">
               <img
-                src={avatarImageSrc ?? "/logo.png"}
+                src={avatarImageSrc ?? "./logo.png"}
                 alt="DreamWorks"
               className={`shrink-0 rounded-full object-cover ring-2 ring-white/30 ${isCompact ? "size-7" : "size-9"}`}
             />
-              <h1 className={`font-semibold tracking-tight truncate ${isCompact ? "text-sm" : "text-base"}`}>
+              <h1 className={`font-semibold tracking-tight whitespace-nowrap ${isCompact ? "text-sm" : "text-base"}`}>
                 DreamWorks
               </h1>
           </div>
@@ -2673,6 +2710,7 @@ export default function App() {
               onCaptureScreen={captureScreen}
               onStopScreenShare={stopScreenShare}
               onToggleCamera={handleToggleCameraFromControls}
+              onCaptureScreenshot={captureScreenshot}
               onToggleRecord={toggleRecord}
               onPauseRecording={pauseRecording}
               onResumeRecording={resumeRecording}
@@ -2690,7 +2728,7 @@ export default function App() {
             <>
             <div className="h-6 w-px shrink-0 bg-border/60" />
             <div className="flex shrink-0 items-center gap-2">
-              <div className="sector-card flex items-center gap-2 rounded-lg px-3 py-1.5 text-[8px] font-semibold">
+              <div className="sector-card flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[9px] font-semibold whitespace-nowrap">
                 <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
                   {hasScreen ? "✓" : "1."} Screen
                 </span>

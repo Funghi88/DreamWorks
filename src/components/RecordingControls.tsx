@@ -1,5 +1,8 @@
+import { useRef, useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { GlassButton } from "@/components/Glass";
-import { Video } from "lucide-react";
+import { Video, Camera } from "lucide-react";
+import { CAPTURE_MODES, CAPTURE_PRESETS, type CapturePresetId, type CaptureModeId } from "@/lib/capture";
 
 interface RecordingControlsProps {
   hasScreen: boolean;
@@ -18,6 +21,7 @@ interface RecordingControlsProps {
   onOpenLiveMeeting?: () => void;
   onToggleTeleprompter?: () => void;
   onRecoverOverlays?: () => void;
+  onCaptureScreenshot?: (presetId: CapturePresetId | CaptureModeId) => void;
   showWhiteboard: boolean;
   showTeleprompter?: boolean;
   recordingTimeLabel?: string;
@@ -40,15 +44,60 @@ export function RecordingControls({
   onOpenLiveMeeting,
   onToggleTeleprompter,
   onRecoverOverlays,
+  onCaptureScreenshot,
   showWhiteboard,
   showTeleprompter = false,
   recordingTimeLabel = "00:00",
 }: RecordingControlsProps) {
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const captureRef = useRef<HTMLDivElement>(null);
+  const [dropdownRect, setDropdownRect] = useState<{ top: number; left: number } | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [pendingPreset, setPendingPreset] = useState<CapturePresetId | CaptureModeId | null>(null);
+
+  useEffect(() => {
+    if (countdown === null || pendingPreset === null) return;
+    if (countdown <= 0) {
+      onCaptureScreenshot?.(pendingPreset);
+      const t = setTimeout(() => {
+        setPendingPreset(null);
+        setCountdown(null);
+      }, 200);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => setCountdown((c) => (c != null ? c - 1 : null)), 1000);
+    return () => clearTimeout(t);
+  }, [countdown, pendingPreset, onCaptureScreenshot]);
+
+  useEffect(() => {
+    if (!captureOpen || !captureRef.current) return;
+    const btn = captureRef.current.querySelector("button");
+    if (btn) {
+      const r = btn.getBoundingClientRect();
+      setDropdownRect({ top: r.bottom + 4, left: r.left });
+    }
+  }, [captureOpen]);
+
+  useEffect(() => {
+    if (!captureOpen) return;
+    const close = (e: MouseEvent) => {
+      if (captureRef.current && !captureRef.current.contains(e.target as Node)) {
+        const target = e.target as HTMLElement;
+        if (!target.closest?.("[data-capture-dropdown]")) {
+          setCaptureOpen(false);
+        }
+      }
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [captureOpen]);
+
   const recordingCompact = compact && isRecording;
   const showCaptureAndCamera = !compact && !recordingCompact;
   const showCompactCamera = compact;
   const showCompactCapture = compact && !hasScreen;
   const showCompactStopShare = compact && hasScreen && !!onStopScreenShare;
+  const canCapture = !!onCaptureScreenshot;
 
   return (
     <div
@@ -145,6 +194,78 @@ export function RecordingControls({
         <GlassButton variant="secondary" size="sm" onClick={onRecoverOverlays} title="Reopen camera and teleprompter overlays">
           Recover
         </GlassButton>
+      )}
+      {canCapture && (
+        <div ref={captureRef} className="relative">
+          <GlassButton
+            variant="secondary"
+            size="sm"
+            onClick={() => setCaptureOpen((o) => !o)}
+            title="Capture current frame as image"
+          >
+            <Camera className="size-3.5" />
+            {!compact && (
+              <>
+                <span className="ml-1">Capture</span>
+              </>
+            )}
+          </GlassButton>
+          {captureOpen &&
+            dropdownRect &&
+            createPortal(
+              <div
+                data-capture-dropdown
+                className="fixed z-[100000] min-w-[200px] rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
+                style={{ top: dropdownRect.top, left: dropdownRect.left }}
+              >
+                {CAPTURE_MODES.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="w-full px-3 py-2 text-left text-xs text-slate-900 hover:bg-slate-100 font-medium"
+                    onClick={() => {
+                      setCaptureOpen(false);
+                      setPendingPreset(m.id);
+                      setCountdown(3);
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+                <div className="my-1 border-t border-slate-200" />
+                {CAPTURE_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className="w-full px-3 py-2 text-left text-xs text-slate-900 hover:bg-slate-100"
+                    onClick={() => {
+                      setCaptureOpen(false);
+                      setPendingPreset(p.id);
+                      setCountdown(3);
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>,
+              document.body
+            )}
+          {countdown !== null &&
+            countdown >= 0 &&
+            createPortal(
+              <div
+                data-dreamwork-no-intercept
+                className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/30 backdrop-blur-sm"
+              >
+                <div className="rounded-2xl border border-white/30 bg-slate-900/90 px-12 py-8 shadow-2xl backdrop-blur-md">
+                  <span className="font-mono text-6xl font-bold tabular-nums text-white">
+                    {countdown > 0 ? countdown : "📸"}
+                  </span>
+                </div>
+              </div>,
+              document.body
+            )}
+        </div>
       )}
       {!compact && (
         <>
