@@ -98,6 +98,10 @@
         overflow: hidden;
         text-align: center;
         padding: 14px;
+        cursor: grab;
+      }
+      .viewport.scroll-dragging {
+        cursor: grabbing;
       }
       .script {
         white-space: pre-wrap;
@@ -194,10 +198,21 @@
         state.locked = prevLocked;
         applyState();
         if (state.script !== prevScript) {
-          scrollPx = 0;
-          scriptEl.style.transform = "translateY(0px)";
+          // Preserve scroll position when script changes; clamp to max
+          requestAnimationFrame(() => {
+            const maxScroll = Math.max(0, scriptEl.scrollHeight - viewport.clientHeight);
+            scrollPx = Math.min(scrollPx, maxScroll);
+            scriptEl.style.transform = `translateY(${-scrollPx}px)`;
+          });
         } else if (state.playing === false && prevPlaying === true) {
           scriptEl.style.transform = `translateY(${-scrollPx}px)`;
+        } else {
+          // Layout changed (fontSize, etc.): clamp scroll
+          requestAnimationFrame(() => {
+            const maxScroll = Math.max(0, scriptEl.scrollHeight - viewport.clientHeight);
+            scrollPx = Math.min(scrollPx, maxScroll);
+            scriptEl.style.transform = `translateY(${-scrollPx}px)`;
+          });
         }
       };
 
@@ -216,6 +231,33 @@
         requestAnimationFrame(tick);
       }
       requestAnimationFrame(tick);
+
+      // Drag to scroll
+      let scrollDragStartY = 0;
+      viewport.addEventListener("pointerdown", (e) => {
+        if (state.locked) return;
+        e.preventDefault();
+        viewport.classList.add("scroll-dragging");
+        scrollDragStartY = e.clientY;
+        publishControl({ playing: false });
+        const onMove = (ev) => {
+          const delta = scrollDragStartY - ev.clientY;
+          scrollDragStartY = ev.clientY;
+          const maxScroll = Math.max(0, scriptEl.scrollHeight - viewport.clientHeight);
+          scrollPx = Math.max(0, Math.min(scrollPx + delta, maxScroll));
+          scriptEl.style.transform = `translateY(${-scrollPx}px)`;
+        };
+        const onUp = () => {
+          viewport.classList.remove("scroll-dragging");
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+        };
+        if (viewport.setPointerCapture) viewport.setPointerCapture(e.pointerId);
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+      });
     </script>
   </body>
 </html>

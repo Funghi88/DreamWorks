@@ -82,11 +82,25 @@ function getViewportSize() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
+function clampScroll(
+  viewport: HTMLDivElement | null,
+  scrollContent: HTMLDivElement | null,
+  scrollPxRef: { current: number }
+) {
+  if (!viewport || !scrollContent) return;
+  const maxScrollPx = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  scrollPxRef.current = Math.min(scrollPxRef.current, maxScrollPx);
+  scrollContent.style.transform = `translateY(${-scrollPxRef.current}px)`;
+}
+
 function useTeleprompterScroll({
   isVisible,
   isPlaying,
   speed,
   script,
+  fontSize,
+  overlayWidth,
+  overlayHeight,
   onSetPlaying,
   resetSignal,
 }: {
@@ -94,6 +108,9 @@ function useTeleprompterScroll({
   isPlaying: boolean;
   speed: number;
   script: string;
+  fontSize: number;
+  overlayWidth: number;
+  overlayHeight: number;
   onSetPlaying: (playing: boolean) => void;
   resetSignal?: number;
 }) {
@@ -111,12 +128,13 @@ function useTeleprompterScroll({
     }
   }, [resetSignal]);
 
+  // When script or layout (fontSize, size) changes: preserve scroll position, clamp to max
   useEffect(() => {
-    scrollPxRef.current = 0;
-    lastTsRef.current = null;
-    const el = scrollContentRef.current;
-    if (el) el.style.transform = "translateY(0px)";
-  }, [script]);
+    const raf = requestAnimationFrame(() => {
+      clampScroll(viewportRef.current, scrollContentRef.current, scrollPxRef);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [script, fontSize, overlayWidth, overlayHeight]);
 
   useEffect(() => {
     if (!isVisible || !isPlaying) return;
@@ -151,7 +169,16 @@ function useTeleprompterScroll({
     if (el) el.style.transform = "translateY(0px)";
   }, []);
 
-  return { viewportRef, scrollContentRef, reset };
+  const addScrollDelta = useCallback((delta: number) => {
+    const viewport = viewportRef.current;
+    const el = scrollContentRef.current;
+    if (!viewport || !el) return;
+    const maxScrollPx = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    scrollPxRef.current = Math.max(0, Math.min(scrollPxRef.current + delta, maxScrollPx));
+    el.style.transform = `translateY(${-scrollPxRef.current}px)`;
+  }, []);
+
+  return { viewportRef, scrollContentRef, reset, addScrollDelta };
 }
 
 export function TeleprompterOverlay({
@@ -185,14 +212,52 @@ export function TeleprompterOverlay({
   const lastAnchoredPosRef = useRef<{ x: number; y: number } | null>(null);
   const [livePos, setLivePos] = useState<{ x: number; y: number } | null>(null);
 
-  const { viewportRef, scrollContentRef, reset } = useTeleprompterScroll({
+  const { viewportRef, scrollContentRef, reset, addScrollDelta } = useTeleprompterScroll({
     isVisible,
     isPlaying,
     speed,
     script,
+    fontSize,
+    overlayWidth,
+    overlayHeight,
     onSetPlaying,
     resetSignal,
   });
+
+  const scrollDragRef = useRef(false);
+  const scrollDragStartRef = useRef(0);
+  const [isScrollDragging, setIsScrollDragging] = useState(false);
+
+  const onScrollPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (locked) return;
+      e.preventDefault();
+      scrollDragRef.current = true;
+      setIsScrollDragging(true);
+      scrollDragStartRef.current = e.clientY;
+      onSetPlaying(false);
+      const target = e.currentTarget as HTMLElement;
+      if (target.setPointerCapture && e.pointerId != null) target.setPointerCapture(e.pointerId);
+
+      const onMove = (ev: PointerEvent) => {
+        if (!scrollDragRef.current) return;
+        const delta = scrollDragStartRef.current - ev.clientY;
+        scrollDragStartRef.current = ev.clientY;
+        addScrollDelta(delta);
+      };
+      const onUp = () => {
+        scrollDragRef.current = false;
+        setIsScrollDragging(false);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [locked, onSetPlaying, addScrollDelta]
+  );
 
   useEffect(() => {
     if (!isVisible) return;
@@ -351,8 +416,10 @@ export function TeleprompterOverlay({
       <div className="pointer-events-none absolute inset-x-0 top-1/2 h-12 -translate-y-1/2 border-y border-emerald-300/40 bg-emerald-200/10" />
       <div
         ref={viewportRef}
-        className="h-full overflow-hidden px-6 py-7 text-center text-white"
+        className={`h-full overflow-hidden px-6 py-7 text-center text-white ${isScrollDragging ? "cursor-grabbing" : "cursor-grab"}`}
         style={{ clipPath: "inset(32px 0 0 0)" }}
+        onPointerDown={onScrollPointerDown}
+        title="Drag to scroll"
       >
         <div
           ref={scrollContentRef}
@@ -664,7 +731,7 @@ export function TeleprompterPanel({
         <input type="checkbox" checked={nearCamera} onChange={(e) => onSetNearCamera(e.target.checked)} />
         <span>Near camera</span>
       </label>
-      <p className="mt-2 text-[11px] text-white/70">Shortcuts: Space play/pause, Up/Down speed, R reset, H hide</p>
+      <p className="mt-2 text-[11px] text-white/70">Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag content to scroll.</p>
     </div>
   );
 }
