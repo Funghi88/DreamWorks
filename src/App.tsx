@@ -429,7 +429,7 @@ export default function App() {
       : list[0]?.id ?? "default";
     return aid;
   });
-  const [teleprompterSpeed, setTeleprompterSpeed] = useState(() => loadSettings().teleprompterSpeed ?? 42);
+  const [teleprompterSpeed, setTeleprompterSpeed] = useState(() => loadSettings().teleprompterSpeed ?? 30);
   const [teleprompterFontSize, setTeleprompterFontSize] = useState(() => loadSettings().teleprompterFontSize ?? 32);
   const [teleprompterOpacity, setTeleprompterOpacity] = useState(() => loadSettings().teleprompterOpacity ?? 0.68);
   const [teleprompterWidth, setTeleprompterWidth] = useState(() => loadSettings().teleprompterWidth ?? 560);
@@ -822,7 +822,7 @@ export default function App() {
         }
       } else if (payload.type === "teleprompter-control") {
         if (typeof payload.playing === "boolean") setTeleprompterPlaying(payload.playing);
-        if (typeof payload.speed === "number") setTeleprompterSpeed(Math.max(10, Math.min(180, payload.speed)));
+        if (typeof payload.speed === "number") setTeleprompterSpeed(Math.max(10, Math.min(80, payload.speed)));
         if (typeof payload.resetSeq === "number") setTeleprompterResetSeq(payload.resetSeq);
       } else if (payload.type === "teleprompter-close") {
         setShowTeleprompter(false);
@@ -2483,7 +2483,7 @@ export default function App() {
             setShowTeleprompter(false);
             setTeleprompterPlaying(false);
           }}
-          onNudgeSpeed={(delta) => setTeleprompterSpeed((prev) => Math.max(10, Math.min(180, prev + delta)))}
+          onNudgeSpeed={(delta) => setTeleprompterSpeed((prev) => Math.max(10, Math.min(80, prev + delta)))}
         />
         <TeleprompterPanel
           isVisible={showTeleprompter}

@@ -730,9 +730,12 @@ export function TeleprompterPanel({
         placeholder="Paste script here..."
       />
       <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-        <label className="flex flex-col gap-1">
+        <label className="col-span-2 flex flex-col gap-1">
           <span>Speed: {Math.round(speed)} px/s</span>
-          <input type="range" min={10} max={180} step={2} value={speed} onChange={(e) => onSetSpeed(Number(e.target.value))} />
+          <input type="range" min={10} max={80} step={2} value={speed} onChange={(e) => onSetSpeed(Number(e.target.value))} />
+          <span className="text-[10px] text-white/55">
+            Ref: 30–40 news | 40–50 interview | 50–60 casual
+          </span>
         </label>
         <label className="flex flex-col gap-1">
           <span>Font: {Math.round(fontSize)} px</span>

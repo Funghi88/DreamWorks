@@ -209,7 +209,7 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterScript: typeof p.teleprompterScript === "string" ? p.teleprompterScript : undefined,
     teleprompterScripts: validTeleprompterScripts(p.teleprompterScripts),
     activeTeleprompterScriptId: typeof p.activeTeleprompterScriptId === "string" ? p.activeTeleprompterScriptId : undefined,
-    teleprompterSpeed: validNum(p.teleprompterSpeed, 10, 180),
+    teleprompterSpeed: validNum(p.teleprompterSpeed, 10, 80),
     teleprompterFontSize: validNum(p.teleprompterFontSize, 18, 52),
     teleprompterOpacity: typeof p.teleprompterOpacity === "number" && p.teleprompterOpacity >= 0.35 && p.teleprompterOpacity <= 1 ? p.teleprompterOpacity : undefined,
     teleprompterWidth: validNum(p.teleprompterWidth, 320, 900),

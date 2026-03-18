@@ -121,7 +121,7 @@
         <button id="pause">Pause</button>
         <button id="reset">Reset</button>
         <button id="lock" title="Lock teleprompter position">Lock</button>
-        <label>Speed <input id="speed" type="range" min="10" max="180" step="2" value="42" /></label>
+        <label title="Ref: 30-40 news | 40-50 interview | 50-60 casual">Speed <input id="speed" type="range" min="10" max="80" step="2" value="30" /></label>
         <button id="close">Close</button>
       </div>
       <div class="panel" id="panel">
@@ -145,7 +145,7 @@
       const closeBtn = document.getElementById("close");
       const dragBar = document.querySelector(".titlebar");
 
-      let state = { script: "", playing: false, speed: 42, fontSize: 32, opacity: 0.68, resetSeq: 0, locked: false };
+      let state = { script: "", playing: false, speed: 30, fontSize: 32, opacity: 0.68, resetSeq: 0, locked: false };
       let scrollPx = 0;
       let lastTs = 0;
 
@@ -153,7 +153,7 @@
         scriptEl.textContent = state.script || "Teleprompter ready...";
         scriptEl.style.fontSize = `${state.fontSize || 32}px`;
         document.querySelector(".wrap").style.opacity = `${state.opacity ?? 0.68}`;
-        speedEl.value = String(state.speed || 42);
+        speedEl.value = String(state.speed || 30);
         lockBtn.textContent = state.locked ? "Locked" : "Lock";
         lockBtn.title = state.locked ? "Unlock teleprompter position" : "Lock teleprompter position";
         if (dragBar) {
@@ -222,7 +222,7 @@
       function tick(ts) {
         if (state.playing) {
           const dt = lastTs ? (ts - lastTs) / 1000 : 0;
-          scrollPx += (state.speed || 42) * dt;
+          scrollPx += (state.speed || 30) * dt;
           const maxScroll = Math.max(0, scriptEl.scrollHeight - viewport.clientHeight);
           if (scrollPx >= maxScroll) scrollPx = maxScroll;
           scriptEl.style.transform = `translateY(${-scrollPx}px)`;
