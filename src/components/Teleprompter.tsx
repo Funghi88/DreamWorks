@@ -1,5 +1,5 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { GlassButton } from "@/components/Glass";
 
 interface AnchorRect {
@@ -85,37 +85,42 @@ function useTeleprompterScroll({
   speed,
   script,
   onSetPlaying,
+  resetSignal,
 }: {
   isVisible: boolean;
   isPlaying: boolean;
   speed: number;
   script: string;
   onSetPlaying: (playing: boolean) => void;
+  resetSignal?: number;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scrollPx, setScrollPx] = useState(0);
   const lastTsRef = useRef<number | null>(null);
 
-  const maxScrollPx = useMemo(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return 0;
-    return Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-  }, [script, scrollPx]);
+  useEffect(() => {
+    if (resetSignal != null) {
+      setScrollPx(0);
+      lastTsRef.current = null;
+    }
+  }, [resetSignal]);
 
   useEffect(() => {
     if (!isVisible || !isPlaying) return;
     let raf = 0;
     const tick = (ts: number) => {
+      const viewport = viewportRef.current;
+      const maxScrollPx = viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight) : 0;
       const prevTs = lastTsRef.current ?? ts;
       const dt = (ts - prevTs) / 1000;
       lastTsRef.current = ts;
       setScrollPx((prev) => {
         const next = prev + speed * dt;
-        if (next >= maxScrollPx) {
+        if (maxScrollPx > 0 && next >= maxScrollPx) {
           onSetPlaying(false);
           return maxScrollPx;
         }
-        return next;
+        return Math.min(next, maxScrollPx);
       });
       raf = requestAnimationFrame(tick);
     };
@@ -124,7 +129,7 @@ function useTeleprompterScroll({
       cancelAnimationFrame(raf);
       lastTsRef.current = null;
     };
-  }, [isVisible, isPlaying, speed, maxScrollPx, onSetPlaying]);
+  }, [isVisible, isPlaying, speed, onSetPlaying]);
 
   useEffect(() => {
     setScrollPx(0);
@@ -171,6 +176,7 @@ export function TeleprompterOverlay({
     speed,
     script,
     onSetPlaying,
+    resetSignal,
   });
 
   useEffect(() => {

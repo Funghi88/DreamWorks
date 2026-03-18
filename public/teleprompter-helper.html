@@ -19,7 +19,7 @@
       }
       .wrap {
         height: 100%;
-        padding: 8px;
+        padding: 0;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -27,11 +27,13 @@
         border: 0;
         background: transparent;
         backdrop-filter: none;
+        overflow: hidden;
+        opacity: 0.68;
       }
       .titlebar {
         flex-shrink: 0;
         height: 28px;
-        border-radius: 8px;
+        border-radius: 14px 14px 0 0;
         background: rgba(255,255,255,.28);
         border: 1px solid rgba(255,255,255,.45);
         cursor: move;
@@ -74,7 +76,7 @@
         flex: 1;
         min-height: 80px;
         border: 1px solid rgba(255,255,255,.22);
-        border-radius: 10px;
+        border-radius: 0 0 14px 14px;
         overflow: hidden;
         background: rgba(2,8,24,.55);
       }
@@ -136,14 +138,14 @@
       const closeBtn = document.getElementById("close");
       const dragBar = document.querySelector(".titlebar");
 
-      let state = { script: "", playing: false, speed: 42, fontSize: 32, opacity: 0.86, resetSeq: 0 };
+      let state = { script: "", playing: false, speed: 42, fontSize: 32, opacity: 0.68, resetSeq: 0 };
       let scrollPx = 0;
       let lastTs = 0;
 
       function applyState() {
         scriptEl.textContent = state.script || "Teleprompter ready...";
         scriptEl.style.fontSize = `${state.fontSize || 32}px`;
-        document.getElementById("panel").style.opacity = `${state.opacity || 0.86}`;
+        document.querySelector(".wrap").style.opacity = `${state.opacity ?? 0.68}`;
         speedEl.value = String(state.speed || 42);
       }
 
