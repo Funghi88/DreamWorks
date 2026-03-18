@@ -141,7 +141,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
     const pointerInWhiteboardRef = { current: false };
 
     const onPointerDown = (e: PointerEvent) => {
-      if (touchPointers.size === 0) pointerInWhiteboardRef.current = isInWhiteboard(e.target);
+      if (touchPointers.size === 0) pointerInWhiteboardRef.current = !!isInWhiteboard(e.target);
       if (!pointerInWhiteboardRef.current) return;
       if (e.pointerType === "touch") {
         touchPointers.set(e.pointerId, Date.now());
