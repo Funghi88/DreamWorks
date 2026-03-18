@@ -69,9 +69,14 @@ export interface StoredSettings {
   micVolume?: number;
   systemVolume?: number;
   /** @deprecated Migrated to whiteboardProjects */
-  whiteboardData?: { elements: unknown[]; appState: Record<string, unknown> };
+  whiteboardData?: { elements: unknown[]; appState: Record<string, unknown>; files?: Record<string, unknown> };
   /** Whiteboard projects: one document per project */
-  whiteboardProjects?: Array<{ id: string; name: string; data: { elements: unknown[]; appState: Record<string, unknown> }; updatedAt: number }>;
+  whiteboardProjects?: Array<{
+    id: string;
+    name: string;
+    data: { elements: unknown[]; appState: Record<string, unknown>; files?: Record<string, unknown> };
+    updatedAt: number;
+  }>;
   activeProjectId?: string;
   /** @deprecated Migrated to teleprompterScripts */
   teleprompterScript?: string;
@@ -94,7 +99,8 @@ function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
   if (!Array.isArray(p.elements) || !p.appState || typeof p.appState !== "object") return undefined;
   const appState = p.appState as Record<string, unknown>;
   const { collaborators: _, ...rest } = appState;
-  return { elements: p.elements, appState: rest };
+  const files = p.files && typeof p.files === "object" ? (p.files as Record<string, unknown>) : undefined;
+  return { elements: p.elements, appState: rest, ...(files && Object.keys(files).length > 0 ? { files } : {}) };
 }
 
 function validProjects(v: unknown): StoredSettings["whiteboardProjects"] {

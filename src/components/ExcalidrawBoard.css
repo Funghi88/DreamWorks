@@ -1,0 +1,16 @@
+/* Touch-friendly styles for iPad / Sidecar */
+.dreamwork-whiteboard-touch {
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Larger touch targets for Excalidraw toolbar (iPad ~44px min) */
+.dreamwork-whiteboard-touch [class*="excalidraw"] button,
+.dreamwork-whiteboard-touch [class*="excalidraw"] [role="button"] {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px;
+}

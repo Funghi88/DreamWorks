@@ -17,6 +17,9 @@ build
 # Signing keys (never commit)
 keys/
 
+# User data (Electron 存于 userData，不在项目内；此处防止误提交)
+settings.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

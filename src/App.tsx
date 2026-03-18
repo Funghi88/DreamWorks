@@ -853,17 +853,11 @@ export default function App() {
       void closeHelperByLabel("teleprompter-helper");
       return;
     }
-    const w = teleprompterWindowRef.current;
-    if (w && "close" in w && typeof w.close === "function") {
-      try {
-        (w as Window).close();
-      } catch {
-        /* ignore */
-      }
+    // When screen sharing: open teleprompter helper if user toggled it on (floating window above shared content)
+    if (showTeleprompter) {
+      helperOpenRef.current?.("teleprompter");
     }
-    teleprompterWindowRef.current = null;
-    void closeHelperByLabel("teleprompter-helper");
-  }, [detachedHelpersEnabled, closeHelperByLabel]);
+  }, [detachedHelpersEnabled, showTeleprompter, closeHelperByLabel]);
 
   useEffect(() => {
     if (!detachedHelpersEnabled) {
@@ -2456,7 +2450,7 @@ export default function App() {
         }}
       >
         <TeleprompterOverlay
-          isVisible={showTeleprompter}
+          isVisible={showTeleprompter && !detachedHelpersEnabled}
           script={teleprompterScript}
           isPlaying={teleprompterPlaying}
           speed={teleprompterSpeed}
@@ -2486,7 +2480,7 @@ export default function App() {
           onNudgeSpeed={(delta) => setTeleprompterSpeed((prev) => Math.max(10, Math.min(80, prev + delta)))}
         />
         <TeleprompterPanel
-          isVisible={showTeleprompter}
+          isVisible={showTeleprompter && !detachedHelpersEnabled}
           isPlaying={teleprompterPlaying}
           script={teleprompterScript}
           scripts={teleprompterScripts}

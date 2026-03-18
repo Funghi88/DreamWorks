@@ -493,9 +493,40 @@ export function TeleprompterPanel({
 }: TeleprompterPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [editingScriptName, setEditingScriptName] = useState(false);
+  const [saveAsOpen, setSaveAsOpen] = useState(false);
+  const saveAsRef = useRef<HTMLDivElement>(null);
   const currentScript = scripts.find((s) => s.id === activeScriptId);
+
+  const downloadScript = useCallback(
+    (ext: "md" | "txt") => {
+      const content = script;
+      const name = (currentScript?.name ?? "script").replace(/[<>:"/\\|?*]/g, "_");
+      const filename = `${name}.${ext}`;
+      const mime = ext === "md" ? "text/markdown" : "text/plain";
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      setSaveAsOpen(false);
+    },
+    [script, currentScript?.name]
+  );
+
+  useEffect(() => {
+    if (!saveAsOpen) return;
+    const close = (e: MouseEvent) => {
+      if (saveAsRef.current && !saveAsRef.current.contains(e.target as Node)) setSaveAsOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [saveAsOpen]);
   const idleTimerRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const scrollTopByScriptRef = useRef<Record<string, number>>({});
   const draggingRef = useRef(false);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const panelLivePosRef = useRef<{ x: number; y: number } | null>(null);
@@ -538,6 +569,20 @@ export function TeleprompterPanel({
       if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
     };
   }, [isVisible, resetIdleTimer]);
+
+  // Restore textarea scroll position when panel expands (e.g. after returning from whiteboard)
+  useEffect(() => {
+    if (!collapsed && textareaRef.current) {
+      const el = textareaRef.current;
+      const saved = scrollTopByScriptRef.current[activeScriptId] ?? 0;
+      const maxScroll = el.scrollHeight - el.clientHeight;
+      if (maxScroll > 0) {
+        requestAnimationFrame(() => {
+          el.scrollTop = Math.min(saved, maxScroll);
+        });
+      }
+    }
+  }, [collapsed, activeScriptId]);
 
   const onPanelDragDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (locked) return;
@@ -701,9 +746,47 @@ export function TeleprompterPanel({
         <GlassButton size="sm" variant="secondary" onClick={onNewScript} title="New script">
           New
         </GlassButton>
-        <GlassButton size="sm" variant="secondary" onClick={onSaveAsScript} title="Save as new script">
-          Save as
-        </GlassButton>
+        <div ref={saveAsRef} className="relative">
+          <GlassButton
+            size="sm"
+            variant="secondary"
+            onClick={() => setSaveAsOpen((o) => !o)}
+            title="Save as new script or export to file"
+          >
+            Save as
+          </GlassButton>
+          {saveAsOpen && (
+            <div
+              className="absolute left-0 top-full z-50 mt-1 min-w-[140px] rounded border border-white/20 bg-black/90 py-1 shadow-xl"
+              data-dreamwork-no-intercept
+            >
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                onClick={() => {
+                  setSaveAsOpen(false);
+                  onSaveAsScript();
+                }}
+              >
+                Save as new script
+              </button>
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                onClick={() => downloadScript("md")}
+              >
+                Download as .md
+              </button>
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                onClick={() => downloadScript("txt")}
+              >
+                Download as .txt
+              </button>
+            </div>
+          )}
+        </div>
         <GlassButton
           size="sm"
           variant="secondary"
@@ -714,11 +797,23 @@ export function TeleprompterPanel({
         </GlassButton>
       </div>
       <textarea
+        ref={textareaRef}
         value={script}
         onChange={(e) => onSetScript(e.target.value)}
         onBlur={() => onFlushSave?.()}
+        onFocus={() => {
+          const el = textareaRef.current;
+          const saved = scrollTopByScriptRef.current[activeScriptId];
+          if (el && saved != null) {
+            const maxScroll = el.scrollHeight - el.clientHeight;
+            if (maxScroll > 0 && el.scrollTop !== saved) {
+              el.scrollTop = Math.min(saved, maxScroll);
+            }
+          }
+        }}
         onScroll={(e) => {
           const el = e.currentTarget;
+          scrollTopByScriptRef.current[activeScriptId] = el.scrollTop;
           const max = el.scrollHeight - el.clientHeight;
           if (max > 0) {
             const ratio = el.scrollTop / max;
