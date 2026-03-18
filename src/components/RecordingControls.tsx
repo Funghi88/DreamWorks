@@ -74,7 +74,8 @@ export function RecordingControls({
     const btn = captureRef.current.querySelector("button");
     if (btn) {
       const r = btn.getBoundingClientRect();
-      setDropdownRect({ top: r.bottom + 4, left: r.left });
+      const headerBottom = 60;
+      setDropdownRect({ top: Math.max(r.bottom + 4, headerBottom), left: r.left });
     }
   }, [captureOpen]);
 
@@ -101,6 +102,7 @@ export function RecordingControls({
 
   return (
     <div
+      data-dreamwork-no-intercept
       className={`flex items-center [&_button]:text-[12px] [&_button]:font-semibold ${
         compact
           ? "flex-wrap overflow-visible gap-1.5 pb-1 [&_button]:h-9 [&_button]:min-w-[74px] [&_button]:shrink-0 [&_button]:justify-center [&_button]:px-2"
@@ -186,7 +188,16 @@ export function RecordingControls({
         </GlassButton>
       )}
       {compact && onToggleTeleprompter && (
-        <GlassButton variant={showTeleprompter ? "primary" : "secondary"} size="sm" onClick={onToggleTeleprompter}>
+        <GlassButton
+          data-teleprompter-btn
+          variant={showTeleprompter ? "primary" : "secondary"}
+          size="sm"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleTeleprompter();
+          }}
+          className="relative z-10"
+        >
           Teleprompter
         </GlassButton>
       )}
@@ -215,7 +226,8 @@ export function RecordingControls({
             createPortal(
               <div
                 data-capture-dropdown
-                className="fixed z-[100000] min-w-[200px] rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
+                data-dreamwork-no-intercept
+                className="fixed z-[100012] w-[320px] rounded-xl border border-slate-200 bg-white py-1 shadow-xl"
                 style={{ top: dropdownRect.top, left: dropdownRect.left }}
               >
                 {CAPTURE_MODES.map((m) => (
@@ -269,7 +281,6 @@ export function RecordingControls({
       )}
       {!compact && (
         <>
-          <span className="mx-1 text-muted-foreground/40">·</span>
           <GlassButton
             variant={showWhiteboard ? "primary" : "secondary"}
             onClick={onOpenFullPageWhiteboard ?? onToggleWhiteboard}
@@ -278,7 +289,16 @@ export function RecordingControls({
             Whiteboard
           </GlassButton>
           {onToggleTeleprompter && (
-            <GlassButton variant={showTeleprompter ? "primary" : "secondary"} size="sm" onClick={onToggleTeleprompter}>
+            <GlassButton
+              data-teleprompter-btn
+              variant={showTeleprompter ? "primary" : "secondary"}
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleTeleprompter();
+              }}
+              className="relative z-10"
+            >
               Teleprompter
             </GlassButton>
           )}

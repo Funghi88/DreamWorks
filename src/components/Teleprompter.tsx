@@ -17,6 +17,7 @@ interface TeleprompterOverlayProps {
   fontSize: number;
   opacity: number;
   overlayWidth: number;
+  overlayHeight: number;
   nearCamera: boolean;
   anchorRect: AnchorRect | null;
   position: { x: number; y: number } | null;
@@ -24,6 +25,7 @@ interface TeleprompterOverlayProps {
   resetSignal: number;
   onSetPlaying: (playing: boolean) => void;
   onPositionChange: (position: { x: number; y: number }) => void;
+  onOverlaySizeChange: (width: number, height: number) => void;
   onDragStart: () => void;
   onToggleLocked: () => void;
   onReset: () => void;
@@ -66,6 +68,7 @@ interface TeleprompterPanelProps {
   onToggleLocked: () => void;
   onReset: () => void;
   onHide: () => void;
+  onFlushSave?: () => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -95,15 +98,25 @@ function useTeleprompterScroll({
   resetSignal?: number;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const [scrollPx, setScrollPx] = useState(0);
+  const scrollContentRef = useRef<HTMLDivElement>(null);
+  const scrollPxRef = useRef(0);
   const lastTsRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (resetSignal != null) {
-      setScrollPx(0);
+      scrollPxRef.current = 0;
       lastTsRef.current = null;
+      const el = scrollContentRef.current;
+      if (el) el.style.transform = "translateY(0px)";
     }
   }, [resetSignal]);
+
+  useEffect(() => {
+    scrollPxRef.current = 0;
+    lastTsRef.current = null;
+    const el = scrollContentRef.current;
+    if (el) el.style.transform = "translateY(0px)";
+  }, [script]);
 
   useEffect(() => {
     if (!isVisible || !isPlaying) return;
@@ -114,34 +127,31 @@ function useTeleprompterScroll({
       const prevTs = lastTsRef.current ?? ts;
       const dt = (ts - prevTs) / 1000;
       lastTsRef.current = ts;
-      setScrollPx((prev) => {
-        const next = prev + speed * dt;
-        if (maxScrollPx > 0 && next >= maxScrollPx) {
-          onSetPlaying(false);
-          return maxScrollPx;
-        }
-        return Math.min(next, maxScrollPx);
-      });
+      const next = Math.min(scrollPxRef.current + speed * dt, maxScrollPx);
+      scrollPxRef.current = next;
+      const el = scrollContentRef.current;
+      if (el) el.style.transform = `translateY(${-next}px)`;
+      if (maxScrollPx > 0 && next >= maxScrollPx) onSetPlaying(false);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
       lastTsRef.current = null;
+      // Preserve scroll position when pausing (cleanup runs when isPlaying becomes false)
+      const el = scrollContentRef.current;
+      if (el) el.style.transform = `translateY(${-scrollPxRef.current}px)`;
     };
   }, [isVisible, isPlaying, speed, onSetPlaying]);
 
-  useEffect(() => {
-    setScrollPx(0);
+  const reset = useCallback(() => {
+    scrollPxRef.current = 0;
     lastTsRef.current = null;
-  }, [script]);
+    const el = scrollContentRef.current;
+    if (el) el.style.transform = "translateY(0px)";
+  }, []);
 
-  const reset = () => {
-    setScrollPx(0);
-    lastTsRef.current = null;
-  };
-
-  return { viewportRef, scrollPx, reset };
+  return { viewportRef, scrollContentRef, reset };
 }
 
 export function TeleprompterOverlay({
@@ -152,6 +162,7 @@ export function TeleprompterOverlay({
   fontSize,
   opacity,
   overlayWidth,
+  overlayHeight,
   nearCamera,
   anchorRect,
   position,
@@ -159,6 +170,7 @@ export function TeleprompterOverlay({
   resetSignal,
   onSetPlaying,
   onPositionChange,
+  onOverlaySizeChange,
   onDragStart,
   onToggleLocked,
   onReset,
@@ -166,11 +178,14 @@ export function TeleprompterOverlay({
   onNudgeSpeed,
 }: TeleprompterOverlayProps) {
   const draggingRef = useRef(false);
+  const resizingRef = useRef(false);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const resizeStartRef = useRef({ width: 0, height: 0, clientX: 0, clientY: 0 });
   const livePosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastAnchoredPosRef = useRef<{ x: number; y: number } | null>(null);
   const [livePos, setLivePos] = useState<{ x: number; y: number } | null>(null);
 
-  const { viewportRef, scrollPx, reset } = useTeleprompterScroll({
+  const { viewportRef, scrollContentRef, reset } = useTeleprompterScroll({
     isVisible,
     isPlaying,
     speed,
@@ -206,30 +221,43 @@ export function TeleprompterOverlay({
   }, [isVisible, isPlaying, onSetPlaying, onNudgeSpeed, onReset, onHide, reset]);
 
   useEffect(() => {
-    reset();
+    if (resetSignal != null) reset();
   }, [resetSignal, reset]);
 
-  if (!isVisible) return null;
-
   const clampedWidth = Math.max(320, Math.min(900, overlayWidth));
+  const clampedHeight = Math.max(180, Math.min(500, overlayHeight));
   const viewport = getViewportSize();
   const baseLeft = (viewport.width - clampedWidth) / 2;
   const nearCameraLeft = anchorRect
     ? Math.max(12, Math.min(viewport.width - clampedWidth - 12, anchorRect.left + anchorRect.width / 2 - clampedWidth / 2))
     : baseLeft;
   const nearCameraTop = anchorRect
-    ? Math.max(10, Math.min(viewport.height - 220, anchorRect.top + anchorRect.height + 12))
+    ? Math.max(10, Math.min(viewport.height - clampedHeight - 20, anchorRect.top + anchorRect.height + 12))
     : 24;
   const defaultLeft = nearCamera && anchorRect ? nearCameraLeft : baseLeft;
   const defaultTop = nearCamera && anchorRect ? nearCameraTop : 24;
-  const left = (livePos ?? position)?.x ?? defaultLeft;
-  const top = (livePos ?? position)?.y ?? defaultTop;
+  const rawLeft = (livePos ?? position)?.x ?? defaultLeft;
+  const rawTop = (livePos ?? position)?.y ?? defaultTop;
+  const preserved = !anchorRect && lastAnchoredPosRef.current;
+  const left = preserved ? lastAnchoredPosRef.current!.x : rawLeft;
+  const top = preserved ? lastAnchoredPosRef.current!.y : rawTop;
+
+  useEffect(() => {
+    if (anchorRect) {
+      lastAnchoredPosRef.current = { x: rawLeft, y: rawTop };
+    } else if (lastAnchoredPosRef.current) {
+      onPositionChange(lastAnchoredPosRef.current);
+      lastAnchoredPosRef.current = null;
+    }
+  }, [anchorRect, rawLeft, rawTop, onPositionChange]);
 
   useEffect(() => {
     if (draggingRef.current) return;
     setLivePos(position);
     livePosRef.current = position;
   }, [position]);
+
+  if (!isVisible) return null;
 
   const onDragPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (locked) return;
@@ -247,7 +275,7 @@ export function TeleprompterOverlay({
       if (!draggingRef.current) return;
       const vp = getViewportSize();
       const x = Math.max(8, Math.min(vp.width - clampedWidth - 8, ev.clientX - dragOffsetRef.current.x));
-      const y = Math.max(8, Math.min(vp.height - 210 - 8, ev.clientY - dragOffsetRef.current.y));
+      const y = Math.max(8, Math.min(vp.height - clampedHeight - 8, ev.clientY - dragOffsetRef.current.y));
       const next = { x, y };
       livePosRef.current = next;
       setLivePos(next);
@@ -264,11 +292,46 @@ export function TeleprompterOverlay({
     window.addEventListener("pointercancel", onUp);
   };
 
+  const onResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (locked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    resizingRef.current = true;
+    resizeStartRef.current = {
+      width: clampedWidth,
+      height: clampedHeight,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
+    const target = e.currentTarget as HTMLElement;
+    if (target.setPointerCapture && e.pointerId != null) target.setPointerCapture(e.pointerId);
+
+    const onMove = (ev: PointerEvent) => {
+      if (!resizingRef.current) return;
+      const { width, height, clientX, clientY } = resizeStartRef.current;
+      const dx = ev.clientX - clientX;
+      const dy = ev.clientY - clientY;
+      const vp = getViewportSize();
+      const newWidth = Math.max(320, Math.min(900, Math.min(vp.width - left - 16, width + dx)));
+      const newHeight = Math.max(180, Math.min(500, Math.min(vp.height - top - 16, height + dy)));
+      onOverlaySizeChange(newWidth, newHeight);
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
   return (
     <div
       data-dreamwork-no-intercept
-      className="fixed z-[100001] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
-      style={{ width: clampedWidth, maxWidth: "calc(100vw - 24px)", height: 210, left, top, opacity }}
+      className="fixed z-[100015] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+      style={{ width: clampedWidth, maxWidth: "calc(100vw - 24px)", height: clampedHeight, left, top, opacity }}
       aria-hidden
     >
       <div
@@ -283,16 +346,32 @@ export function TeleprompterOverlay({
       >
         {locked ? "Locked" : "Lock"}
       </button>
-      <div className="absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/80 to-transparent" />
-      <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/80 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/80 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/80 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 top-1/2 h-12 -translate-y-1/2 border-y border-emerald-300/40 bg-emerald-200/10" />
-      <div ref={viewportRef} className="h-full overflow-hidden px-6 py-7 text-center text-white">
-        <div style={{ fontSize, lineHeight: 1.55, transform: `translateY(${-scrollPx}px)` }}>
-          <div style={{ paddingTop: "42%", paddingBottom: "42%", whiteSpace: "pre-wrap" }}>
+      <div
+        ref={viewportRef}
+        className="h-full overflow-hidden px-6 py-7 text-center text-white"
+        style={{ clipPath: "inset(32px 0 0 0)" }}
+      >
+        <div
+          ref={scrollContentRef}
+          style={{ fontSize, lineHeight: 1.55, willChange: "transform" }}
+        >
+          <div style={{ paddingTop: "1em", paddingBottom: "80%", whiteSpace: "pre-wrap" }}>
             {script || "Paste your script in Teleprompter panel."}
           </div>
         </div>
       </div>
+      <div
+        role="button"
+        tabIndex={0}
+        onPointerDown={onResizePointerDown}
+        className={`absolute bottom-0 right-0 z-30 h-4 w-4 cursor-se-resize ${locked ? "pointer-events-none opacity-50" : "hover:bg-white/10"}`}
+        style={{ background: "linear-gradient(135deg, transparent 45%, rgba(255,255,255,.4) 45%)" }}
+        title="Drag to resize"
+        aria-label="Resize overlay"
+      />
     </div>
   );
 }
@@ -325,6 +404,7 @@ export function TeleprompterPanel({
   onToggleLocked,
   onReset,
   onHide,
+  onFlushSave,
 }: TeleprompterPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [editingScriptName, setEditingScriptName] = useState(false);
@@ -417,7 +497,7 @@ export function TeleprompterPanel({
       <div
         ref={panelRef}
         data-dreamwork-no-intercept
-        className="fixed z-[100002] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
+        className="fixed z-[100015] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
         style={{ left, top }}
       >
         <div
@@ -462,7 +542,7 @@ export function TeleprompterPanel({
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
-      className="fixed z-[100002] w-[360px] rounded-xl border border-white/30 bg-black/70 p-3 text-xs text-white shadow-2xl backdrop-blur-md"
+      className="fixed z-[100015] w-[360px] rounded-xl border border-white/30 bg-black/70 p-3 text-xs text-white shadow-2xl backdrop-blur-md"
       style={{ left, top }}
       onPointerDown={onPanelActivity}
       onKeyDown={onPanelActivity}
@@ -551,6 +631,7 @@ export function TeleprompterPanel({
       <textarea
         value={script}
         onChange={(e) => onSetScript(e.target.value)}
+        onBlur={() => onFlushSave?.()}
         className="mb-3 h-36 w-full resize-y rounded-md border border-white/20 bg-black/45 p-2 text-xs text-white outline-none"
         placeholder="Paste script here..."
       />

@@ -78,6 +78,11 @@ export interface StoredSettings {
   /** Teleprompter scripts: multiple named scripts */
   teleprompterScripts?: Array<{ id: string; name: string; content: string; updatedAt: number }>;
   activeTeleprompterScriptId?: string;
+  teleprompterSpeed?: number;
+  teleprompterFontSize?: number;
+  teleprompterOpacity?: number;
+  teleprompterWidth?: number;
+  teleprompterHeight?: number;
 }
 
 export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
@@ -204,6 +209,11 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterScript: typeof p.teleprompterScript === "string" ? p.teleprompterScript : undefined,
     teleprompterScripts: validTeleprompterScripts(p.teleprompterScripts),
     activeTeleprompterScriptId: typeof p.activeTeleprompterScriptId === "string" ? p.activeTeleprompterScriptId : undefined,
+    teleprompterSpeed: validNum(p.teleprompterSpeed, 10, 180),
+    teleprompterFontSize: validNum(p.teleprompterFontSize, 18, 52),
+    teleprompterOpacity: typeof p.teleprompterOpacity === "number" && p.teleprompterOpacity >= 0.35 && p.teleprompterOpacity <= 1 ? p.teleprompterOpacity : undefined,
+    teleprompterWidth: validNum(p.teleprompterWidth, 320, 900),
+    teleprompterHeight: validNum(p.teleprompterHeight, 180, 500),
   };
 }
 

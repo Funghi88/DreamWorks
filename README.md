@@ -3,6 +3,8 @@
 > Lightweight screen recorder with circular webcam PiP, whiteboard, and live meeting. Built with Electron + React.  
 > 轻量级录屏 + 圆形摄像头画中画 + 白板 + 在线会议。基于 Electron + React 构建。
 
+![DreamWorks 主界面](docs/screenshots/main-interface.png)
+
 ---
 
 ## 中文

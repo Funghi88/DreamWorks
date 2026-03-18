@@ -116,7 +116,7 @@ export function SettingsPanel({
             <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+            <SelectContent side="top" className="z-[100013] border-slate-200 bg-white">
               <SelectItem value="none">None</SelectItem>
               <SelectItem value="simple">Simple</SelectItem>
               <SelectItem value="glow">Glow</SelectItem>
@@ -143,7 +143,7 @@ export function SettingsPanel({
                 <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+                <SelectContent side="top" className="z-[100013] border-slate-200 bg-white">
                   <SelectItem value="none">None</SelectItem>
                   <SelectItem value="sunglasses">Sunglasses</SelectItem>
                   <SelectItem value="vampire">🐞</SelectItem>
@@ -174,7 +174,7 @@ export function SettingsPanel({
                   <SelectTrigger className="w-24 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+                  <SelectContent side="top" className="z-[100013] border-slate-200 bg-white">
                     <SelectItem value="natural">Natural</SelectItem>
                     <SelectItem value="professional">Pro</SelectItem>
                     <SelectItem value="glamour">Glamour</SelectItem>
@@ -214,7 +214,7 @@ export function SettingsPanel({
               <SelectTrigger className="w-24 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+              <SelectContent side="top" className="z-[100013] border-slate-200 bg-white">
                 <SelectItem value="1080p">1080p</SelectItem>
                 <SelectItem value="2K">2K</SelectItem>
                 <SelectItem value="4K">4K</SelectItem>
@@ -232,7 +232,7 @@ export function SettingsPanel({
               <SelectTrigger className="w-28 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[100000] border-slate-200 bg-white">
+              <SelectContent side="top" className="z-[100013] border-slate-200 bg-white">
                 <SelectItem value="black">Black</SelectItem>
                 <SelectItem value="custom">Upload image</SelectItem>
               </SelectContent>

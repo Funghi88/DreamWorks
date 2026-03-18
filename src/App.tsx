@@ -154,7 +154,7 @@ function ClipPreview({
   };
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div className="aspect-video min-w-0 overflow-hidden rounded-xl border">
+      <div className="aspect-video min-w-0 overflow-hidden rounded-2xl bg-white">
         <video
           src={url}
           controls
@@ -316,6 +316,12 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => loadSettings().sidebarWidth ?? 320);
   const [previewWidth, setPreviewWidth] = useState(() => loadSettings().previewWidth ?? 200);
   const [outputHeight, setOutputHeight] = useState(240);
+  const [outputCollapsed, setOutputCollapsed] = useState(false);
+  const outputIdleTimerRef = useRef<number | null>(null);
+  const outputHoverExpandTimerRef = useRef<number | null>(null);
+  const OUTPUT_IDLE_MS = 3000;
+  const OUTPUT_HOVER_EXPAND_MS = 3000;
+  const OUTPUT_COLLAPSED_HEIGHT = 40;
   const [whiteboardHeight, setWhiteboardHeight] = useState(
     () => loadSettings().whiteboardHeight ?? 220
   );
@@ -372,6 +378,24 @@ export default function App() {
     });
   }, [isElectron]);
   const [showOutput, setShowOutput] = useState(false);
+  useEffect(() => {
+    if (!showOutput || recordedClips.length === 0) return;
+    setOutputCollapsed(false);
+    outputIdleTimerRef.current = window.setTimeout(() => {
+      outputIdleTimerRef.current = null;
+      setOutputCollapsed(true);
+    }, OUTPUT_IDLE_MS);
+    return () => {
+      if (outputIdleTimerRef.current) {
+        clearTimeout(outputIdleTimerRef.current);
+        outputIdleTimerRef.current = null;
+      }
+      if (outputHoverExpandTimerRef.current) {
+        clearTimeout(outputHoverExpandTimerRef.current);
+        outputHoverExpandTimerRef.current = null;
+      }
+    };
+  }, [showOutput, recordedClips.length]);
   const [showSettings, setShowSettings] = useState(false);
   const [showLiveMeetingModal, setShowLiveMeetingModal] = useState(false);
   const [micVolume, setMicVolume] = useState(() => loadSettings().micVolume ?? 100);
@@ -405,10 +429,11 @@ export default function App() {
       : list[0]?.id ?? "default";
     return aid;
   });
-  const [teleprompterSpeed, setTeleprompterSpeed] = useState(42);
-  const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
-  const [teleprompterOpacity, setTeleprompterOpacity] = useState(0.68);
-  const [teleprompterWidth, setTeleprompterWidth] = useState(560);
+  const [teleprompterSpeed, setTeleprompterSpeed] = useState(() => loadSettings().teleprompterSpeed ?? 42);
+  const [teleprompterFontSize, setTeleprompterFontSize] = useState(() => loadSettings().teleprompterFontSize ?? 32);
+  const [teleprompterOpacity, setTeleprompterOpacity] = useState(() => loadSettings().teleprompterOpacity ?? 0.68);
+  const [teleprompterWidth, setTeleprompterWidth] = useState(() => loadSettings().teleprompterWidth ?? 560);
+  const [teleprompterHeight, setTeleprompterHeight] = useState(() => loadSettings().teleprompterHeight ?? 210);
   const [teleprompterNearCamera, setTeleprompterNearCamera] = useState(true);
   const [teleprompterPosition, setTeleprompterPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterPanelPosition, setTeleprompterPanelPosition] = useState<{ x: number; y: number } | null>(null);
@@ -421,9 +446,39 @@ export default function App() {
     height: number;
   } | null>(null);
   const teleprompterChannelRef = useRef<BroadcastChannel | null>(null);
+  const teleprompterStateRef = useRef<{
+    visible: boolean;
+    detached: boolean;
+    script: string;
+    playing: boolean;
+    speed: number;
+    fontSize: number;
+    opacity: number;
+    width: number;
+    locked: boolean;
+    resetSeq: number;
+  } | null>(null);
   const teleprompterWindowRef = useRef<Window | null>(null);
   const monitorWindowRef = useRef<Window | null>(null);
   const teleprompterSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const teleprompterSaveRef = useRef({
+    scripts: teleprompterScripts,
+    activeId: activeTeleprompterScriptId,
+    speed: teleprompterSpeed,
+    fontSize: teleprompterFontSize,
+    opacity: teleprompterOpacity,
+    width: teleprompterWidth,
+    height: teleprompterHeight,
+  });
+  teleprompterSaveRef.current = {
+    scripts: teleprompterScripts,
+    activeId: activeTeleprompterScriptId,
+    speed: teleprompterSpeed,
+    fontSize: teleprompterFontSize,
+    opacity: teleprompterOpacity,
+    width: teleprompterWidth,
+    height: teleprompterHeight,
+  };
   const currentTeleprompterScript = teleprompterScripts.find((s) => s.id === activeTeleprompterScriptId);
   const teleprompterScript = currentTeleprompterScript?.content ?? defaultScript;
 
@@ -436,6 +491,11 @@ export default function App() {
           : list[0]?.id ?? "default";
         setTeleprompterScripts(list);
         setActiveTeleprompterScriptId(aid);
+        if (s.teleprompterSpeed != null) setTeleprompterSpeed(s.teleprompterSpeed);
+        if (s.teleprompterFontSize != null) setTeleprompterFontSize(s.teleprompterFontSize);
+        if (s.teleprompterOpacity != null) setTeleprompterOpacity(s.teleprompterOpacity);
+        if (s.teleprompterWidth != null) setTeleprompterWidth(s.teleprompterWidth);
+        if (s.teleprompterHeight != null) setTeleprompterHeight(s.teleprompterHeight);
       });
     }
   }, [isElectron]);
@@ -443,13 +503,51 @@ export default function App() {
   useEffect(() => {
     if (teleprompterSaveTimeoutRef.current) clearTimeout(teleprompterSaveTimeoutRef.current);
     teleprompterSaveTimeoutRef.current = setTimeout(() => {
-      saveSettings(saveTeleprompterScripts(loadSettings(), teleprompterScripts, activeTeleprompterScriptId));
+      const base = saveTeleprompterScripts(loadSettings(), teleprompterScripts, activeTeleprompterScriptId);
+      saveSettings({
+        ...base,
+        teleprompterSpeed,
+        teleprompterFontSize,
+        teleprompterOpacity,
+        teleprompterWidth,
+        teleprompterHeight,
+      });
       teleprompterSaveTimeoutRef.current = null;
-    }, 500);
+    }, 300);
     return () => {
       if (teleprompterSaveTimeoutRef.current) clearTimeout(teleprompterSaveTimeoutRef.current);
     };
-  }, [teleprompterScripts, activeTeleprompterScriptId]);
+  }, [
+    teleprompterScripts,
+    activeTeleprompterScriptId,
+    teleprompterSpeed,
+    teleprompterFontSize,
+    teleprompterOpacity,
+    teleprompterWidth,
+    teleprompterHeight,
+  ]);
+
+  const flushTeleprompterSave = useCallback(() => {
+    if (teleprompterSaveTimeoutRef.current) {
+      clearTimeout(teleprompterSaveTimeoutRef.current);
+      teleprompterSaveTimeoutRef.current = null;
+    }
+    const r = teleprompterSaveRef.current;
+    const base = saveTeleprompterScripts(loadSettings(), r.scripts, r.activeId);
+      saveSettings({
+        ...base,
+        teleprompterSpeed: r.speed,
+        teleprompterFontSize: r.fontSize,
+        teleprompterOpacity: r.opacity,
+        teleprompterWidth: r.width,
+        teleprompterHeight: r.height,
+      });
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("beforeunload", flushTeleprompterSave);
+    return () => window.removeEventListener("beforeunload", flushTeleprompterSave);
+  }, [flushTeleprompterSave]);
 
   const handleSetTeleprompterScript = useCallback(
     (content: string) => {
@@ -540,7 +638,12 @@ export default function App() {
   const detachedHelpersEnabled = isElectron && !!activeScreenStream;
 
   useEffect(() => {
-    if (!showTeleprompter || !teleprompterNearCamera || !showPip) {
+    if (!showPip) {
+      setTeleprompterAnchorRect(null);
+      setTeleprompterNearCamera(false);
+      return;
+    }
+    if (!showTeleprompter || !teleprompterNearCamera) {
       setTeleprompterAnchorRect(null);
       return;
     }
@@ -576,7 +679,6 @@ export default function App() {
   const handleToggleTeleprompter = () => {
     setShowTeleprompter((prev) => {
       const next = !prev;
-      if (next && detachedHelpersEnabled) helperOpenRef.current("teleprompter");
       if (!next) {
         setTeleprompterPlaying(false);
         const w = teleprompterWindowRef.current;
@@ -689,10 +791,7 @@ export default function App() {
   const handleRecoverOverlays = useCallback(() => {
     if (!detachedHelpersEnabled) return;
     closeHelperWindows();
-    window.setTimeout(() => {
-      if (showTeleprompter) ensureHelperOpen("teleprompter");
-    }, 80);
-  }, [detachedHelpersEnabled, closeHelperWindows, showPip, showTeleprompter, ensureHelperOpen]);
+  }, [detachedHelpersEnabled, closeHelperWindows]);
 
   const handleToggleCameraFromControls = () => {
     if (showPip || !!monitorWindowRef.current) {
@@ -710,7 +809,16 @@ export default function App() {
     const onTeleprompterMessage = (event: MessageEvent) => {
       const payload = event.data;
       if (!payload || typeof payload !== "object") return;
-      if (payload.type === "teleprompter-control") {
+      if (payload.type === "teleprompter-request-state") {
+        const s = teleprompterStateRef.current;
+        if (s) {
+          teleprompterChannel.postMessage({
+            type: "teleprompter-state",
+            overlayMode: "guaranteed",
+            ...s,
+          });
+        }
+      } else if (payload.type === "teleprompter-control") {
         if (typeof payload.playing === "boolean") setTeleprompterPlaying(payload.playing);
         if (typeof payload.speed === "number") setTeleprompterSpeed(Math.max(10, Math.min(180, payload.speed)));
         if (typeof payload.resetSeq === "number") setTeleprompterResetSeq(payload.resetSeq);
@@ -743,20 +851,17 @@ export default function App() {
       void closeHelperByLabel("teleprompter-helper");
       return;
     }
-    if (showTeleprompter) ensureHelperOpen("teleprompter");
-    else {
-      const w = teleprompterWindowRef.current;
-      if (w && "close" in w && typeof w.close === "function") {
-        try {
-          (w as Window).close();
-        } catch {
-          /* ignore */
-        }
+    const w = teleprompterWindowRef.current;
+    if (w && "close" in w && typeof w.close === "function") {
+      try {
+        (w as Window).close();
+      } catch {
+        /* ignore */
       }
-      teleprompterWindowRef.current = null;
-      void closeHelperByLabel("teleprompter-helper");
     }
-  }, [detachedHelpersEnabled, showTeleprompter, ensureHelperOpen, closeHelperByLabel]);
+    teleprompterWindowRef.current = null;
+    void closeHelperByLabel("teleprompter-helper");
+  }, [detachedHelpersEnabled, closeHelperByLabel]);
 
   useEffect(() => {
     if (!detachedHelpersEnabled) {
@@ -785,13 +890,9 @@ export default function App() {
   }, [detachedHelpersEnabled, closeHelperByLabel]);
 
   useEffect(() => {
-    const channel = teleprompterChannelRef.current;
-    if (!channel) return;
-    channel.postMessage({
-      type: "teleprompter-state",
+    const state = {
       visible: showTeleprompter,
-      detached: detachedHelpersEnabled,
-      overlayMode: "guaranteed",
+      detached: false,
       script: teleprompterScript,
       playing: teleprompterPlaying,
       speed: teleprompterSpeed,
@@ -800,10 +901,17 @@ export default function App() {
       width: teleprompterWidth,
       locked: teleprompterLocked,
       resetSeq: teleprompterResetSeq,
+    };
+    teleprompterStateRef.current = state;
+    const channel = teleprompterChannelRef.current;
+    if (!channel) return;
+    channel.postMessage({
+      type: "teleprompter-state",
+      overlayMode: "guaranteed",
+      ...state,
     });
   }, [
     showTeleprompter,
-    detachedHelpersEnabled,
     teleprompterScript,
     teleprompterPlaying,
     teleprompterSpeed,
@@ -2247,12 +2355,15 @@ export default function App() {
   const handlePreviewPointerDownRef = useRef(handlePreviewPointerDown);
   handlePreviewPointerDownRef.current = handlePreviewPointerDown;
   useEffect(() => {
-    if (!showPip) return;
+    if (!fullPageWhiteboard) return;
     const handleNative = (e: PointerEvent | MouseEvent) => {
-      if (pipDraggingRef.current || previewBoxDraggingRef.current) return;
-      if ((e.target as HTMLElement)?.closest?.('[role="dialog"], [data-modal-overlay]')) return;
-      const el = (e.target as Node).nodeType === Node.ELEMENT_NODE ? (e.target as HTMLElement) : (e.target as Node).parentElement;
+      const target = e.target as HTMLElement;
+      const el = target?.nodeType === Node.ELEMENT_NODE ? target : (target as Node).parentElement as HTMLElement;
+      if (target?.closest?.('[role="dialog"], [data-modal-overlay]')) return;
+      // Let header/RecordingControls (data-dreamwork-no-intercept) handle their own clicks including Teleprompter
       if (el?.closest?.('[data-dreamwork-no-intercept]')) return;
+      if (!showPip) return;
+      if (pipDraggingRef.current || previewBoxDraggingRef.current) return;
       if (el?.closest?.('header, button, a, input, select, [role="button"], aside')) return;
       if (el?.tagName === "IFRAME" || el?.closest?.("iframe")) return;
       // When fullPageWhiteboard without screen: only intercept clicks near the camera pip.
@@ -2296,7 +2407,7 @@ export default function App() {
       document.removeEventListener("pointerdown", handleNative, { capture: true });
       document.removeEventListener("mousedown", handleNative, { capture: true });
     };
-  }, [showPip, fullPageWhiteboard, activeScreenStream, setContextFromClick]);
+  }, [fullPageWhiteboard, showPip, activeScreenStream, setContextFromClick]);
 
   useEffect(() => {
     if (pipDragging || previewBoxDragging) {
@@ -2336,20 +2447,21 @@ export default function App() {
   return (
     <>
       <TeleprompterErrorBoundary
-        key={`teleprompter-${showTeleprompter ? "open" : "closed"}-${teleprompterResetSeq}`}
+        key={`teleprompter-${teleprompterResetSeq}`}
         onCrash={() => {
           setShowTeleprompter(false);
           setTeleprompterPlaying(false);
         }}
       >
         <TeleprompterOverlay
-          isVisible={showTeleprompter && !detachedHelpersEnabled}
+          isVisible={showTeleprompter}
           script={teleprompterScript}
           isPlaying={teleprompterPlaying}
           speed={teleprompterSpeed}
           fontSize={teleprompterFontSize}
           opacity={teleprompterOpacity}
           overlayWidth={teleprompterWidth}
+          overlayHeight={teleprompterHeight}
           nearCamera={teleprompterNearCamera}
           anchorRect={teleprompterAnchorRect}
           position={teleprompterPosition}
@@ -2357,6 +2469,10 @@ export default function App() {
           resetSignal={teleprompterResetSeq}
           onSetPlaying={setTeleprompterPlaying}
           onPositionChange={setTeleprompterPosition}
+          onOverlaySizeChange={(w, h) => {
+            setTeleprompterWidth(w);
+            setTeleprompterHeight(h);
+          }}
           onDragStart={() => setTeleprompterNearCamera(false)}
           onToggleLocked={handleToggleTeleprompterLock}
           onReset={handleResetTeleprompter}
@@ -2367,7 +2483,7 @@ export default function App() {
           onNudgeSpeed={(delta) => setTeleprompterSpeed((prev) => Math.max(10, Math.min(180, prev + delta)))}
         />
         <TeleprompterPanel
-          isVisible={showTeleprompter && !detachedHelpersEnabled}
+          isVisible={showTeleprompter}
           isPlaying={teleprompterPlaying}
           script={teleprompterScript}
           scripts={teleprompterScripts}
@@ -2397,6 +2513,7 @@ export default function App() {
             setShowTeleprompter(false);
             setTeleprompterPlaying(false);
           }}
+          onFlushSave={flushTeleprompterSave}
         />
       </TeleprompterErrorBoundary>
       {showLiveMeetingModal && (
@@ -2454,11 +2571,11 @@ export default function App() {
       >
       <header
         data-dreamwork-no-intercept
-        className={`glass-panel sticky top-0 z-50 flex shrink-0 flex-col shadow-sm ${
+        className={`glass-panel fixed left-0 right-0 top-0 z-[100010] flex shrink-0 flex-col shadow-sm isolation-isolate [&>*]:relative [&>*]:z-10 ${
           isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"
         }`}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="flex shrink-0 items-center gap-2">
               <img
                 src={avatarImageSrc ?? "./logo.png"}
@@ -2478,8 +2595,8 @@ export default function App() {
             >
               <Settings className="size-5" />
             </button>
-            <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
-              <div className="flex shrink-0 items-center gap-4 min-w-max">
+            <div className="flex min-w-0 flex-1 items-center justify-between overflow-x-auto overflow-y-hidden gap-3">
+              <div className="flex shrink-0 items-center gap-3 min-w-max">
               <RecordingControls
                 hasScreen={hasScreen}
                 hasCamera={hasCamera}
@@ -2500,28 +2617,27 @@ export default function App() {
                 showTeleprompter={showTeleprompter}
                 recordingTimeLabel={formatRecordingTime(recordingTime)}
               />
-              {!isCompact && (
-                <>
-                  <div className="h-6 w-px shrink-0 bg-border/60" />
-                  <div className="sector-card flex items-center gap-2 rounded-lg px-3 py-1.5 text-[8px] font-semibold shrink-0">
-                    <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                      {hasScreen ? "✓" : "1."} Screen
-                    </span>
-                    <span className="text-muted-foreground">→</span>
-                    <span className={hasCamera ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                      {hasCamera ? "✓" : "2."} Camera
-                    </span>
-                    <span className="text-muted-foreground">→</span>
-                    <span className="text-muted-foreground">3. Record</span>
-                  </div>
-                </>
-              )}
               </div>
+              {!isCompact && (
+                <div className="sector-card flex shrink-0 items-center gap-2 rounded-lg px-3 py-1.5 text-[8px] font-semibold">
+                  <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
+                    {hasScreen ? "✓" : "1."} Screen
+                  </span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className={hasCamera ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
+                    {hasCamera ? "✓" : "2."} Camera
+                  </span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className="text-muted-foreground">3. Record</span>
+                </div>
+              )}
             </div>
           </div>
         </header>
+        {/* Spacer = header height + 8px padding; header: 64px (not recording) / 96px (recording) */}
+        <div className={`shrink-0 ${isRecording ? "h-[104px]" : "h-[72px]"}`} aria-hidden />
         {showSettings && (
-          <div className="fixed inset-y-0 right-0 z-[100000] w-[320px] border-l border-slate-200 bg-white shadow-xl" data-dreamwork-no-intercept>
+          <div className="fixed inset-y-0 right-0 z-[100011] w-[320px] border-l border-slate-200 bg-white shadow-xl" data-dreamwork-no-intercept>
             <div className="flex h-full flex-col overflow-y-auto p-4 text-slate-900">
               <div className="mb-4 flex items-center justify-between">
                 <span className="text-sm font-semibold text-slate-900">Settings</span>
@@ -2565,7 +2681,7 @@ export default function App() {
             </div>
           </div>
         )}
-        <div className="flex flex-1 min-h-0 gap-0">
+        <div className="relative z-0 flex flex-1 min-h-0 gap-0 p-2.5 isolation-isolate">
           <div ref={fullPageContentRef} className="relative flex-1 min-h-0 sector-card overflow-hidden bg-white">
           {/* Composite overlay: behind whiteboard so user can draw. Draw loop updates it for recording. */}
           {showPip && !activeScreenStream && (cameraStream || avatarImageSrc) && (
@@ -2668,13 +2784,14 @@ export default function App() {
           </div>
           <ResizeHandle
             direction="horizontal"
-            onResize={(d) =>
-              setPreviewWidth((w) => Math.max(80, Math.min(600, w - d)))
-            }
+            onResize={(d) => {
+              const maxW = Math.max(600, window.innerWidth - 480);
+              setPreviewWidth((w) => Math.max(80, Math.min(maxW, w - d)));
+            }}
           />
           {/* Preview strip: resizable */}
           <div
-            className="flex shrink-0 flex-col border-l border-white/20 bg-slate-900/50 p-2"
+            className="flex shrink-0 flex-col overflow-hidden rounded-xl border-l border-white/20 bg-slate-900/50 p-2"
             style={{ width: previewWidth }}
           >
             {activeScreenStream ? (
@@ -2722,32 +2839,82 @@ export default function App() {
         </div>
         {showOutput && recordedClips.length > 0 && (
           <>
-            <ResizeHandle
-              direction="vertical"
-              onResize={(d) =>
-                setOutputHeight((h) =>
-                  Math.max(120, Math.min(Math.round(window.innerHeight * 0.7), h - d))
-                )
-              }
-            />
+            {!outputCollapsed && (
+              <ResizeHandle
+                direction="vertical"
+                onResize={(d) =>
+                  setOutputHeight((h) =>
+                    Math.max(120, Math.min(Math.round(window.innerHeight * 0.7), h - d))
+                  )
+                }
+              />
+            )}
             <div
-              className="glass-panel mx-4 mb-4 flex shrink-0 flex-col gap-4 overflow-auto rounded-xl p-4"
-              style={{ height: outputHeight }}
+              className="glass-panel mx-4 mb-4 flex shrink-0 flex-col overflow-hidden rounded-xl transition-[height] duration-200 ease-out cursor-pointer"
+              style={{
+                height: outputCollapsed ? OUTPUT_COLLAPSED_HEIGHT : outputHeight,
+              }}
+              onClick={() => {
+                if (outputCollapsed) {
+                  if (outputHoverExpandTimerRef.current) {
+                    clearTimeout(outputHoverExpandTimerRef.current);
+                    outputHoverExpandTimerRef.current = null;
+                  }
+                  setOutputCollapsed(false);
+                }
+              }}
+              onMouseEnter={() => {
+                if (outputIdleTimerRef.current) {
+                  clearTimeout(outputIdleTimerRef.current);
+                  outputIdleTimerRef.current = null;
+                }
+                if (outputCollapsed) {
+                  if (outputHoverExpandTimerRef.current) return;
+                  outputHoverExpandTimerRef.current = window.setTimeout(() => {
+                    outputHoverExpandTimerRef.current = null;
+                    setOutputCollapsed(false);
+                  }, OUTPUT_HOVER_EXPAND_MS);
+                }
+              }}
+              onMouseLeave={() => {
+                if (outputHoverExpandTimerRef.current) {
+                  clearTimeout(outputHoverExpandTimerRef.current);
+                  outputHoverExpandTimerRef.current = null;
+                }
+                if (!outputCollapsed) {
+                  outputIdleTimerRef.current = window.setTimeout(() => {
+                    outputIdleTimerRef.current = null;
+                    setOutputCollapsed(true);
+                  }, OUTPUT_IDLE_MS);
+                }
+              }}
             >
-            <div className="grid grid-cols-3 gap-4">
-              {recordedClips.map(({ id, blob }) => (
-                <ClipPreview
-                  key={id}
-                  blob={blob}
-                  onSave={(b, ext) => downloadRecording(b, ext)}
-                  onCopy={() => copyRecording(blob)}
-                />
-              ))}
+              <div className="flex h-full flex-col gap-4 overflow-auto p-4">
+                {outputCollapsed ? (
+                  <div className="flex flex-1 items-center justify-center">
+                    <span className="text-xs text-muted-foreground">
+                      {recordedClips.length}/3 clips — click or hover 3s to expand
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-3 gap-4">
+                      {recordedClips.map(({ id, blob }) => (
+                        <ClipPreview
+                          key={id}
+                          blob={blob}
+                          onSave={(b, ext) => downloadRecording(b, ext)}
+                          onCopy={() => copyRecording(blob)}
+                        />
+                      ))}
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {recordedClips.length}/3 clips — save before recording again
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
-            <span className="text-xs text-muted-foreground">
-              {recordedClips.length}/3 clips — save before recording again
-            </span>
-          </div>
           </>
         )}
       </div>
@@ -2781,7 +2948,7 @@ export default function App() {
       )}
       <header
         data-dreamwork-no-intercept
-        className={`glass-panel sticky top-0 z-50 flex shrink-0 flex-col shadow-sm ${
+        className={`glass-panel sticky top-0 z-[100003] flex shrink-0 flex-col shadow-sm ${
           isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"
         }`}
       >
@@ -3068,20 +3235,67 @@ export default function App() {
             </div>
 
             {showOutput && recordedClips.length > 0 && (
-            <div className="glass-panel mt-4 flex flex-col gap-4 rounded-xl p-4">
-              <div className="grid grid-cols-3 gap-4">
-                {recordedClips.map(({ id, blob }) => (
-                  <ClipPreview
-                    key={id}
-                    blob={blob}
-                    onSave={(b, ext) => downloadRecording(b, ext)}
-                    onCopy={() => copyRecording(blob)}
-                  />
-                ))}
-              </div>
-              <span className="text-xs text-muted-foreground">
-                {recordedClips.length}/3 clips — save before recording again
-              </span>
+            <div
+              className="glass-panel mt-4 flex flex-col overflow-hidden rounded-xl p-4 transition-[height] duration-200 ease-out cursor-pointer"
+              style={{ height: outputCollapsed ? OUTPUT_COLLAPSED_HEIGHT : undefined, minHeight: outputCollapsed ? OUTPUT_COLLAPSED_HEIGHT : undefined }}
+              onClick={() => {
+                if (outputCollapsed) {
+                  if (outputHoverExpandTimerRef.current) {
+                    clearTimeout(outputHoverExpandTimerRef.current);
+                    outputHoverExpandTimerRef.current = null;
+                  }
+                  setOutputCollapsed(false);
+                }
+              }}
+              onMouseEnter={() => {
+                if (outputIdleTimerRef.current) {
+                  clearTimeout(outputIdleTimerRef.current);
+                  outputIdleTimerRef.current = null;
+                }
+                if (outputCollapsed) {
+                  if (outputHoverExpandTimerRef.current) return;
+                  outputHoverExpandTimerRef.current = window.setTimeout(() => {
+                    outputHoverExpandTimerRef.current = null;
+                    setOutputCollapsed(false);
+                  }, OUTPUT_HOVER_EXPAND_MS);
+                }
+              }}
+              onMouseLeave={() => {
+                if (outputHoverExpandTimerRef.current) {
+                  clearTimeout(outputHoverExpandTimerRef.current);
+                  outputHoverExpandTimerRef.current = null;
+                }
+                if (!outputCollapsed) {
+                  outputIdleTimerRef.current = window.setTimeout(() => {
+                    outputIdleTimerRef.current = null;
+                    setOutputCollapsed(true);
+                  }, OUTPUT_IDLE_MS);
+                }
+              }}
+            >
+              {outputCollapsed ? (
+                <div className="flex flex-1 items-center justify-center">
+                  <span className="text-xs text-muted-foreground">
+                    {recordedClips.length}/3 clips — click or hover 3s to expand
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-3 gap-4">
+                    {recordedClips.map(({ id, blob }) => (
+                      <ClipPreview
+                        key={id}
+                        blob={blob}
+                        onSave={(b, ext) => downloadRecording(b, ext)}
+                        onCopy={() => copyRecording(blob)}
+                      />
+                    ))}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {recordedClips.length}/3 clips — save before recording again
+                  </span>
+                </>
+              )}
             </div>
             )}
           </div>
