@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Excalidraw, MainMenu, loadFromBlob, serializeAsJSON } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu, loadFromBlob, serializeAsJSON, exportToBlob } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   loadSettings,
@@ -26,6 +26,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
   const [projects, setProjects] = useState<WhiteboardProject[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [ready, setReady] = useState(false);
+  const [editingName, setEditingName] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestSceneRef = useRef<{ elements: unknown[]; appState: Record<string, unknown> }>({ elements: [], appState: {} });
   const excalidrawRef = useRef<ExcalidrawAPI | null>(null);
@@ -33,8 +34,13 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
   const isElectron =
     typeof window !== "undefined" && !!(window as unknown as { electronAPI?: unknown }).electronAPI;
   const electronAPI = isElectron
-    ? (window as unknown as { electronAPI?: { openFile?: (f?: unknown) => Promise<{ path: string; content: string } | null>; saveFile?: (c: string, n?: string, f?: unknown) => Promise<boolean> } })
-        .electronAPI
+    ? (window as unknown as {
+        electronAPI?: {
+          openFile?: (f?: unknown) => Promise<{ path: string; content: string } | null>;
+          saveFile?: (c: string, n?: string, f?: unknown) => Promise<boolean>;
+          saveImage?: (base64: string, n?: string) => Promise<boolean>;
+        };
+      }).electronAPI
     : null;
 
   const loadProjects = useCallback(async () => {
@@ -102,8 +108,20 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
   const switchProject = useCallback((id: string) => {
     const proj = projects.find((p) => p.id === id);
     if (!proj || id === activeId) return;
+    setEditingName(false);
     setActiveId(id);
   }, [projects, activeId]);
+
+  const saveProjectName = useCallback(
+    (name: string) => {
+      const trimmed = name.trim() || (currentProject?.name ?? "Untitled");
+      if (trimmed === currentProject?.name) return;
+      const next = projects.map((p) => (p.id === activeId ? { ...p, name: trimmed } : p));
+      setProjects(next);
+      saveSettings(saveWhiteboardProjects(loadSettings(), next, activeId));
+    },
+    [projects, activeId, currentProject?.name]
+  );
 
   const newProject = useCallback(() => {
     const id = "proj-" + Date.now();
@@ -169,6 +187,27 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
     await handleSaveToFile();
   }, [handleSaveToFile]);
 
+  const handleExportImage = useCallback(async () => {
+    if (isElectron && electronAPI?.saveImage && excalidrawRef.current) {
+      const elements = excalidrawRef.current.getSceneElements();
+      const appState = excalidrawRef.current.getAppState();
+      const files = excalidrawRef.current.getFiles();
+      const blob = await exportToBlob({
+        elements: elements as Parameters<typeof exportToBlob>[0]["elements"],
+        appState: appState as Parameters<typeof exportToBlob>[0]["appState"],
+        files: files as Parameters<typeof exportToBlob>[0]["files"],
+        mimeType: "image/png",
+      });
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve((r.result as string).split(",")[1] ?? "");
+        r.onerror = reject;
+        r.readAsDataURL(blob);
+      });
+      await electronAPI.saveImage(base64, `${currentProject?.name ?? "export"}.png`);
+    }
+  }, [isElectron, electronAPI, currentProject?.name]);
+
   useEffect(() => {
     return () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
@@ -229,9 +268,43 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
       <MainMenu.DefaultItems.Export />
     );
 
+  const renderSaveAsImageItem = () =>
+    isElectron ? (
+      <MainMenu.Item onSelect={handleExportImage}>Export image...</MainMenu.Item>
+    ) : (
+      <MainMenu.DefaultItems.SaveAsImage />
+    );
+
   return (
-    <div ref={rootRef} className="h-full w-full min-h-[200px] bg-white">
-      <Excalidraw
+    <div ref={rootRef} className="flex h-full w-full min-h-[200px] flex-col bg-white">
+      <div
+        className="flex shrink-0 items-center border-b border-gray-200 bg-white px-3 py-1.5"
+        onDoubleClick={() => setEditingName(true)}
+      >
+        {editingName ? (
+          <input
+            type="text"
+            defaultValue={currentProject?.name ?? "Untitled"}
+            className="min-w-[120px] flex-1 rounded border border-gray-300 px-2 py-0.5 text-sm focus:border-blue-500 focus:outline-none"
+            autoFocus
+            onBlur={(e) => {
+              saveProjectName(e.target.value);
+              setEditingName(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                saveProjectName(e.currentTarget.value);
+                setEditingName(false);
+              }
+              if (e.key === "Escape") setEditingName(false);
+            }}
+          />
+        ) : (
+          <span className="cursor-default text-sm text-gray-700">{currentProject?.name ?? "Untitled"}</span>
+        )}
+      </div>
+      <div className="min-h-0 flex-1">
+        <Excalidraw
         key={activeId}
         langCode="en"
         viewModeEnabled={false}
@@ -254,7 +327,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
           {renderLoadItem()}
           {renderSaveItem()}
           {renderExportItem()}
-          <MainMenu.DefaultItems.SaveAsImage />
+          {renderSaveAsImageItem()}
           <MainMenu.DefaultItems.SearchMenu />
           <MainMenu.DefaultItems.Help />
           <MainMenu.DefaultItems.ClearCanvas />
@@ -278,6 +351,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange }: Props) {
           <MainMenu.DefaultItems.ChangeCanvasBackground />
         </MainMenu>
       </Excalidraw>
+      </div>
     </div>
   );
 }

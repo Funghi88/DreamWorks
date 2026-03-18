@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openFile: (filters) => ipcRenderer.invoke("openFile", filters),
   saveFile: (content, defaultName, filters) =>
     ipcRenderer.invoke("saveFile", content, defaultName, filters),
+  saveImage: (base64, defaultName) =>
+    ipcRenderer.invoke("saveImage", base64, defaultName),
   startEmbeddedSignaling: () => ipcRenderer.invoke("startEmbeddedSignaling"),
   stopEmbeddedSignaling: () => ipcRenderer.invoke("stopEmbeddedSignaling"),
 });

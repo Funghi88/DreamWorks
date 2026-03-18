@@ -31,10 +31,23 @@ interface TeleprompterOverlayProps {
   onNudgeSpeed: (delta: number) => void;
 }
 
+interface TeleprompterScriptItem {
+  id: string;
+  name: string;
+  content: string;
+  updatedAt: number;
+}
+
 interface TeleprompterPanelProps {
   isVisible: boolean;
   isPlaying: boolean;
   script: string;
+  scripts: TeleprompterScriptItem[];
+  activeScriptId: string;
+  onSwitchScript: (id: string) => void;
+  onNewScript: () => void;
+  onSaveAsScript: () => void;
+  onRenameScript: (newName: string) => void;
   speed: number;
   fontSize: number;
   opacity: number;
@@ -267,7 +280,7 @@ export function TeleprompterOverlay({
       <div className="absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/80 to-transparent" />
       <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/80 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 top-1/2 h-12 -translate-y-1/2 border-y border-emerald-300/40 bg-emerald-200/10" />
-      <div ref={viewportRef} className="h-full overflow-hidden px-6 py-7 text-center text-white/95">
+      <div ref={viewportRef} className="h-full overflow-hidden px-6 py-7 text-center text-white">
         <div style={{ fontSize, lineHeight: 1.55, transform: `translateY(${-scrollPx}px)` }}>
           <div style={{ paddingTop: "42%", paddingBottom: "42%", whiteSpace: "pre-wrap" }}>
             {script || "Paste your script in Teleprompter panel."}
@@ -282,6 +295,12 @@ export function TeleprompterPanel({
   isVisible,
   isPlaying,
   script,
+  scripts,
+  activeScriptId,
+  onSwitchScript,
+  onNewScript,
+  onSaveAsScript,
+  onRenameScript,
   speed,
   fontSize,
   opacity,
@@ -302,6 +321,8 @@ export function TeleprompterPanel({
   onHide,
 }: TeleprompterPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [editingScriptName, setEditingScriptName] = useState(false);
+  const currentScript = scripts.find((s) => s.id === activeScriptId);
   const idleTimerRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
@@ -470,6 +491,55 @@ export function TeleprompterPanel({
         </GlassButton>
         <GlassButton size="sm" variant="ghost" onClick={onHide}>
           Hide
+        </GlassButton>
+      </div>
+      <div className="mb-2 flex items-center gap-1">
+        {editingScriptName ? (
+          <input
+            type="text"
+            defaultValue={currentScript?.name ?? "Untitled"}
+            className="min-w-0 flex-1 rounded border border-white/20 bg-black/45 px-2 py-1 text-xs text-white outline-none"
+            autoFocus
+            onBlur={(e) => {
+              const name = e.target.value.trim() || (currentScript?.name ?? "Untitled");
+              onRenameScript(name);
+              setEditingScriptName(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const name = e.currentTarget.value.trim() || (currentScript?.name ?? "Untitled");
+                onRenameScript(name);
+                setEditingScriptName(false);
+              }
+              if (e.key === "Escape") setEditingScriptName(false);
+            }}
+          />
+        ) : (
+          <select
+            value={activeScriptId}
+            onChange={(e) => onSwitchScript(e.target.value)}
+            className="flex-1 rounded border border-white/20 bg-black/45 px-2 py-1 text-xs text-white"
+          >
+            {scripts.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <GlassButton size="sm" variant="secondary" onClick={onNewScript} title="New script">
+          New
+        </GlassButton>
+        <GlassButton size="sm" variant="secondary" onClick={onSaveAsScript} title="Save as new script">
+          Save as
+        </GlassButton>
+        <GlassButton
+          size="sm"
+          variant="secondary"
+          onClick={() => setEditingScriptName(true)}
+          title="Rename script"
+        >
+          Rename
         </GlassButton>
       </div>
       <textarea

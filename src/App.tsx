@@ -9,7 +9,16 @@ import { CircularWebcam } from "@/components/CircularWebcam";
 import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
 import type { AvatarDecor, AvatarShape } from "@/components/SettingsPanel";
 import { beautySettingsToFilter, presets } from "@/lib/beautyEffects";
-import { loadSettings, loadSettingsAsync, saveSettings, type RecordResolution, type LetterboxBackground } from "@/lib/storage";
+import {
+  loadSettings,
+  loadSettingsAsync,
+  saveSettings,
+  getTeleprompterScripts,
+  saveTeleprompterScripts,
+  type RecordResolution,
+  type LetterboxBackground,
+  type TeleprompterScript,
+} from "@/lib/storage";
 import { captureFrame, getCaptureFilename, scaleTo2KAndBlob, type CapturePresetId, type CaptureModeId } from "@/lib/capture";
 import {
   initFaceLandmarker,
@@ -384,12 +393,21 @@ export default function App() {
   );
   const [showTeleprompter, setShowTeleprompter] = useState(false);
   const [teleprompterPlaying, setTeleprompterPlaying] = useState(false);
-  const [teleprompterScript, setTeleprompterScript] = useState(
-    "Hook line.\n\nMain point one.\n\nMain point two.\n\nCall to action."
+  const defaultScript = "Hook line.\n\nMain point one.\n\nMain point two.\n\nCall to action.";
+  const [teleprompterScripts, setTeleprompterScripts] = useState<TeleprompterScript[]>(() =>
+    getTeleprompterScripts(loadSettings())
   );
+  const [activeTeleprompterScriptId, setActiveTeleprompterScriptId] = useState<string>(() => {
+    const s = loadSettings();
+    const list = getTeleprompterScripts(s);
+    const aid = s.activeTeleprompterScriptId && list.some((x) => x.id === s.activeTeleprompterScriptId)
+      ? s.activeTeleprompterScriptId
+      : list[0]?.id ?? "default";
+    return aid;
+  });
   const [teleprompterSpeed, setTeleprompterSpeed] = useState(42);
   const [teleprompterFontSize, setTeleprompterFontSize] = useState(32);
-  const [teleprompterOpacity, setTeleprompterOpacity] = useState(0.86);
+  const [teleprompterOpacity, setTeleprompterOpacity] = useState(0.68);
   const [teleprompterWidth, setTeleprompterWidth] = useState(560);
   const [teleprompterNearCamera, setTeleprompterNearCamera] = useState(true);
   const [teleprompterPosition, setTeleprompterPosition] = useState<{ x: number; y: number } | null>(null);
@@ -405,6 +423,79 @@ export default function App() {
   const teleprompterChannelRef = useRef<BroadcastChannel | null>(null);
   const teleprompterWindowRef = useRef<Window | null>(null);
   const monitorWindowRef = useRef<Window | null>(null);
+  const teleprompterSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentTeleprompterScript = teleprompterScripts.find((s) => s.id === activeTeleprompterScriptId);
+  const teleprompterScript = currentTeleprompterScript?.content ?? defaultScript;
+
+  useEffect(() => {
+    if (isElectron) {
+      loadSettingsAsync().then((s) => {
+        const list = getTeleprompterScripts(s);
+        const aid = s.activeTeleprompterScriptId && list.some((x) => x.id === s.activeTeleprompterScriptId)
+          ? s.activeTeleprompterScriptId
+          : list[0]?.id ?? "default";
+        setTeleprompterScripts(list);
+        setActiveTeleprompterScriptId(aid);
+      });
+    }
+  }, [isElectron]);
+
+  useEffect(() => {
+    if (teleprompterSaveTimeoutRef.current) clearTimeout(teleprompterSaveTimeoutRef.current);
+    teleprompterSaveTimeoutRef.current = setTimeout(() => {
+      saveSettings(saveTeleprompterScripts(loadSettings(), teleprompterScripts, activeTeleprompterScriptId));
+      teleprompterSaveTimeoutRef.current = null;
+    }, 500);
+    return () => {
+      if (teleprompterSaveTimeoutRef.current) clearTimeout(teleprompterSaveTimeoutRef.current);
+    };
+  }, [teleprompterScripts, activeTeleprompterScriptId]);
+
+  const handleSetTeleprompterScript = useCallback(
+    (content: string) => {
+      const now = Date.now();
+      setTeleprompterScripts((prev) =>
+        prev.map((s) =>
+          s.id === activeTeleprompterScriptId ? { ...s, content, updatedAt: now } : s
+        )
+      );
+    },
+    [activeTeleprompterScriptId]
+  );
+
+  const handleSwitchTeleprompterScript = useCallback((id: string) => {
+    const s = teleprompterScripts.find((x) => x.id === id);
+    if (!s || id === activeTeleprompterScriptId) return;
+    setActiveTeleprompterScriptId(id);
+  }, [teleprompterScripts, activeTeleprompterScriptId]);
+
+  const handleNewTeleprompterScript = useCallback(() => {
+    const id = "script-" + Date.now();
+    const script: TeleprompterScript = { id, name: "Untitled", content: "", updatedAt: Date.now() };
+    setTeleprompterScripts((prev) => [...prev, script]);
+    setActiveTeleprompterScriptId(id);
+  }, []);
+
+  const handleSaveAsTeleprompterScript = useCallback(() => {
+    const name = (typeof window !== "undefined" ? window.prompt("Script name:", "Untitled") : null) || "Untitled";
+    const id = "script-" + Date.now();
+    const content = currentTeleprompterScript?.content ?? "";
+    const script: TeleprompterScript = { id, name, content, updatedAt: Date.now() };
+    setTeleprompterScripts((prev) => [...prev, script]);
+    setActiveTeleprompterScriptId(id);
+  }, [currentTeleprompterScript?.content]);
+
+  const handleRenameTeleprompterScript = useCallback(
+    (newName: string) => {
+      const trimmed = newName.trim() || (currentTeleprompterScript?.name ?? "Untitled");
+      if (trimmed === currentTeleprompterScript?.name) return;
+      setTeleprompterScripts((prev) =>
+        prev.map((p) => (p.id === activeTeleprompterScriptId ? { ...p, name: trimmed } : p))
+      );
+    },
+    [currentTeleprompterScript?.name, activeTeleprompterScriptId]
+  );
+
   const helperOpenInFlightRef = useRef<{ teleprompter: boolean; monitor: boolean }>({
     teleprompter: false,
     monitor: false,
@@ -2279,6 +2370,12 @@ export default function App() {
           isVisible={showTeleprompter && !detachedHelpersEnabled}
           isPlaying={teleprompterPlaying}
           script={teleprompterScript}
+          scripts={teleprompterScripts}
+          activeScriptId={activeTeleprompterScriptId}
+          onSwitchScript={handleSwitchTeleprompterScript}
+          onNewScript={handleNewTeleprompterScript}
+          onSaveAsScript={handleSaveAsTeleprompterScript}
+          onRenameScript={handleRenameTeleprompterScript}
           speed={teleprompterSpeed}
           fontSize={teleprompterFontSize}
           opacity={teleprompterOpacity}
@@ -2286,7 +2383,7 @@ export default function App() {
           nearCamera={teleprompterNearCamera}
           locked={teleprompterLocked}
           position={teleprompterPanelPosition}
-          onSetScript={setTeleprompterScript}
+          onSetScript={handleSetTeleprompterScript}
           onSetPlaying={setTeleprompterPlaying}
           onSetSpeed={setTeleprompterSpeed}
           onSetFontSize={setTeleprompterFontSize}

@@ -287,6 +287,25 @@ ipcMain.handle(
   }
 );
 
+// IPC: saveImage (for Export image in Electron)
+ipcMain.handle("saveImage", async (_, base64, defaultName = "export.png") => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (!win) return false;
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    defaultPath: defaultName,
+    filters: [{ name: "Image", extensions: ["png", "svg", "webp"] }],
+  });
+  if (canceled || !filePath) return false;
+  try {
+    const buf = Buffer.from(base64, "base64");
+    fs.writeFileSync(filePath, buf);
+    return true;
+  } catch (e) {
+    console.error("saveImage:", e);
+    return false;
+  }
+});
+
 // IPC: setWindowTitle
 ipcMain.handle("setWindowTitle", async (_, title) => {
   const win = mainWindow;

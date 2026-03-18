@@ -73,9 +73,15 @@ export interface StoredSettings {
   /** Whiteboard projects: one document per project */
   whiteboardProjects?: Array<{ id: string; name: string; data: { elements: unknown[]; appState: Record<string, unknown> }; updatedAt: number }>;
   activeProjectId?: string;
+  /** @deprecated Migrated to teleprompterScripts */
+  teleprompterScript?: string;
+  /** Teleprompter scripts: multiple named scripts */
+  teleprompterScripts?: Array<{ id: string; name: string; content: string; updatedAt: number }>;
+  activeTeleprompterScriptId?: string;
 }
 
 export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
+export type TeleprompterScript = NonNullable<StoredSettings["teleprompterScripts"]>[number];
 
 function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
   if (!v || typeof v !== "object") return undefined;
@@ -97,6 +103,18 @@ function validProjects(v: unknown): StoredSettings["whiteboardProjects"] {
     if (!data) continue;
     const name = p.name === "未命名项目" ? "Untitled" : p.name;
     out.push({ id: p.id, name, data, updatedAt: p.updatedAt });
+  }
+  return out.length ? out : undefined;
+}
+
+function validTeleprompterScripts(v: unknown): StoredSettings["teleprompterScripts"] {
+  if (!Array.isArray(v)) return undefined;
+  const out: TeleprompterScript[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    if (typeof p.id !== "string" || typeof p.name !== "string" || typeof p.content !== "string" || typeof p.updatedAt !== "number") continue;
+    out.push({ id: p.id, name: p.name, content: p.content, updatedAt: p.updatedAt });
   }
   return out.length ? out : undefined;
 }
@@ -183,7 +201,36 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     whiteboardData: validWhiteboardData(p.whiteboardData),
     whiteboardProjects: validProjects(p.whiteboardProjects),
     activeProjectId: typeof p.activeProjectId === "string" ? p.activeProjectId : undefined,
+    teleprompterScript: typeof p.teleprompterScript === "string" ? p.teleprompterScript : undefined,
+    teleprompterScripts: validTeleprompterScripts(p.teleprompterScripts),
+    activeTeleprompterScriptId: typeof p.activeTeleprompterScriptId === "string" ? p.activeTeleprompterScriptId : undefined,
   };
+}
+
+/** Get teleprompter scripts with migration from legacy teleprompterScript. */
+export function getTeleprompterScripts(s: StoredSettings): TeleprompterScript[] {
+  if (s.teleprompterScripts?.length) return s.teleprompterScripts;
+  if (typeof s.teleprompterScript === "string") {
+    return [
+      {
+        id: "migrated-" + Date.now(),
+        name: "Untitled",
+        content: s.teleprompterScript,
+        updatedAt: Date.now(),
+      },
+    ];
+  }
+  return [{ id: "default", name: "Untitled", content: "Hook line.\n\nMain point one.\n\nMain point two.\n\nCall to action.", updatedAt: Date.now() }];
+}
+
+export function saveTeleprompterScripts(
+  s: StoredSettings,
+  scripts: TeleprompterScript[],
+  activeId: string
+): StoredSettings {
+  const next = { ...s, teleprompterScripts: scripts, activeTeleprompterScriptId: activeId };
+  if (next.teleprompterScript) delete next.teleprompterScript;
+  return next;
 }
 
 /** Get projects with migration from legacy whiteboardData. Call after parseAndValidate. */
