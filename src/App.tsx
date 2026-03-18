@@ -439,6 +439,7 @@ export default function App() {
   const [teleprompterPanelPosition, setTeleprompterPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterLocked, setTeleprompterLocked] = useState(false);
   const [teleprompterResetSeq, setTeleprompterResetSeq] = useState(0);
+  const [teleprompterEditorScrollRatio, setTeleprompterEditorScrollRatio] = useState<number | null>(null);
   const [teleprompterAnchorRect, setTeleprompterAnchorRect] = useState<{
     left: number;
     top: number;
@@ -698,6 +699,7 @@ export default function App() {
 
   const handleResetTeleprompter = () => {
     setTeleprompterPlaying(false);
+    setTeleprompterEditorScrollRatio(null);
     setTeleprompterResetSeq((prev) => prev + 1);
   };
 
@@ -2467,6 +2469,7 @@ export default function App() {
           position={teleprompterPosition}
           locked={teleprompterLocked}
           resetSignal={teleprompterResetSeq}
+          editorScrollRatio={teleprompterEditorScrollRatio}
           onSetPlaying={setTeleprompterPlaying}
           onPositionChange={setTeleprompterPosition}
           onOverlaySizeChange={(w, h) => {
@@ -2511,6 +2514,10 @@ export default function App() {
           onReset={handleResetTeleprompter}
           onHide={() => {
             setShowTeleprompter(false);
+            setTeleprompterPlaying(false);
+          }}
+          onEditorScroll={(ratio) => {
+            setTeleprompterEditorScrollRatio(ratio);
             setTeleprompterPlaying(false);
           }}
           onFlushSave={flushTeleprompterSave}

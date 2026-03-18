@@ -23,6 +23,7 @@ interface TeleprompterOverlayProps {
   position: { x: number; y: number } | null;
   locked: boolean;
   resetSignal: number;
+  editorScrollRatio?: number | null;
   onSetPlaying: (playing: boolean) => void;
   onPositionChange: (position: { x: number; y: number }) => void;
   onOverlaySizeChange: (width: number, height: number) => void;
@@ -69,6 +70,7 @@ interface TeleprompterPanelProps {
   onReset: () => void;
   onHide: () => void;
   onFlushSave?: () => void;
+  onEditorScroll?: (ratio: number) => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -103,6 +105,7 @@ function useTeleprompterScroll({
   overlayHeight,
   onSetPlaying,
   resetSignal,
+  editorScrollRatio,
 }: {
   isVisible: boolean;
   isPlaying: boolean;
@@ -113,6 +116,7 @@ function useTeleprompterScroll({
   overlayHeight: number;
   onSetPlaying: (playing: boolean) => void;
   resetSignal?: number;
+  editorScrollRatio?: number | null;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollContentRef = useRef<HTMLDivElement>(null);
@@ -135,6 +139,17 @@ function useTeleprompterScroll({
     });
     return () => cancelAnimationFrame(raf);
   }, [script, fontSize, overlayWidth, overlayHeight]);
+
+  // Sync scroll from editor (right panel) when user scrolls the textarea
+  useEffect(() => {
+    if (editorScrollRatio == null || typeof editorScrollRatio !== "number") return;
+    const viewport = viewportRef.current;
+    const el = scrollContentRef.current;
+    if (!viewport || !el) return;
+    const maxScrollPx = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    scrollPxRef.current = Math.max(0, Math.min(editorScrollRatio * maxScrollPx, maxScrollPx));
+    el.style.transform = `translateY(${-scrollPxRef.current}px)`;
+  }, [editorScrollRatio]);
 
   useEffect(() => {
     if (!isVisible || !isPlaying) return;
@@ -195,6 +210,7 @@ export function TeleprompterOverlay({
   position,
   locked,
   resetSignal,
+  editorScrollRatio,
   onSetPlaying,
   onPositionChange,
   onOverlaySizeChange,
@@ -222,6 +238,7 @@ export function TeleprompterOverlay({
     overlayHeight,
     onSetPlaying,
     resetSignal,
+    editorScrollRatio,
   });
 
   const scrollDragRef = useRef(false);
@@ -472,6 +489,7 @@ export function TeleprompterPanel({
   onReset,
   onHide,
   onFlushSave,
+  onEditorScroll,
 }: TeleprompterPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [editingScriptName, setEditingScriptName] = useState(false);
@@ -699,6 +717,15 @@ export function TeleprompterPanel({
         value={script}
         onChange={(e) => onSetScript(e.target.value)}
         onBlur={() => onFlushSave?.()}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          const max = el.scrollHeight - el.clientHeight;
+          if (max > 0) {
+            const ratio = el.scrollTop / max;
+            onEditorScroll?.(ratio);
+            onSetPlaying(false);
+          }
+        }}
         className="mb-3 h-36 w-full resize-y rounded-md border border-white/20 bg-black/45 p-2 text-xs text-white outline-none"
         placeholder="Paste script here..."
       />
@@ -731,7 +758,7 @@ export function TeleprompterPanel({
         <input type="checkbox" checked={nearCamera} onChange={(e) => onSetNearCamera(e.target.checked)} />
         <span>Near camera</span>
       </label>
-      <p className="mt-2 text-[11px] text-white/70">Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag content to scroll.</p>
+      <p className="mt-2 text-[11px] text-white/70">Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag overlay to scroll. Scroll editor to sync overlay.</p>
     </div>
   );
 }
