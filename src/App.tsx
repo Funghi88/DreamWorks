@@ -2396,7 +2396,9 @@ export default function App() {
 
   useEffect(() => {
     if (!settingsLoadedRef.current) return;
+    const current = loadSettings();
     saveSettings({
+      ...current,
       glowColor,
       pipPos,
       fullPagePipPos,

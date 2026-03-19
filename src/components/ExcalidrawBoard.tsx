@@ -414,11 +414,17 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
 
   useEffect(() => {
     const onBeforeUnload = () => flushPersist();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushPersist();
+    };
     window.addEventListener("beforeunload", onBeforeUnload);
     window.addEventListener("pagehide", onBeforeUnload);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
       window.removeEventListener("pagehide", onBeforeUnload);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      flushPersist(); // Save when unmounting (e.g. Capture Screen collapses whiteboard)
     };
   }, [flushPersist]);
 
