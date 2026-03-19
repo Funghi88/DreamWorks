@@ -26,7 +26,10 @@ function start() {
   app.use(cors());
   app.get("/health", (_req, res) => res.send("ok"));
   const httpServer = http.createServer(app);
-  const io = new SocketIOServer(httpServer, { cors: { origin: "*" } });
+  const io = new SocketIOServer(httpServer, {
+    cors: { origin: "*" },
+    maxHttpBufferSize: 1e7,
+  });
 
   io.on("connection", (socket) => {
     socket.on("join-room", (roomId, userName) => {
@@ -67,6 +70,21 @@ function start() {
 
     socket.on("screen-sharing-stopped", (data) => {
       socket.to(data.roomId).emit("screen-sharing-stopped", { userId: socket.id });
+    });
+
+    socket.on("recording-permission", (data) => {
+      io.to(data.roomId).emit("recording-permission", {
+        from: socket.id,
+        allowed: data.allowed,
+      });
+    });
+
+    socket.on("file-share", (data) => {
+      io.to(data.roomId).emit("file-share", {
+        from: socket.id,
+        userName: socket.data.userName ?? "Unknown",
+        ...data,
+      });
     });
 
     socket.on("disconnect", () => {

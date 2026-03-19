@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, dialog, systemPreferences } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const embeddedSignaling = require("./embedded-signaling.cjs");
@@ -125,6 +125,16 @@ app.whenReady().then(() => {
       fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings), "utf8");
     } catch (e) {
       console.error("saveSettings:", e);
+    }
+  });
+
+  // Request camera access (macOS) - helps system show camera in Control Center
+  ipcMain.handle("requestCameraAccess", async () => {
+    if (process.platform !== "darwin") return true;
+    try {
+      return await systemPreferences.askForMediaAccess("camera");
+    } catch {
+      return false;
     }
   });
 

@@ -30,17 +30,22 @@ export function ChatPanel({ socket, roomId, userName: _userName, isOpen, onClose
   useEffect(() => {
     if (!socket) return;
     const handler = (data: { from: string; userName: string; text: string; ts: number }) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${data.from}-${data.ts}`,
-          from: data.from,
-          userName: data.userName,
-          text: data.text,
-          ts: data.ts,
-          isOwn: data.from === socket.id,
-        },
-      ]);
+      setMessages((prev) => {
+        const isOwn = data.from === socket.id;
+        const isDuplicate = isOwn && prev.some((m) => m.isOwn && m.text === data.text && Math.abs(m.ts - data.ts) < 2000);
+        if (isDuplicate) return prev;
+        return [
+          ...prev,
+          {
+            id: `${data.from}-${data.ts}`,
+            from: data.from,
+            userName: data.userName,
+            text: data.text,
+            ts: data.ts,
+            isOwn,
+          },
+        ];
+      });
     };
     socket.on("chat-message", handler);
     return () => {
@@ -61,6 +66,18 @@ export function ChatPanel({ socket, roomId, userName: _userName, isOpen, onClose
   const send = () => {
     const text = input.trim();
     if (!text || !socket || !roomId) return;
+    const ts = Date.now();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `own-${ts}`,
+        from: socket.id ?? "",
+        userName: _userName || "You",
+        text,
+        ts,
+        isOwn: true,
+      },
+    ]);
     socket.emit("chat-message", { roomId, text });
     setInput("");
   };

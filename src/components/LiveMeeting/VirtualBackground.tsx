@@ -11,6 +11,7 @@ interface VirtualBackgroundProps {
   enabled: boolean;
   mode: BackgroundMode;
   color?: string;
+  imageUrl?: string | null;
   onFrame?: (ctx: CanvasRenderingContext2D, video: HTMLVideoElement) => void;
 }
 
@@ -42,14 +43,16 @@ export function VirtualBackground({
   enabled,
   mode,
   color = "#1e293b",
+  imageUrl,
   onFrame,
 }: VirtualBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const segmenterRef = useRef<ImageSegmenter | null>(null);
+  const bgImageRef = useRef<HTMLImageElement | null>(null);
   const rafRef = useRef<number>(0);
 
   useEffect(() => {
-    if ((mode !== "color" && mode !== "blur") || !enabled) return;
+    if ((mode !== "color" && mode !== "blur" && mode !== "image") || !enabled) return;
     getSegmenter().then((seg) => {
       segmenterRef.current = seg;
     });
@@ -105,7 +108,8 @@ export function VirtualBackground({
           const octx = offscreen.getContext("2d")!;
           octx.drawImage(video, 0, 0);
           const sharpData = octx.getImageData(0, 0, w, h);
-          octx.filter = "blur(40px)";
+          const blurRadius = Math.max(32, Math.min(w, h) * 0.1);
+          octx.filter = `blur(${blurRadius}px)`;
           octx.drawImage(video, 0, 0);
           octx.filter = "none";
           const blurredData = octx.getImageData(0, 0, w, h);
@@ -117,13 +121,12 @@ export function VirtualBackground({
               const mx = Math.min(Math.floor(x * scaleX), maskW - 1);
               const my = Math.min(Math.floor(y * scaleY), maskH - 1);
               const idx = Math.min(my * maskW + mx, maskData.length - 1);
-              const bgConf = maskData[idx] ?? 0;
+              let bgConf = maskData[idx] ?? 0;
+              bgConf = Math.max(0, Math.min(1, (bgConf - 0.25) / 0.5));
               const i = (y * w + x) * 4;
-              if (bgConf > 0.5) {
-                sd[i] = bd[i];
-                sd[i + 1] = bd[i + 1];
-                sd[i + 2] = bd[i + 2];
-              }
+              sd[i] = (1 - bgConf) * sd[i] + bgConf * bd[i];
+              sd[i + 1] = (1 - bgConf) * sd[i + 1] + bgConf * bd[i + 1];
+              sd[i + 2] = (1 - bgConf) * sd[i + 2] + bgConf * bd[i + 2];
             }
           }
           ctx.putImageData(sharpData, 0, 0);
@@ -147,10 +150,6 @@ export function VirtualBackground({
 
       if (!seg) {
         ctx.drawImage(video, 0, 0);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(0, 0, w, h);
-        ctx.globalAlpha = 1;
         rafRef.current = requestAnimationFrame(drawColor);
         return;
       }
@@ -163,8 +162,8 @@ export function VirtualBackground({
           rafRef.current = requestAnimationFrame(drawColor);
           return;
         }
-        const personMask = masks[1] ?? masks[0];
-        const maskData = personMask.getAsFloat32Array();
+        const bgMask = masks[0];
+        const maskData = bgMask.getAsFloat32Array();
         const imgData = ctx.getImageData(0, 0, w, h);
         const data = imgData.data;
 
@@ -172,18 +171,19 @@ export function VirtualBackground({
         const g = parseInt(color.slice(3, 5), 16);
         const b = parseInt(color.slice(5, 7), 16);
 
-        const maskW = personMask.width;
-        const maskH = personMask.height;
+        const maskW = bgMask.width;
+        const maskH = bgMask.height;
         const scaleX = maskW / w;
         const scaleY = maskH / h;
+        const threshold = 0.5;
 
         for (let y = 0; y < h; y++) {
           for (let x = 0; x < w; x++) {
             const mx = Math.min(Math.floor(x * scaleX), maskW - 1);
             const my = Math.min(Math.floor(y * scaleY), maskH - 1);
-            const m = maskData[my * maskW + mx] ?? 0;
+            const bgConf = maskData[my * maskW + mx] ?? 0;
             const i = (y * w + x) * 4;
-            if (m < 0.5) {
+            if (bgConf > threshold) {
               data[i] = r;
               data[i + 1] = g;
               data[i + 2] = b;
@@ -195,16 +195,99 @@ export function VirtualBackground({
       rafRef.current = requestAnimationFrame(drawColor);
     };
 
+    if (mode === "image" && imageUrl) {
+      bgImageRef.current = null;
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = imageUrl;
+      img.onload = () => { bgImageRef.current = img; };
+    }
+
+    const drawImage = () => {
+      const seg = segmenterRef.current;
+      const bgImg = bgImageRef.current;
+      if (video.readyState < 2 || !bgImg) {
+        rafRef.current = requestAnimationFrame(drawImage);
+        return;
+      }
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+
+      if (!seg) {
+        ctx.drawImage(video, 0, 0);
+        rafRef.current = requestAnimationFrame(drawImage);
+        return;
+      }
+
+      ctx.drawImage(video, 0, 0);
+      const timestamp = video.currentTime * 1000;
+      seg.segmentForVideo(video, timestamp, (result) => {
+        const masks = result.confidenceMasks;
+        if (!masks || masks.length === 0) {
+          rafRef.current = requestAnimationFrame(drawImage);
+          return;
+        }
+        const bgMask = masks[0];
+        const maskData = bgMask.getAsFloat32Array();
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const data = imgData.data;
+
+        const maskW = bgMask.width;
+        const maskH = bgMask.height;
+        const scaleX = maskW / w;
+        const scaleY = maskH / h;
+        const threshold = 0.5;
+
+        const iw = bgImg.naturalWidth;
+        const ih = bgImg.naturalHeight;
+        const scale = Math.max(w / iw, h / ih);
+        const sW = w / scale;
+        const sH = h / scale;
+        const sx = (iw - sW) / 2;
+        const sy = (ih - sH) / 2;
+
+        const imgCanvas = document.createElement("canvas");
+        imgCanvas.width = w;
+        imgCanvas.height = h;
+        const ictx = imgCanvas.getContext("2d")!;
+        ictx.drawImage(bgImg, sx, sy, sW, sH, 0, 0, w, h);
+        const bgData = ictx.getImageData(0, 0, w, h).data;
+
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const mx = Math.min(Math.floor(x * scaleX), maskW - 1);
+            const my = Math.min(Math.floor(y * scaleY), maskH - 1);
+            const bgConf = maskData[my * maskW + mx] ?? 0;
+            const i = (y * w + x) * 4;
+            if (bgConf > threshold) {
+              data[i] = bgData[i];
+              data[i + 1] = bgData[i + 1];
+              data[i + 2] = bgData[i + 2];
+            }
+          }
+        }
+        ctx.putImageData(imgData, 0, 0);
+      });
+      rafRef.current = requestAnimationFrame(drawImage);
+    };
+
     if (mode === "blur") {
       drawBlur();
     } else if (mode === "color") {
       drawColor();
+    } else if (mode === "image" && imageUrl) {
+      drawImage();
     }
 
     return () => cancelAnimationFrame(rafRef.current);
-  }, [videoRef, enabled, mode, color, onFrame]);
+  }, [videoRef, enabled, mode, color, imageUrl, onFrame]);
 
   if (!enabled || mode === "none") return null;
+  if (mode === "image" && !imageUrl) return null;
   return (
     <canvas
       ref={canvasRef}

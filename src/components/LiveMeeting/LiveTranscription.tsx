@@ -17,7 +17,10 @@ interface LiveTranscriptionProps {
 
 export function LiveTranscription({ isOpen, onClose }: LiveTranscriptionProps) {
   const [entries, setEntries] = useState<TranscriptionEntry[]>([]);
+  const [interim, setInterim] = useState("");
   const [isListening, setIsListening] = useState(false);
+  const [apiAvailable, setApiAvailable] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -27,44 +30,93 @@ export function LiveTranscription({ isOpen, onClose }: LiveTranscriptionProps) {
         ? (window as unknown as { SpeechRecognition?: new () => SpeechRecognition; webkitSpeechRecognition?: new () => SpeechRecognition }).SpeechRecognition ||
           (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognition }).webkitSpeechRecognition
         : null;
-    if (!SpeechRecognitionAPI) return;
+
+    if (!SpeechRecognitionAPI) {
+      setApiAvailable(false);
+      return;
+    }
+    setApiAvailable(true);
 
     const recognition = new SpeechRecognitionAPI();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = "en-US";
+    recognition.lang = typeof navigator !== "undefined" && /^zh/i.test(navigator.language) ? "zh-CN" : "en-US";
 
     recognition.onresult = (e: SpeechRecognitionEvent) => {
-      const last = e.results.length - 1;
-      const result = e.results[last];
-      if (result?.isFinal && result[0]?.transcript?.trim()) {
-        setEntries((prev) => [
-          ...prev,
-          { id: `${Date.now()}-${last}`, text: result[0].transcript, ts: Date.now() },
-        ]);
+      let interimText = "";
+      const ev = e as SpeechRecognitionEvent & { resultIndex: number };
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const result = ev.results[i];
+        const text = result[0]?.transcript ?? "";
+        if (result.isFinal && text.trim()) {
+          setEntries((prev) => [...prev, { id: `${Date.now()}-${i}`, text, ts: Date.now() }]);
+        } else {
+          interimText += text;
+        }
       }
+      setInterim(interimText);
+    };
+
+    (recognition as unknown as { onerror: (e: { error: string }) => void }).onerror = (e) => {
+      if (e.error === "no-speech" || e.error === "aborted") return;
+      const msg =
+        e.error === "not-allowed"
+          ? "Microphone permission denied"
+          : e.error === "network"
+          ? "Network error: Speech recognition needs internet. Check connection and try Start again."
+          : `Error: ${e.error}`;
+      setError(msg);
+    };
+
+    (recognition as unknown as { onend: () => void }).onend = () => {
+      setIsListening(false);
     };
 
     recognitionRef.current = recognition;
     return () => {
-      recognition.abort();
+      try {
+        recognition.abort();
+      } catch {}
     };
   }, []);
 
   useEffect(() => {
     listRef.current?.scrollTo(0, listRef.current.scrollHeight);
-  }, [entries]);
+  }, [entries, interim]);
+
+  useEffect(() => {
+    if (isOpen && apiAvailable && !isListening && !error) {
+      const t = setTimeout(() => {
+        const rec = recognitionRef.current;
+        if (rec) {
+          try {
+            rec.start();
+            setIsListening(true);
+            setError(null);
+          } catch (err) {
+            setError("Failed to start. Try clicking Start.");
+          }
+        }
+      }, 100);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen, apiAvailable]);
 
   const toggleListening = () => {
     const rec = recognitionRef.current;
-    if (!rec) return;
+    if (!rec || apiAvailable === false) return;
+    setError(null);
 
     if (isListening) {
       rec.stop();
       setIsListening(false);
     } else {
-      rec.start();
-      setIsListening(true);
+      try {
+        rec.start();
+        setIsListening(true);
+      } catch {
+        setError("Failed to start. Ensure microphone is allowed.");
+      }
     }
   };
 
@@ -82,16 +134,27 @@ export function LiveTranscription({ isOpen, onClose }: LiveTranscriptionProps) {
         <button
           type="button"
           onClick={toggleListening}
+          disabled={apiAvailable === false}
           className={`live-transcription-mic ${isListening ? "active" : ""}`}
         >
           <Mic size={18} />
           {isListening ? "Listening..." : "Start"}
         </button>
       </div>
+      {apiAvailable === false && (
+        <div className="live-transcription-empty live-transcription-error">
+          Speech recognition not supported.
+        </div>
+      )}
+      {error && (
+        <div className="live-transcription-empty live-transcription-error">
+          {error}
+        </div>
+      )}
       <div ref={listRef} className="live-transcription-list">
-        {entries.length === 0 && (
+        {apiAvailable !== false && !error && entries.length === 0 && !interim && (
           <div className="live-transcription-empty">
-            Click Start to transcribe your speech. Works best in Chrome.
+            {isListening ? "Speak now..." : "Click Start to transcribe."}
           </div>
         )}
         {entries.map((e) => (
@@ -99,6 +162,11 @@ export function LiveTranscription({ isOpen, onClose }: LiveTranscriptionProps) {
             {e.text}
           </div>
         ))}
+        {interim && (
+          <div className="live-transcription-entry live-transcription-interim">
+            {interim}
+          </div>
+        )}
       </div>
     </GlassCard>
   );

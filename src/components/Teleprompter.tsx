@@ -412,7 +412,7 @@ export function TeleprompterOverlay({
   return (
     <div
       data-dreamwork-no-intercept
-      className="fixed z-[100015] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+      className="fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
       style={{ width: clampedWidth, maxWidth: "calc(100vw - 24px)", height: clampedHeight, left, top, opacity }}
       aria-hidden
     >
@@ -627,7 +627,7 @@ export function TeleprompterPanel({
       <div
         ref={panelRef}
         data-dreamwork-no-intercept
-        className="fixed z-[100015] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
+        className="fixed z-[1000000] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
         style={{ left, top }}
       >
         <div
@@ -672,7 +672,7 @@ export function TeleprompterPanel({
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
-      className="fixed z-[100015] w-[360px] rounded-xl border border-white/30 bg-black/70 p-3 text-xs text-white shadow-2xl backdrop-blur-md"
+      className="fixed z-[1000000] w-[360px] rounded-xl border border-white/30 bg-black/70 p-3 text-xs text-white shadow-2xl backdrop-blur-md"
       style={{ left, top }}
       onPointerDown={onPanelActivity}
       onKeyDown={onPanelActivity}

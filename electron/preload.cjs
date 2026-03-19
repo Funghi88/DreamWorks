@@ -18,4 +18,5 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("saveImage", base64, defaultName),
   startEmbeddedSignaling: () => ipcRenderer.invoke("startEmbeddedSignaling"),
   stopEmbeddedSignaling: () => ipcRenderer.invoke("stopEmbeddedSignaling"),
+  requestCameraAccess: () => ipcRenderer.invoke("requestCameraAccess"),
 });

@@ -62,7 +62,11 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
-      "target": ["dmg", "zip"]
+      "target": ["dmg", "zip"],
+      "extendInfo": {
+        "NSCameraUsageDescription": "DreamWorks needs camera access for recording and live preview.",
+        "NSMicrophoneUsageDescription": "DreamWorks needs microphone access for recording audio."
+      }
     },
     "directories": {
       "output": "release"

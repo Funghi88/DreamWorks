@@ -135,6 +135,17 @@
   transition: all 0.3s ease;
 }
 
+/* Header portal: fixed bar at top so header receives clicks above all content */
+#dreamwork-header-root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100px;
+  z-index: 999999;
+  pointer-events: auto;
+}
+
 .dark .glass-panel {
   background: linear-gradient(
     180deg,

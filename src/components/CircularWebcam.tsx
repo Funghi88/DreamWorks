@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import type { AvatarShape, AvatarDecor } from "./SettingsPanel";
 
+/** Match App.tsx AVATAR_RECT_RADIUS - must stay in sync for corner alignment */
+const AVATAR_RECT_RADIUS = 16;
+
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -123,6 +126,9 @@ export function CircularWebcam({
             ctx.arc(cw / 2, ch / 2, r, 0, Math.PI * 2);
             ctx.fill();
           }
+          ctx.translate(dx + sw, dy);
+          ctx.scale(-1, 1);
+          ctx.translate(-dx, -dy);
           ctx.drawImage(video, 0, 0, vw, vh, dx, dy, sw, sh);
           ctx.restore();
           if (useImgForDisplay && !imgPending) {
@@ -157,19 +163,16 @@ export function CircularWebcam({
 
   const shapeClass = avatarShape === "circle" ? "rounded-full" : "rounded-2xl";
   const borderClass =
-    avatarDecor === "simple"
-      ? "border-4 border-white"
+    avatarDecor === "none"
+      ? "border-2 border-black"
+      : avatarDecor === "simple"
+      ? "border-2 border-white"
       : avatarDecor === "dashed"
-        ? "border border-dashed border-white"
+        ? "border-[2px] border-white"
         : avatarDecor === "glow"
-          ? "border-[3px] border-white/90"
+          ? "border-[2px] border-white/90"
           : "";
-  const shadowClass =
-    avatarDecor === "glow"
-      ? ""
-      : avatarDecor === "none"
-        ? "shadow-lg"
-        : "shadow-md";
+  const borderStyle = avatarDecor === "dashed" ? { borderStyle: "dashed" as const } : undefined;
 
   return (
     <div
@@ -178,8 +181,11 @@ export function CircularWebcam({
           (pipRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
         }
       }}
-      className={`absolute overflow-hidden cursor-grab touch-none select-none z-[100] bg-transparent ${shapeClass} ${borderClass} ${shadowClass}`}
+      className={`absolute cursor-grab touch-none select-none z-[100] ${shapeClass}`}
       style={{
+        /* Don't add clipPath when glow: it clips box-shadow. Inner div clips content. */
+        ...(avatarShape !== "circle" && avatarDecor !== "glow" && { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` }),
+        transition: "none",
         touchAction: "none",
         left: pipPos.x,
         top: pipPos.y,
@@ -189,13 +195,111 @@ export function CircularWebcam({
         pointerEvents: "auto",
         zIndex: 9999,
         ...(avatarDecor === "glow" && {
-          boxShadow: `0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 12px rgba(255,255,255,0.1)`,
+          boxShadow: `0 0 48px ${hexToRgba(glowColor, 0.85)}, 0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 20px rgba(255,255,255,0.15)`,
         }),
       }}
       onMouseDown={onPipMouseDown}
       onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
     >
-      {/* Drag handle - circular when avatar is circle, else rectangular */}
+      {/* Inner: overflow-hidden clips video to shape; glow stays on outer (no clip) */}
+      <div className={`absolute inset-0 overflow-hidden ${shapeClass}`} style={avatarShape !== "circle" ? { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` } : undefined}>
+        {avatarImageSrc ? (
+          <img
+            ref={avatarImgRef}
+            src={avatarImageSrc}
+            alt=""
+            className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+            style={beautyMode ? { filter: beautyFilter } : undefined}
+            draggable={false}
+          />
+        ) : useCanvasForDisplay ? (
+          <>
+            <video
+              ref={(el) => {
+                videoElRef.current = el;
+                if (cameraVideoRef && el) {
+                  if (typeof cameraVideoRef === "function") cameraVideoRef(el);
+                  else (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+                }
+                if (el && cameraStream) {
+                  el.setAttribute("playsinline", "");
+                  el.setAttribute("webkit-playsinline", "");
+                  el.srcObject = cameraStream;
+                  el.onloadedmetadata = () => {
+                    setTimeout(() => el.play().catch(() => {}), 50);
+                  };
+                  if (el.readyState >= 1) el.play().catch(() => {});
+                }
+              }}
+              autoPlay
+              muted
+              playsInline
+              className="absolute w-[320px] h-[240px] pointer-events-none"
+              style={{ left: 0, top: 0, opacity: 1, zIndex: -1, transform: "translate3d(0,0,0)" }}
+              aria-hidden
+            />
+            <canvas
+              ref={canvasRef}
+              className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+              style={beautyMode ? { filter: beautyFilter } : undefined}
+            />
+            {useImgForDisplay && (
+              <>
+                <img
+                  ref={imgRef}
+                  alt=""
+                  className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+                  style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 1 }}
+                  draggable={false}
+                />
+                <img
+                  ref={imgAltRef}
+                  alt=""
+                  className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+                  style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 0 }}
+                  draggable={false}
+                />
+              </>
+            )}
+          </>
+        ) : (
+          <video
+            ref={(el) => {
+              videoElRef.current = el;
+              if (cameraVideoRef) {
+                if (typeof cameraVideoRef === "function") {
+                  cameraVideoRef(el);
+                } else {
+                  (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+                }
+              }
+              if (el && cameraStream) {
+                el.srcObject = cameraStream;
+                el.play().catch(() => {});
+              }
+            }}
+            autoPlay
+            muted
+            playsInline
+            className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+            style={{ transform: "scaleX(-1)", ...(beautyMode ? { filter: beautyFilter } : {}) }}
+            draggable={false}
+          />
+        )}
+        {/* Border overlay - on top of video, transparent bg, pointer-events-none so drag works */}
+        {borderClass && (
+          <div
+            className={`absolute inset-0 pointer-events-none z-[1] ${shapeClass} ${borderClass}`}
+            style={{
+              background: "transparent",
+              ...(avatarShape !== "circle" && { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` }),
+              ...borderStyle,
+            }}
+            aria-hidden
+          />
+        )}
+      </div>
+      {/* Drag handle - outside inner (not clipped), 40%×40% min 24×24, transparent */}
       <div
         className={`absolute bottom-0 right-0 z-10 cursor-grab active:cursor-grabbing ${avatarShape === "circle" ? "rounded-full" : ""}`}
         style={{ width: "40%", height: "40%", minWidth: 24, minHeight: 24 }}
@@ -203,90 +307,6 @@ export function CircularWebcam({
         onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
         aria-label="Drag to move camera"
       />
-      {avatarImageSrc ? (
-        <img
-          ref={avatarImgRef}
-          src={avatarImageSrc}
-          alt=""
-          className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-          style={beautyMode ? { filter: beautyFilter } : undefined}
-          draggable={false}
-        />
-      ) : useCanvasForDisplay ? (
-        <>
-          {/* Hidden video in same DOM tree as canvas - avoids cross-context issues in WebView */}
-          <video
-            ref={(el) => {
-              videoElRef.current = el;
-              if (cameraVideoRef && el) {
-                if (typeof cameraVideoRef === "function") cameraVideoRef(el);
-                else (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
-              }
-              if (el && cameraStream) {
-                el.setAttribute("playsinline", "");
-                el.setAttribute("webkit-playsinline", "");
-                el.srcObject = cameraStream;
-                el.onloadedmetadata = () => {
-                  setTimeout(() => el.play().catch(() => {}), 50);
-                };
-                if (el.readyState >= 1) el.play().catch(() => {});
-              }
-            }}
-            autoPlay
-            muted
-            playsInline
-            className="absolute w-[320px] h-[240px] pointer-events-none"
-            style={{ left: 0, top: 0, opacity: 1, zIndex: -1, transform: "translate3d(0,0,0)" }}
-            aria-hidden
-          />
-          <canvas
-            ref={canvasRef}
-            className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-            style={beautyMode ? { filter: beautyFilter } : undefined}
-          />
-          {useImgForDisplay && (
-            <>
-              <img
-                ref={imgRef}
-                alt=""
-                className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-                style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 1 }}
-                draggable={false}
-              />
-              <img
-                ref={imgAltRef}
-                alt=""
-                className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-                style={{ ...(beautyMode ? { filter: beautyFilter } : {}), opacity: 0 }}
-                draggable={false}
-              />
-            </>
-          )}
-        </>
-      ) : (
-        <video
-          ref={(el) => {
-            videoElRef.current = el;
-            if (cameraVideoRef) {
-              if (typeof cameraVideoRef === "function") {
-                cameraVideoRef(el);
-              } else {
-                (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
-              }
-            }
-            if (el && cameraStream) {
-              el.srcObject = cameraStream;
-              el.play().catch(() => {});
-            }
-          }}
-          autoPlay
-          muted
-          playsInline
-          className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-          style={beautyMode ? { filter: beautyFilter } : undefined}
-          draggable={false}
-        />
-      )}
     </div>
   );
 }

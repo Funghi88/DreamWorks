@@ -10,6 +10,7 @@ interface RecordingControlsProps {
   isRecording: boolean;
   isRecordingPaused?: boolean;
   compact?: boolean;
+  recordingDisabled?: boolean;
   onCaptureScreen: () => void;
   onStopScreenShare?: () => void;
   onToggleCamera: () => void;
@@ -33,6 +34,7 @@ export function RecordingControls({
   isRecording,
   isRecordingPaused = false,
   compact = false,
+  recordingDisabled = false,
   onCaptureScreen,
   onStopScreenShare,
   onToggleCamera,
@@ -180,9 +182,15 @@ export function RecordingControls({
         <GlassButton
           variant="destructive"
           size="sm"
-          disabled={!hasScreen && !hasCamera}
+          disabled={(!hasScreen && !hasCamera) || recordingDisabled}
           onClick={onToggleRecord}
-          title={!hasScreen && !hasCamera ? "Capture screen or start camera first" : undefined}
+          title={
+            recordingDisabled
+              ? "Recording disabled during live meeting (use meeting recording with host permission)"
+              : !hasScreen && !hasCamera
+              ? "Capture screen or start camera first"
+              : undefined
+          }
         >
           {compact ? "Start" : "Start Recording"}
         </GlassButton>

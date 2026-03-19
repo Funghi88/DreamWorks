@@ -12,11 +12,12 @@ const WASM_URL =
 const LEFT_EYE = [263, 249, 390, 373, 374, 380, 381, 382, 362];
 const RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133];
 const NOSE_TIP = 4;
-const FOREHEAD = 10;
 // Mouth: 61/291 inner lip; 13/14 outer. 478 model may differ. Use chin (152) + nose for mouth center fallback
 const CHIN = 152;
 let faceLandmarker: FaceLandmarker | null = null;
 let lastVideoTs = 0;
+let prevSmoothed: NormalizedLandmark[] | null = null;
+const SMOOTH_ALPHA = 0.82; // Higher = more responsive (less lag), lower = smoother but laggier
 
 export function nextVideoTimestamp(): number {
   const ts = Math.round(performance.now());
@@ -32,6 +33,9 @@ export async function initFaceLandmarker(): Promise<FaceLandmarker> {
     baseOptions: { modelAssetPath: MODEL_URL },
     runningMode: "VIDEO",
     numFaces: 1,
+    minFaceDetectionConfidence: 0.2,
+    minFacePresenceConfidence: 0.2,
+    minTrackingConfidence: 0.2,
   });
   return faceLandmarker;
 }
@@ -51,15 +55,49 @@ function centerOf(landmarks: NormalizedLandmark[], indices: number[]) {
   return n > 0 ? { x: x / n, y: y / n } : { x: 0.5, y: 0.5 };
 }
 
+function smoothLandmarks(raw: NormalizedLandmark[]): NormalizedLandmark[] {
+  if (!prevSmoothed || prevSmoothed.length !== raw.length) {
+    prevSmoothed = raw.map((p) => ({ ...p }));
+    return prevSmoothed;
+  }
+  const out: NormalizedLandmark[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i];
+    const b = prevSmoothed[i];
+    if (a && b) {
+      out.push({
+        x: a.x * SMOOTH_ALPHA + b.x * (1 - SMOOTH_ALPHA),
+        y: a.y * SMOOTH_ALPHA + b.y * (1 - SMOOTH_ALPHA),
+        z: (a.z ?? 0) * SMOOTH_ALPHA + (b.z ?? 0) * (1 - SMOOTH_ALPHA),
+        visibility: (a.visibility ?? 1) * SMOOTH_ALPHA + (b.visibility ?? 1) * (1 - SMOOTH_ALPHA),
+      });
+    } else {
+      out.push(a ? { ...a, visibility: a.visibility ?? 1 } : { x: 0.5, y: 0.5, z: 0, visibility: 1 });
+    }
+  }
+  prevSmoothed = out;
+  return out;
+}
+
+export function smoothLandmarksForFilter(raw: NormalizedLandmark[] | null): NormalizedLandmark[] | null {
+  if (!raw || raw.length < 455) {
+    prevSmoothed = null;
+    return raw;
+  }
+  return smoothLandmarks(raw);
+}
+
 function scaleToRect(
   pt: { x: number; y: number },
   x: number,
   y: number,
   w: number,
-  h: number
+  h: number,
+  flipX?: boolean
 ) {
+  const px = flipX ? 1 - pt.x : pt.x;
   return {
-    x: x + pt.x * w,
+    x: x + px * w,
     y: y + pt.y * h,
   };
 }
@@ -73,31 +111,19 @@ export function drawFaceFilter(
   x: number,
   y: number,
   w: number,
-  h: number
+  h: number,
+  flipX?: boolean
 ) {
   if (filter === "none") return;
   if (!landmarks || landmarks.length < 455) return;
 
+  const scale = (pt: { x: number; y: number }) => scaleToRect(pt, x, y, w, h, flipX);
   const safe = (i: number) => landmarks[i] ?? { x: 0.5, y: 0.5 };
-  const leftEye = scaleToRect(centerOf(landmarks, LEFT_EYE), x, y, w, h);
-  const rightEye = scaleToRect(centerOf(landmarks, RIGHT_EYE), x, y, w, h);
-  scaleToRect(
-    { x: safe(NOSE_TIP).x, y: safe(NOSE_TIP).y },
-    x,
-    y,
-    w,
-    h
-  );
-  scaleToRect(
-    { x: safe(FOREHEAD).x, y: safe(FOREHEAD).y },
-    x,
-    y,
-    w,
-    h
-  );
-
+  let leftEye = scale(centerOf(landmarks, LEFT_EYE));
+  let rightEye = scale(centerOf(landmarks, RIGHT_EYE));
+  if (flipX) [leftEye, rightEye] = [rightEye, leftEye];
   const eyeDist = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
-  const scale = eyeDist * 1.0;
+  const sizeScale = eyeDist * 1.0;
   const cx = (leftEye.x + rightEye.x) / 2;
   const cy = (leftEye.y + rightEye.y) / 2;
   const faceAngle = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x);
@@ -110,12 +136,13 @@ export function drawFaceFilter(
   }
 
   if (filter === "sunglasses") {
-    // Slightly rounder (less oval), keep horizontal
     const glassW = eyeDist * 1.5;
     const glassH = eyeDist * 0.65;
     const bridgeW = eyeDist * 0.18;
     ctx.strokeStyle = "#1a1a1a";
-    ctx.lineWidth = Math.max(2, scale * 0.06);
+    ctx.lineWidth = Math.max(1.5, sizeScale * 0.05);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.fillStyle = "rgba(0,0,0,0.35)";
 
     ctx.save();
@@ -156,24 +183,20 @@ export function drawFaceFilter(
 
     ctx.restore();
   } else if (filter === "heart") {
-    const heartPos = scaleToRect(
-      { x: (safe(NOSE_TIP).x + safe(CHIN).x) / 2, y: Math.min(0.92, safe(CHIN).y + 0.26) },
-      x, y, w, h
-    );
+    const heartPos = scale({
+      x: (safe(NOSE_TIP).x + safe(CHIN).x) / 2,
+      y: Math.min(0.92, safe(CHIN).y + 0.26),
+    });
     const hx = heartPos.x;
     const hy = heartPos.y;
-    const size = scale * 1.4;
+    const size = sizeScale * 1.4;
     ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("🩷", hx, hy);
   } else if (filter === "vampire") {
-    // User's right = left in mirrored view → smaller x
-    const lbPos = scaleToRect(
-      { x: safe(CHIN).x - 0.08, y: safe(CHIN).y },
-      x, y, w, h
-    );
-    const size = scale * 0.5;
+    const lbPos = scale({ x: safe(CHIN).x - 0.08, y: safe(CHIN).y });
+    const size = sizeScale * 0.5;
     ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";

@@ -51,6 +51,21 @@ export const presets: Record<string, BeautySettings> = {
   },
 };
 
+/** Find preset name closest to current settings (for Select display when user has adjusted sliders) */
+export function closestPresetName(settings: BeautySettings): string {
+  const keys = Object.keys(presets.natural) as (keyof BeautySettings)[];
+  let best = "natural";
+  let bestDist = Infinity;
+  for (const [name, preset] of Object.entries(presets)) {
+    const dist = keys.reduce((sum, k) => sum + Math.abs((settings[k] ?? 0) - (preset[k] ?? 0)), 0);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = name;
+    }
+  }
+  return best;
+}
+
 export function beautySettingsToFilter(s: BeautySettings): string {
   const brightness = 1 + (s.brighten / 100) * 0.35 + (s.glow / 100) * 0.15;
   const contrast = 1 + (s.contrast / 100) * 0.2 - (s.skinSmoothing / 100) * 0.08;

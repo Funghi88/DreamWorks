@@ -11,6 +11,7 @@ app.get("/health", (_req, res) => res.send("ok"));
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
   cors: { origin: "*" },
+  maxHttpBufferSize: 1e7,
 });
 
 const PORT = process.env.PORT ?? 3001;
@@ -54,6 +55,21 @@ io.on("connection", (socket) => {
 
   socket.on("screen-sharing-stopped", (data: { roomId: string }) => {
     socket.to(data.roomId).emit("screen-sharing-stopped", { userId: socket.id });
+  });
+
+  socket.on("recording-permission", (data: { roomId: string; allowed: "host" | "all" | string[] }) => {
+    io.to(data.roomId).emit("recording-permission", {
+      from: socket.id,
+      allowed: data.allowed,
+    });
+  });
+
+  socket.on("file-share", (data: Record<string, unknown>) => {
+    io.to(data.roomId as string).emit("file-share", {
+      from: socket.id,
+      userName: socket.data.userName ?? "Unknown",
+      ...data,
+    });
   });
 
   socket.on("disconnect", () => {

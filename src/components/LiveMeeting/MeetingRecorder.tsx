@@ -4,10 +4,12 @@ import { Square, Circle } from "lucide-react";
 interface MeetingRecorderProps {
   localStream: MediaStream | null;
   remoteStreams: Record<string, MediaStream>;
+  remoteSharingParticipantId?: string | null;
   onRecordingChange?: (isRecording: boolean) => void;
+  canRecord?: boolean;
 }
 
-export function MeetingRecorder({ localStream, remoteStreams, onRecordingChange }: MeetingRecorderProps) {
+export function MeetingRecorder({ localStream, remoteStreams, remoteSharingParticipantId = null, onRecordingChange, canRecord = true }: MeetingRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [converting, setConverting] = useState(false);
@@ -46,10 +48,16 @@ export function MeetingRecorder({ localStream, remoteStreams, onRecordingChange 
   };
 
   const startRecording = async () => {
+    if (!canRecord) return;
     const streams = [localStream, ...Object.values(remoteStreams)].filter(Boolean) as MediaStream[];
     if (streams.length === 0) return;
 
-    const videoTrack = localStream?.getVideoTracks()[0] ?? streams[0]?.getVideoTracks()[0];
+    // Prefer remote participant's shared screen (e.g. whiteboard), else local (host's camera/screen)
+    const sharingStream = remoteSharingParticipantId ? remoteStreams[remoteSharingParticipantId] : null;
+    const videoTrack =
+      sharingStream?.getVideoTracks()[0] ??
+      localStream?.getVideoTracks()[0] ??
+      streams[0]?.getVideoTracks()[0];
     const audioTracks = streams.flatMap((s) => s.getAudioTracks()).filter(Boolean);
 
     const combined = new MediaStream();
@@ -89,7 +97,13 @@ export function MeetingRecorder({ localStream, remoteStreams, onRecordingChange 
   return (
     <>
       {!isRecording && !recordedBlob && (
-        <button type="button" className="live-meeting-control-btn danger" onClick={startRecording} title="Record">
+        <button
+          type="button"
+          className={`live-meeting-control-btn ${canRecord ? "danger" : ""}`}
+          onClick={startRecording}
+          disabled={!canRecord}
+          title={canRecord ? "Record" : "Recording disabled by host"}
+        >
           <Circle size={16} fill="currentColor" />
         </button>
       )}

@@ -1,10 +1,12 @@
 .chat-panel {
   width: 100%;
+  min-width: 0;
   min-height: 180px;
   flex: 1 0 180px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .chat-panel-header {

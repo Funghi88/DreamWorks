@@ -1,12 +1,11 @@
 import { Component, useRef, useState, useEffect, useLayoutEffect, useCallback, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { GlassButton } from "@/components/Glass";
 import { RecordingControls } from "@/components/RecordingControls";
 import { TeleprompterOverlay, TeleprompterPanel } from "@/components/Teleprompter";
 import { useWindowSize } from "@/hooks/useWindowSize";
-import { Sidebar } from "@/components/Sidebar";
 import { CircularWebcam } from "@/components/CircularWebcam";
 import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
+import { exportToCanvas } from "@excalidraw/excalidraw";
 import type { AvatarDecor, AvatarShape } from "@/components/SettingsPanel";
 import { beautySettingsToFilter, presets } from "@/lib/beautyEffects";
 import {
@@ -17,6 +16,7 @@ import {
   saveTeleprompterScripts,
   type RecordResolution,
   type LetterboxBackground,
+  type LetterboxMode,
   type TeleprompterScript,
 } from "@/lib/storage";
 import { captureFrame, getCaptureFilename, scaleTo2KAndBlob, type CapturePresetId, type CaptureModeId } from "@/lib/capture";
@@ -24,17 +24,19 @@ import {
   initFaceLandmarker,
   nextVideoTimestamp,
   drawFaceFilter,
+  smoothLandmarksForFilter,
   type FaceFilterType,
 } from "@/lib/faceFilters";
 import { createCircularIcon } from "@/lib/circularIcon";
 import { Settings } from "lucide-react";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import { setCompactMode, setNormalMode } from "@/lib/windowUtils";
+import { setNormalMode } from "@/lib/windowUtils";
 import { lazy, Suspense } from "react";
 
 const LiveMeetingModal = lazy(() =>
   import("@/components/LiveMeeting/LiveMeetingModal").then((m) => ({ default: m.LiveMeetingModal }))
 );
+import type { LiveMeetingModalHandle } from "@/components/LiveMeeting/LiveMeetingModal";
 
 const RECORD_RESOLUTIONS: Record<RecordResolution, { w: number; h: number }> = {
   "1080p": { w: 1920, h: 1080 },
@@ -52,6 +54,10 @@ const MONITOR_HELPER_URL = "/recording-monitor.html";
 const TELEPROMPTER_CHANNEL = "dreamwork-teleprompter";
 /** Offset between composite (recorded) and portal (draggable) camera in Capture Screen mode */
 const CAMERA_OFFSET = 36;
+/** Corner radius for rect/portrait avatar - must match rounded-2xl (16px) everywhere */
+const AVATAR_RECT_RADIUS = 16;
+/** Fixed size for camera source video - avoids resize delay when shape changes */
+const CAMERA_SOURCE_VIDEO_SIZE = { w: 320, h: 240 };
 import { ResizeHandle } from "@/components/ResizeHandle";
 
 function drawLetterboxBg(
@@ -71,7 +77,6 @@ function drawLetterboxBg(
     ctx.fillRect(0, 0, w, h);
   }
 }
-
 
 function formatRecordingTime(sec: number) {
   const h = Math.floor(sec / 3600);
@@ -123,10 +128,17 @@ function ClipPreview({
   const [url, setUrl] = useState("");
   const [converting, setConverting] = useState(false);
   const [convertError, setConvertError] = useState<string | null>(null);
+  const [playError, setPlayError] = useState<string | null>(null);
   useEffect(() => {
-    const u = URL.createObjectURL(blob);
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
+    setPlayError(null);
+    try {
+      const u = URL.createObjectURL(blob);
+      setUrl(u);
+      return () => URL.revokeObjectURL(u);
+    } catch {
+      setPlayError("Failed to load video");
+      return () => {};
+    }
   }, [blob]);
   const handleSave = async (format: "webm" | "mp4") => {
     setConvertError(null);
@@ -155,12 +167,23 @@ function ClipPreview({
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <div className="aspect-video min-w-0 overflow-hidden rounded-2xl bg-white">
-        <video
-          src={url}
-          controls
-          className="aspect-video h-full w-full object-contain"
-          onContextMenu={(e) => e.preventDefault()}
-        />
+        {playError ? (
+          <div className="flex aspect-video items-center justify-center rounded-2xl bg-slate-800 text-sm text-red-400">
+            {playError}
+          </div>
+        ) : (
+          url && (
+            <video
+              src={url}
+              controls
+              preload="metadata"
+              playsInline
+              className="aspect-video h-full w-full object-contain"
+              onContextMenu={(e) => e.preventDefault()}
+              onError={() => setPlayError("Video playback failed")}
+            />
+          )
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         <button
@@ -270,12 +293,24 @@ export default function App() {
   const cameraSourceVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const compositeRef = useRef<HTMLCanvasElement>(null);
+  const recordingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pipRef = useRef<HTMLDivElement>(null);
   const portalCameraInnerRef = useRef<HTMLDivElement>(null);
   const avatarImgRef = useRef<HTMLImageElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+  const screenMiniStripRef = useRef<HTMLDivElement>(null);
   const fullPageContentRef = useRef<HTMLDivElement>(null);
+  const contentAreaRef = useRef<HTMLDivElement>(null);
+  const contentAreaPrevRectRef = useRef<{ w: number; h: number } | null>(null);
   const whiteboardCanvasLayersRef = useRef<HTMLCanvasElement[]>([]);
+  const whiteboardExportedRef = useRef<HTMLCanvasElement | null>(null);
+  const excalidrawAPIRef = useRef<{
+    getSceneElements: () => readonly unknown[];
+    getAppState: () => Record<string, unknown>;
+    getFiles: () => Record<string, unknown>;
+  } | null>(null);
+  const whiteboardTextureRef = useRef<string | null>(null);
+  const whiteboardTextureImgRef = useRef<HTMLImageElement | null>(null);
   const lastCameraFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [portalRect, setPortalRect] = useState<DOMRect | null>(null);
   const [mainLayoutPortalRect, setMainLayoutPortalRect] = useState<DOMRect | null>(null);
@@ -305,6 +340,9 @@ export default function App() {
     () => loadSettings().faceFilter ?? "none"
   );
   const faceLandmarksRef = useRef<import("@mediapipe/tasks-vision").NormalizedLandmark[] | null>(null);
+  const lastValidLandmarksRef = useRef<import("@mediapipe/tasks-vision").NormalizedLandmark[] | null>(null);
+  const lastValidLandmarksAtRef = useRef<number>(0);
+  const LANDMARK_PERSIST_MS = 120;
   const [pipPos, setPipPos] = useState(() => {
     const s = loadSettings().pipPos;
     return s ?? { x: 8, y: 8 };
@@ -315,6 +353,9 @@ export default function App() {
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => loadSettings().sidebarWidth ?? 320);
   const [previewWidth, setPreviewWidth] = useState(() => loadSettings().previewWidth ?? 200);
+  const [whiteboardPanelWidth, setWhiteboardPanelWidth] = useState(() => loadSettings().whiteboardPanelWidth ?? 40);
+  const whiteboardPanelWidthRef = useRef(whiteboardPanelWidth);
+  whiteboardPanelWidthRef.current = whiteboardPanelWidth;
   const [outputHeight, setOutputHeight] = useState(240);
   const [outputCollapsed, setOutputCollapsed] = useState(false);
   const outputIdleTimerRef = useRef<number | null>(null);
@@ -332,9 +373,6 @@ export default function App() {
   const previewBoxDraggingRef = useRef(false);
   const previewBoxOffsetRef = useRef({ x: 0, y: 0 });
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [showWhiteboard, setShowWhiteboard] = useState(false);
-  const [whiteboardInPreview, setWhiteboardInPreview] = useState(false);
-  const [showUseInPreviewDialog, setShowUseInPreviewDialog] = useState(false);
   const fullPageWhiteboard = true;
   const activeScreenStream = whiteboardScreenStream ?? previewScreenStream;
   const [isRecording, setIsRecording] = useState(false);
@@ -367,13 +405,16 @@ export default function App() {
       if (s.fullPagePipPos != null) setFullPagePipPos(s.fullPagePipPos);
       if (s.sidebarWidth != null) setSidebarWidth(s.sidebarWidth);
       if (s.previewWidth != null) setPreviewWidth(s.previewWidth);
+      if (s.whiteboardPanelWidth != null) setWhiteboardPanelWidth(s.whiteboardPanelWidth);
       if (s.whiteboardHeight != null) setWhiteboardHeight(s.whiteboardHeight);
       if (s.micVolume != null) setMicVolume(s.micVolume);
       if (s.systemVolume != null) setSystemVolume(s.systemVolume);
       if (s.recordResolution != null) setRecordResolution(s.recordResolution);
       if (s.letterboxBackground != null) setLetterboxBackground(s.letterboxBackground);
       if (s.letterboxCustomImage != null) setLetterboxCustomImage(s.letterboxCustomImage);
+      if (s.letterboxMode != null) setLetterboxMode(s.letterboxMode);
       if (s.previewPosition != null) setPreviewPosition(s.previewPosition);
+      if (s.previewLayoutMode != null) setPreviewLayoutMode(s.previewLayoutMode);
       if (s.fullPagePreviewPos != null) setFullPagePreviewPos(s.fullPagePreviewPos);
     });
   }, [isElectron]);
@@ -398,6 +439,8 @@ export default function App() {
   }, [showOutput, recordedClips.length]);
   const [showSettings, setShowSettings] = useState(false);
   const [showLiveMeetingModal, setShowLiveMeetingModal] = useState(false);
+  const [inLiveMeeting, setInLiveMeeting] = useState(false);
+  const liveMeetingRef = useRef<LiveMeetingModalHandle | null>(null);
   const [micVolume, setMicVolume] = useState(() => loadSettings().micVolume ?? 100);
   const [systemVolume, setSystemVolume] = useState(() => loadSettings().systemVolume ?? 80);
   const [recordResolution, setRecordResolution] = useState<RecordResolution>(
@@ -409,9 +452,15 @@ export default function App() {
   const [letterboxCustomImage, setLetterboxCustomImage] = useState<string | null>(
     () => loadSettings().letterboxCustomImage ?? null
   );
+  const [letterboxMode, setLetterboxMode] = useState<LetterboxMode>(
+    () => loadSettings().letterboxMode ?? "contain"
+  );
   const [previewPosition, setPreviewPosition] = useState<
     "top-left" | "top-right" | "bottom-left" | "bottom-right"
   >(() => loadSettings().previewPosition ?? "top-left");
+  const [previewLayoutMode, setPreviewLayoutMode] = useState<
+    "overlay" | "side-right" | "side-bottom"
+  >(() => loadSettings().previewLayoutMode ?? "overlay");
   const [fullPagePreviewPos, setFullPagePreviewPos] = useState<{ x: number; y: number } | null>(
     () => loadSettings().fullPagePreviewPos ?? null
   );
@@ -606,6 +655,34 @@ export default function App() {
     whiteboardCanvasLayersRef.current = layers;
   }, []);
 
+  const handleExcalidrawReady = useCallback(
+    (api: { getSceneElements: () => readonly unknown[]; getAppState: () => Record<string, unknown>; getFiles: () => Record<string, unknown> }) => {
+      excalidrawAPIRef.current = api;
+    },
+    []
+  );
+
+  const [whiteboardTextureId, setWhiteboardTextureId] = useState<string | null>(null);
+  const handleWhiteboardTextureChange = useCallback((textureId: string | null) => {
+    whiteboardTextureRef.current = textureId;
+    setWhiteboardTextureId(textureId);
+  }, []);
+
+  const WHITEBOARD_TEXTURE_BASE = `${import.meta.env.BASE_URL}whiteboard-textures/`;
+  useEffect(() => {
+    const id = whiteboardTextureId;
+    if (!id) {
+      whiteboardTextureImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.onload = () => { whiteboardTextureImgRef.current = img; };
+    img.onerror = () => { whiteboardTextureImgRef.current = null; };
+    img.src = WHITEBOARD_TEXTURE_BASE + id;
+    if (img.complete) whiteboardTextureImgRef.current = img;
+    return () => { whiteboardTextureImgRef.current = null; };
+  }, [whiteboardTextureId]);
+
   useEffect(() => {
     if (!letterboxCustomImage) {
       letterboxCustomImgRef.current = null;
@@ -615,6 +692,7 @@ export default function App() {
     img.onload = () => { letterboxCustomImgRef.current = img; };
     img.onerror = () => { letterboxCustomImgRef.current = null; };
     img.src = letterboxCustomImage;
+    if (img.complete) letterboxCustomImgRef.current = img;
     return () => { letterboxCustomImgRef.current = null; };
   }, [letterboxCustomImage]);
 
@@ -629,13 +707,14 @@ export default function App() {
   const recordedChunksRef = useRef<Blob[]>([]);
   const drawLoopIdRef = useRef<number | null>(null);
   const previewDrawLoopIdRef = useRef<number | null>(null);
+  const recordingDrawAndDisplayRef = useRef<(() => void) | null>(null);
+  const recordingUsedRafRef = useRef(false);
   const timerIdRef = useRef<number | null>(null);
   const recordingStartRef = useRef(0);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
   const hasScreen = !!activeScreenStream || !!persistentScreenVideoRef.current?.srcObject;
   const hasCamera = showPip;
-  const keepFullStudioWhileRecording = showWhiteboard && whiteboardInPreview && !fullPageWhiteboard;
   const detachedHelpersEnabled = isElectron && !!activeScreenStream;
 
   useEffect(() => {
@@ -708,29 +787,6 @@ export default function App() {
     if (value) setTeleprompterPosition(null);
   };
 
-  const closeHelperWindows = useCallback(async () => {
-    if (isElectron) {
-      const api = (window as unknown as { electronAPI?: { closeHelperByLabel: (l: string) => Promise<void> } }).electronAPI;
-      await api?.closeHelperByLabel?.("teleprompter-helper");
-      await api?.closeHelperByLabel?.("recording-monitor");
-      teleprompterWindowRef.current = null;
-      monitorWindowRef.current = null;
-      return;
-    }
-    const closeMaybe = (ref: typeof teleprompterWindowRef) => {
-      const w = ref.current;
-      if (!w) return;
-      try {
-        if ("close" in w && typeof w.close === "function") (w as Window).close();
-      } catch {
-        /* ignore */
-      }
-      ref.current = null;
-    };
-    closeMaybe(teleprompterWindowRef);
-    closeMaybe(monitorWindowRef);
-  }, [isElectron]);
-
   const closeHelperByLabel = useCallback(
     async (label: "teleprompter-helper" | "recording-monitor") => {
       if (!isElectron) return;
@@ -789,19 +845,6 @@ export default function App() {
     [openHelperWindow]
   );
   helperOpenRef.current = ensureHelperOpen;
-
-  const handleRecoverOverlays = useCallback(() => {
-    if (!detachedHelpersEnabled) return;
-    closeHelperWindows();
-  }, [detachedHelpersEnabled, closeHelperWindows]);
-
-  const handleToggleCameraFromControls = () => {
-    if (showPip || !!monitorWindowRef.current) {
-      stopCamera();
-      return;
-    }
-    void startCamera();
-  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -926,30 +969,21 @@ export default function App() {
 
   const cameraOverlayRef = useRef<HTMLCanvasElement>(null);
   const OVERLAP_BUFFER = 60;
-  const PREVIEW_BASE_WIDTH = 320;
-  const PREVIEW_BASE_HEIGHT = 180;
-  const previewScale =
-    mainLayoutPortalRect && !fullPageWhiteboard
-      ? Math.max(
-          0.45,
-          Math.min(
-            1,
-            Math.min(
-              mainLayoutPortalRect.width / PREVIEW_BASE_WIDTH,
-              mainLayoutPortalRect.height / PREVIEW_BASE_HEIGHT
-            )
-          )
-        )
-      : 1;
-  const avatarSizeDisplayRaw = !fullPageWhiteboard
-    ? Math.max(32, Math.round(avatarSize))
-    : Math.max(32, Math.round(avatarSize * previewScale));
+  const avatarSizeDisplayRaw = Math.max(32, Math.round(avatarSize));
   const avatarSizeDisplay = avatarSizeDisplayRaw;
-  // Rect shape: landscape 16:9 (width > height)
-  const LANDSCAPE_ASPECT = 16 / 9;
+  // Size = consistent across shapes: same area for circle, portrait, landscape
   const avatarWidthDisplay =
-    avatarShape === "circle" ? avatarSizeDisplay : Math.round(avatarSizeDisplay * LANDSCAPE_ASPECT);
-  const avatarHeightDisplay = avatarSizeDisplay;
+    avatarShape === "circle"
+      ? avatarSizeDisplay
+      : avatarShape === "portrait"
+      ? Math.round(avatarSizeDisplay * (3 / 4)) // area = size², aspect 9:16
+      : Math.round(avatarSizeDisplay * (4 / 3)); // landscape: width
+  const avatarHeightDisplay =
+    avatarShape === "circle"
+      ? avatarSizeDisplay
+      : avatarShape === "portrait"
+      ? Math.round(avatarSizeDisplay * (4 / 3)) // portrait: height
+      : Math.round(avatarSizeDisplay * (3 / 4)); // landscape: height
 
   const drawComposite = useCallback(
     (forceRecordRes = false, overrideRes?: { w: number; h: number }) => {
@@ -970,22 +1004,29 @@ export default function App() {
           : null) ??
         cameraVideoMain ??
         cameraVideoSource;
-      const composite = compositeRef.current;
       const pip = pipRef.current;
       const avatarImg = avatarImgRef.current;
-      const preview = previewRef.current;
+      const preview =
+        previewRef.current ??
+        (fullPageWhiteboard && !activeScreenStream ? contentAreaRef.current : null);
+      const composite =
+        (forceRecordRes && recordingCanvasRef.current) || compositeRef.current;
       if (!preview || !composite) return;
 
-      const prevW = preview.offsetWidth;
-      const prevH = preview.offsetHeight;
-      if (prevW <= 0 || prevH <= 0) return;
-      // Skip camera during layout transition when preview is collapsed (avoids wrong scale/position)
-      const previewStable = prevW >= 50 && prevH >= 50;
+      let prevW = preview.offsetWidth;
+      let prevH = preview.offsetHeight;
       const res: { w: number; h: number } =
         (forceRecordRes && overrideRes) ||
         RECORD_RESOLUTIONS[recordResolution] ||
         RECORD_RESOLUTIONS["1080p"];
       const useRecordRes = forceRecordRes || isRecording;
+      if ((prevW <= 0 || prevH <= 0) && useRecordRes) {
+        prevW = res.w;
+        prevH = res.h;
+      }
+      if (prevW <= 0 || prevH <= 0) return;
+      // Skip camera during layout transition when preview is collapsed (avoids wrong scale/position)
+      const previewStable = prevW >= 50 && prevH >= 50;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const w = useRecordRes ? res.w : Math.round(prevW * dpr);
       const h = useRecordRes ? res.h : Math.round(prevH * dpr);
@@ -1007,27 +1048,123 @@ export default function App() {
         drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current);
         const sw = screenVideo.videoWidth || w;
         const sh = screenVideo.videoHeight || h;
-        const scale = Math.min(w / sw, h / sh);
-        const dw = sw * scale;
-        const dh = sh * scale;
-        const dx = (w - dw) / 2;
-        const dy = (h - dh) / 2;
+        const screenOnlyRecord = activeScreenStream && (forceRecordRes || fullPageWhiteboard);
+        let dw: number;
+        let dh: number;
+        let dx: number;
+        let dy: number;
+        if (screenOnlyRecord) {
+          const targetW = Math.round(w * 0.8);
+          const scale = targetW / sw;
+          dw = targetW;
+          dh = Math.round(sh * scale);
+          dx = (w - dw) / 2;
+          dy = (h - dh) / 2;
+        } else {
+          const useCover = letterboxMode === "cover";
+          const scale = useCover ? Math.max(w / sw, h / sh) : Math.min(w / sw, h / sh);
+          dw = sw * scale;
+          dh = sh * scale;
+          dx = (w - dw) / 2;
+          dy = (h - dh) / 2;
+        }
+        if (screenOnlyRecord) {
+          const rad = Math.min(AVATAR_RECT_RADIUS * scaleX, dw / 2, dh / 2);
+          ctx.save();
+          roundRectPath(ctx, dx, dy, dw, dh, rad);
+          ctx.clip();
+        }
         ctx.drawImage(screenVideo, 0, 0, sw, sh, dx, dy, dw, dh);
-      } else if (useRecordRes && !(fullPageWhiteboard && !activeScreenStream)) {
+        if (screenOnlyRecord) {
+          ctx.restore();
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = 3;
+          const rad = Math.min(AVATAR_RECT_RADIUS * scaleX, dw / 2, dh / 2);
+          roundRectPath(ctx, dx, dy, dw, dh, rad);
+          ctx.stroke();
+        }
+      } else if ((useRecordRes || fullPageWhiteboard) && fullPageWhiteboard && !activeScreenStream) {
         drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current);
-      } else if (useRecordRes && fullPageWhiteboard && !activeScreenStream) {
-        drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current);
+        const contentEl = contentAreaRef.current;
+        const contentW = Math.max(1, contentEl?.offsetWidth ?? prevW);
+        const whiteboardOnlyRecord = forceRecordRes && !activeScreenStream;
+        const handleZonePx = 14;
+        const miniW = Math.round(w * (40 / contentW));
+        let whiteboardSurfaceW: number;
+        let whiteboardSurfaceH: number;
+        let whiteboardX: number;
+        let whiteboardY: number;
+        if (whiteboardOnlyRecord) {
+          whiteboardSurfaceW = Math.round(w * 0.8);
+          whiteboardSurfaceH = Math.round(h * 0.8);
+          whiteboardX = (w - whiteboardSurfaceW) / 2;
+          whiteboardY = (h - whiteboardSurfaceH) / 2;
+        } else {
+          whiteboardSurfaceW = w - miniW - handleZonePx;
+          whiteboardSurfaceH = h;
+          whiteboardX = 0;
+          whiteboardY = 0;
+        }
+        const whiteboardExported = whiteboardExportedRef.current;
         const whiteboardLayers = whiteboardCanvasLayersRef.current.filter((layer) => layer.width > 0 && layer.height > 0);
-        for (const layer of whiteboardLayers) {
-          const lw = layer.width;
-          const lh = layer.height;
-          const lscale = Math.min(w / lw, h / lh);
+        const mainLayer = whiteboardLayers.length > 0
+          ? whiteboardLayers.reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b))
+          : null;
+        const useLayers = !!mainLayer;
+        const useExported = !useLayers && !!whiteboardExported && whiteboardExported.width > 0 && whiteboardExported.height > 0;
+        const rad = Math.min(AVATAR_RECT_RADIUS * scaleX, whiteboardSurfaceW / 2, h / 2);
+        ctx.save();
+        roundRectPath(ctx, whiteboardX, whiteboardY, whiteboardSurfaceW, whiteboardSurfaceH, rad);
+        ctx.clip();
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(whiteboardX, whiteboardY, whiteboardSurfaceW, whiteboardSurfaceH);
+        const texImg = whiteboardTextureImgRef.current;
+        if (texImg?.complete && texImg.naturalWidth > 0) {
+          const tscale = Math.max(whiteboardSurfaceW / texImg.naturalWidth, whiteboardSurfaceH / texImg.naturalHeight);
+          const tw = texImg.naturalWidth * tscale;
+          const th = texImg.naturalHeight * tscale;
+          ctx.drawImage(texImg, whiteboardX + (whiteboardSurfaceW - tw) / 2, whiteboardY + (whiteboardSurfaceH - th) / 2, tw, th);
+        } else {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(whiteboardX, whiteboardY, whiteboardSurfaceW, whiteboardSurfaceH);
+        }
+        if (useExported && whiteboardExported) {
+          const lw = whiteboardExported.width;
+          const lh = whiteboardExported.height;
+          const lscale = Math.min(whiteboardSurfaceW / lw, whiteboardSurfaceH / lh);
           const ldw = lw * lscale;
           const ldh = lh * lscale;
-          const ldx = (w - ldw) / 2;
-          const ldy = (h - ldh) / 2;
-          ctx.drawImage(layer, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
+          const ldx = whiteboardX + (whiteboardSurfaceW - ldw) / 2;
+          const ldy = whiteboardY + (whiteboardSurfaceH - ldh) / 2;
+          ctx.drawImage(whiteboardExported, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
+        } else if (mainLayer) {
+          const lw = mainLayer.width;
+          const lh = mainLayer.height;
+          const lscale = Math.min(whiteboardSurfaceW / lw, whiteboardSurfaceH / lh);
+          const ldw = lw * lscale;
+          const ldh = lh * lscale;
+          const ldx = whiteboardX + (whiteboardSurfaceW - ldw) / 2;
+          const ldy = whiteboardY + (whiteboardSurfaceH - ldh) / 2;
+          ctx.drawImage(mainLayer, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
         }
+        ctx.restore();
+        if (whiteboardOnlyRecord) {
+          ctx.strokeStyle = "#000000";
+          ctx.lineWidth = 3;
+          roundRectPath(ctx, whiteboardX, whiteboardY, whiteboardSurfaceW, whiteboardSurfaceH, rad);
+          ctx.stroke();
+        }
+        if (!whiteboardOnlyRecord) {
+          ctx.fillStyle = "#e8eeff";
+          ctx.fillRect(whiteboardSurfaceW, 0, handleZonePx, h);
+          ctx.fillStyle = "#1e293b";
+          const barX = whiteboardSurfaceW + handleZonePx;
+          const barRad = Math.min(rad, miniW / 2, h / 2);
+          roundRectPath(ctx, barX, 0, miniW, h, barRad);
+          ctx.fill();
+        }
+      } else if (useRecordRes || (fullPageWhiteboard && !activeScreenStream)) {
+        drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current);
       }
 
       // Always composite for recording and in-app capture preview.
@@ -1054,7 +1191,12 @@ export default function App() {
         }
         const cacheCtx = cache.getContext("2d");
         if (cacheCtx && cameraVideo.videoWidth > 0 && cameraVideo.videoHeight > 0) {
+          cacheCtx.save();
+          cacheCtx.translate(cache.width, 0);
+          cacheCtx.scale(-1, 1);
+          cacheCtx.translate(-cache.width, 0);
           cacheCtx.drawImage(cameraVideo, 0, 0, cache.width, cache.height);
+          cacheCtx.restore();
         }
       }
       const cachedCameraCanvas = lastCameraFrameCanvasRef.current;
@@ -1077,8 +1219,12 @@ export default function App() {
             : null;
       if ((useAvatarImage || useCamera || useCachedCamera) && previewStable && pipSource) {
         const prevRect = preview.getBoundingClientRect();
+        let x: number;
+        let y: number;
+        let pw: number;
+        let ph: number;
+        let shouldDraw = true;
         const fallbackPos = fullPageWhiteboard ? fullPagePipPosRef.current : pipPosRef.current;
-        // When fullPage+activeScreenStream, fullPagePipPos is in screen coords; else relative to preview/portal
         const fallbackLeft =
           fullPageWhiteboard && activeScreenStream
             ? fallbackPos.x
@@ -1087,8 +1233,10 @@ export default function App() {
           fullPageWhiteboard && activeScreenStream
             ? fallbackPos.y
             : prevRect.top + fallbackPos.y;
-        // When pip exists, use DOM position (actual); when offset (portal != composite), use fallback for composite.
-        const useFallbackForComposite = fullPageWhiteboard && activeScreenStream;
+        // Use ref for recording so we get sync position from drag; pip.getBoundingClientRect() can lag behind React.
+        const useFallbackForComposite =
+          (fullPageWhiteboard && activeScreenStream) ||
+          (forceRecordRes && fullPageWhiteboard && !activeScreenStream);
         const rect = pip && !useFallbackForComposite
           ? pip.getBoundingClientRect()
           : {
@@ -1100,11 +1248,10 @@ export default function App() {
               bottom: fallbackTop + avatarHeightDisplay,
             };
         const scale = Math.min(scaleX, scaleY);
-        let x = (rect.left - prevRect.left) * scaleX;
-        let y = (rect.top - prevRect.top) * scaleY;
-        const pw = rect.width * scale;
-        const ph = rect.height * scale;
-        // When fullPage+activeScreenStream, camera and preview are independent: if camera is outside preview, skip drawing on composite (DOM overlay shows it)
+        x = Math.round((rect.left - prevRect.left) * scaleX);
+        y = Math.round((rect.top - prevRect.top) * scaleY);
+        pw = Math.round(rect.width * scale);
+        ph = Math.round(rect.height * scale);
         const buf = 24;
         const pipWellInsidePreview =
           rect.left >= prevRect.left + buf &&
@@ -1112,15 +1259,19 @@ export default function App() {
           rect.top >= prevRect.top + buf &&
           rect.bottom <= prevRect.bottom - buf;
         if (!pipWellInsidePreview && fullPageWhiteboard && activeScreenStream && !forceRecordRes) {
-          // Don't draw camera on composite; it's shown by the separate DOM overlay
+          shouldDraw = false;
         } else {
-        // Clamp only when not recording: during recording, preserve dragged position (canvas clips if outside)
-        const recordingWithScreen = forceRecordRes && activeScreenStream;
-        if (!recordingWithScreen) {
-          x = Math.max(0, Math.min(x, w - pw));
-          y = Math.max(0, Math.min(y, h - ph));
+          const recordingWithScreen = forceRecordRes && activeScreenStream;
+          if (!recordingWithScreen) {
+            x = Math.max(0, Math.min(x, w - pw));
+            y = Math.max(0, Math.min(y, h - ph));
+          }
         }
-      const isCircle = avatarShape === "circle";
+        // When drawing to overlay (!forceRecordRes), skip camera so the portal shows it.
+        // This avoids the black wireframe ghost: overlay updates at 30fps while portal moves immediately.
+        const drawCameraToCanvas = forceRecordRes || !shouldCompositeCamera;
+        if (shouldDraw && drawCameraToCanvas) {
+        const isCircle = avatarShape === "circle";
 
       ctx.save();
       ctx.beginPath();
@@ -1130,7 +1281,7 @@ export default function App() {
         const r = Math.min(pw, ph) / 2;
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
       } else {
-        roundRectPath(ctx, x, y, pw, ph, Math.min(pw, ph) * 0.2);
+        roundRectPath(ctx, x, y, pw, ph, Math.min(AVATAR_RECT_RADIUS * scaleX, Math.min(pw, ph) / 2));
       }
       ctx.closePath();
       ctx.clip();
@@ -1157,10 +1308,20 @@ export default function App() {
         const drawH = vh * scale;
         const dx = x + (pw - drawW) / 2;
         const dy = y + (ph - drawH) / 2;
-        ctx.drawImage(pipSource, 0, 0, vw, vh, dx, dy, drawW, drawH);
+        if (pipSource instanceof HTMLVideoElement) {
+          ctx.save();
+          ctx.translate(dx + drawW, dy);
+          ctx.scale(-1, 1);
+          ctx.translate(-dx, -dy);
+          ctx.drawImage(pipSource, 0, 0, vw, vh, dx, dy, drawW, drawH);
+          ctx.restore();
+        } else {
+          ctx.drawImage(pipSource, 0, 0, vw, vh, dx, dy, drawW, drawH);
+        }
         if (faceFilter !== "none" && !useAvatarImage) {
           try {
-            drawFaceFilter(ctx, faceLandmarksRef.current, faceFilter, dx, dy, drawW, drawH);
+            const lm = faceLandmarksRef.current ?? (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS ? lastValidLandmarksRef.current : null);
+            drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true);
           } catch {
             /* face filter may fail if landmarks invalid */
           }
@@ -1168,6 +1329,9 @@ export default function App() {
       }
       ctx.restore();
 
+      // Draw stroke: for simple/glow, draw white undercoat first to eliminate black edge from clip antialias.
+      // Skip undercoat for dashed - it obscures the dash pattern (gaps show solid white underneath).
+      {
       ctx.save();
       ctx.beginPath();
       if (isCircle) {
@@ -1176,21 +1340,43 @@ export default function App() {
         const r = Math.min(pw, ph) / 2;
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
       } else {
-        roundRectPath(ctx, x, y, pw, ph, Math.min(pw, ph) * 0.2);
+        roundRectPath(ctx, x, y, pw, ph, Math.min(AVATAR_RECT_RADIUS * scaleX, Math.min(pw, ph) / 2));
       }
-      if (avatarDecor !== "none") {
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = avatarDecor === "simple" ? 4 : 3;
-        if (avatarDecor === "dashed") ctx.setLineDash([8, 6]);
-        if (avatarDecor === "glow") {
-          ctx.shadowColor = hexToRgba(glowColor, 0.6);
-          ctx.shadowBlur = 24;
-        }
+      const strokeScale = Math.min(scaleX, scaleY);
+      if (avatarDecor !== "none" && avatarDecor !== "dashed") {
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 5 * strokeScale;
+        ctx.setLineDash([]);
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
         ctx.stroke();
       }
+      const strokePx = avatarDecor === "dashed" ? 2 : avatarDecor === "simple" ? 2 : avatarDecor === "none" ? 2 : 3;
+      ctx.strokeStyle = avatarDecor === "none" ? "#000" : "rgba(255,255,255,0.95)";
+      ctx.lineWidth = strokePx * strokeScale;
+      if (avatarDecor === "dashed") ctx.setLineDash([8 * strokeScale, 4 * strokeScale]);
+      else ctx.setLineDash([]);
+      if (avatarDecor === "glow") {
+        ctx.shadowColor = hexToRgba(glowColor, 0.85);
+        ctx.shadowBlur = 48;
+      } else {
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
+      }
+      ctx.stroke();
       ctx.restore();
+      }
+        }
     }
-    }
+      // When black border (none) is selected, add black border around entire content. Skip for recording to avoid wireframe ghost.
+      if (avatarDecor === "none" && !forceRecordRes) {
+        ctx.save();
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 4;
+        ctx.setLineDash([]);
+        ctx.strokeRect(0, 0, w, h);
+        ctx.restore();
+      }
   },
     [
       showPip,
@@ -1206,14 +1392,17 @@ export default function App() {
       recordResolution,
       letterboxBackground,
       letterboxCustomImage,
+      letterboxMode,
       isRecording,
       fullPageWhiteboard,
+      previewLayoutMode,
       detachedHelpersEnabled,
       pipPos,
       fullPagePipPos,
       avatarSizeDisplay,
       avatarWidthDisplay,
       avatarHeightDisplay,
+      whiteboardPanelWidth,
     ]
   );
 
@@ -1241,12 +1430,10 @@ export default function App() {
       activePipPos.y >= portalRect.bottom - OVERLAP_BUFFER);
   // Keep camera source video mounted whenever we have camera - so it decodes ahead of recording
   const showCameraSourceVideo = showPip && (!fullPageWhiteboard || isRecording || !!cameraStream);
-  const captureWebcamHidden =
-    !fullPageWhiteboard && !!activeScreenStream && !avatarImageSrc;
-
   const drawCameraOverlay = useCallback(() => {
     const canvas = cameraOverlayRef.current;
-    const video = cameraVideoRef.current ?? cameraSourceVideoRef.current;
+    // Prefer cameraSourceVideoRef when fullPageWhiteboard: it has fixed size, avoids resize delay on shape change
+    const video = fullPageWhiteboard ? (cameraSourceVideoRef.current ?? cameraVideoRef.current) : (cameraVideoRef.current ?? cameraSourceVideoRef.current);
     const img = avatarImgRef.current;
     if (!canvas || (!video?.srcObject && !img?.complete)) return;
     const useAvatarImage = showPip && !!avatarImageSrc && img?.complete;
@@ -1278,7 +1465,7 @@ export default function App() {
     if (isCircle) {
       ctx.arc(pw / 2, ph / 2, Math.min(pw, ph) / 2, 0, Math.PI * 2);
     } else {
-      roundRectPath(ctx, 0, 0, pw, ph, Math.min(pw, ph) * 0.2);
+      roundRectPath(ctx, 0, 0, pw, ph, Math.min(AVATAR_RECT_RADIUS * dpr, Math.min(pw, ph) / 2));
     }
     ctx.closePath();
     ctx.clip();
@@ -1296,10 +1483,16 @@ export default function App() {
       const drawH = vh * s;
       const dx = (pw - drawW) / 2;
       const dy = (ph - drawH) / 2;
+      ctx.save();
+      ctx.translate(dx + drawW, dy);
+      ctx.scale(-1, 1);
+      ctx.translate(-dx, -dy);
       ctx.drawImage(video, 0, 0, vw, vh, dx, dy, drawW, drawH);
+      ctx.restore();
       if (faceFilter !== "none") {
         try {
-          drawFaceFilter(ctx, faceLandmarksRef.current, faceFilter, dx, dy, drawW, drawH);
+          const lm = faceLandmarksRef.current ?? (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS ? lastValidLandmarksRef.current : null);
+          drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true);
         } catch {
           /* face filter may fail if landmarks invalid */
         }
@@ -1311,18 +1504,29 @@ export default function App() {
     if (isCircle) {
       ctx.arc(pw / 2, ph / 2, Math.min(pw, ph) / 2, 0, Math.PI * 2);
     } else {
-      roundRectPath(ctx, 0, 0, pw, ph, Math.min(pw, ph) * 0.2);
+      roundRectPath(ctx, 0, 0, pw, ph, Math.min(AVATAR_RECT_RADIUS * dpr, Math.min(pw, ph) / 2));
     }
-    if (avatarDecor !== "none") {
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
-      ctx.lineWidth = avatarDecor === "simple" ? 4 : 3;
-      if (avatarDecor === "dashed") ctx.setLineDash([8, 6]);
-      if (avatarDecor === "glow") {
-        ctx.shadowColor = hexToRgba(glowColor, 0.6);
-        ctx.shadowBlur = 24;
-      }
+    if (avatarDecor !== "none" && avatarDecor !== "dashed") {
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 5;
+      ctx.setLineDash([]);
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
       ctx.stroke();
     }
+    ctx.strokeStyle = avatarDecor === "none" ? "#000" : "rgba(255,255,255,0.95)";
+    const strokePx = avatarDecor === "dashed" ? 2 : avatarDecor === "simple" ? 2 : avatarDecor === "none" ? 2 : 3;
+    ctx.lineWidth = strokePx * dpr;
+    if (avatarDecor === "dashed") ctx.setLineDash([8 * dpr, 4 * dpr]);
+    else ctx.setLineDash([]);
+    if (avatarDecor === "glow") {
+      ctx.shadowColor = hexToRgba(glowColor, 0.85);
+      ctx.shadowBlur = 48;
+    } else {
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+    }
+    ctx.stroke();
     ctx.restore();
   }, [
     showPip,
@@ -1335,6 +1539,7 @@ export default function App() {
     faceFilter,
     avatarWidthDisplay,
     avatarHeightDisplay,
+    fullPageWhiteboard,
   ]);
 
   const drawCameraOverlayRef = useRef(drawCameraOverlay);
@@ -1372,6 +1577,7 @@ export default function App() {
       (showPip && !activeScreenStream && !avatarImageSrc && faceFilter !== "none" && !!mainLayoutPortalRect) ||
       (faceFilter !== "none" && showPip && !avatarImageSrc);
     if (!shouldDrawEffects || !showPip) return;
+    drawCameraOverlayRef.current?.();
     let id: number;
     const loop = () => {
       drawCameraOverlayRef.current?.();
@@ -1379,16 +1585,21 @@ export default function App() {
     };
     id = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(id);
-  }, [cameraOutsidePreview, showPip, fullPageWhiteboard, activeScreenStream, avatarImageSrc, faceFilter, mainLayoutPortalRect]);
+  }, [cameraOutsidePreview, showPip, fullPageWhiteboard, activeScreenStream, avatarImageSrc, faceFilter, mainLayoutPortalRect, avatarShape, avatarDecor, avatarWidthDisplay, avatarHeightDisplay]);
 
   // Face detection for sunglasses/heart/vampire filter
   useEffect(() => {
     if (faceFilter === "none" || !showPip || avatarImageSrc) {
       faceLandmarksRef.current = null;
+      lastValidLandmarksRef.current = null;
       return;
     }
-    const video = cameraVideoRef.current ?? cameraSourceVideoRef.current;
-    if (!video?.srcObject) return;
+    const pickVideo = () =>
+      fullPageWhiteboard
+        ? (cameraSourceVideoRef.current ?? cameraVideoRef.current)
+        : (cameraVideoRef.current ?? cameraSourceVideoRef.current);
+    // Don't return early if video lacks srcObject - camera stream effect may run after this.
+    // The loop will wait for v.srcObject and v.readyState >= 2 before detecting.
     let cancelled = false;
     let rafId = 0;
     const run = async () => {
@@ -1397,15 +1608,21 @@ export default function App() {
         if (cancelled) return;
         const loop = () => {
           if (cancelled) return;
-          const v = cameraVideoRef.current ?? cameraSourceVideoRef.current;
+          const v = pickVideo();
           if (!v?.srcObject || v.readyState < 2) {
             rafId = requestAnimationFrame(loop);
             return;
           }
           try {
             const result = landmarker.detectForVideo(v, nextVideoTimestamp());
-            if (result?.faceLandmarks?.[0]) faceLandmarksRef.current = result.faceLandmarks[0];
-            else faceLandmarksRef.current = null;
+            if (result?.faceLandmarks?.[0]) {
+              const smoothed = smoothLandmarksForFilter(result.faceLandmarks[0]);
+              faceLandmarksRef.current = smoothed;
+              lastValidLandmarksRef.current = smoothed;
+              lastValidLandmarksAtRef.current = performance.now();
+            } else {
+              faceLandmarksRef.current = null;
+            }
           } catch {
             faceLandmarksRef.current = null;
           }
@@ -1421,8 +1638,9 @@ export default function App() {
       cancelled = true;
       cancelAnimationFrame(rafId);
       faceLandmarksRef.current = null;
+      lastValidLandmarksRef.current = null;
     };
-  }, [faceFilter, showPip, avatarImageSrc, cameraStream]);
+  }, [faceFilter, showPip, avatarImageSrc, cameraStream, fullPageWhiteboard]);
 
   useEffect(() => {
     if (!showPip || pipDragging || isRecording) return;
@@ -1451,7 +1669,8 @@ export default function App() {
       });
       return;
     }
-    const container = fullPageContentRef.current;
+    // Use content area (whiteboard + right panel) so camera can be dragged to Capture screen
+    const container = contentAreaRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
     setFullPagePipPos((prev) => {
@@ -1461,7 +1680,7 @@ export default function App() {
       };
       return next.x === prev.x && next.y === prev.y ? prev : next;
     });
-  }, [showPip, pipDragging, fullPageWhiteboard, activeScreenStream, avatarWidthDisplay, avatarHeightDisplay, fullPagePreviewPos]);
+  }, [showPip, pipDragging, fullPageWhiteboard, activeScreenStream, avatarWidthDisplay, avatarHeightDisplay, fullPagePreviewPos, whiteboardPanelWidth]);
 
   const stopScreenShare = () => {
     if (isRecording) {
@@ -1501,6 +1720,7 @@ export default function App() {
       }
       setWhiteboardScreenStream(stream);
       setPreviewScreenStream(stream);
+      setWhiteboardPanelWidth(40); // Show minimal whiteboard bar when Capture Screen is main
       setShowTeleprompter(false);
       setTeleprompterPlaying(false);
       setShowPip(true);
@@ -1548,6 +1768,15 @@ export default function App() {
       return;
     }
     try {
+      // On macOS Electron: request system camera access so Control Center shows camera settings
+      const electronAPI = (window as unknown as { electronAPI?: { requestCameraAccess?: () => Promise<boolean> } }).electronAPI;
+      if (electronAPI?.requestCameraAccess) {
+        const granted = await electronAPI.requestCameraAccess();
+        if (!granted) {
+          setCaptureError("Camera permission denied.");
+          return;
+        }
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       setCameraStream(stream);
       setShowPip(true);
@@ -1602,32 +1831,85 @@ export default function App() {
   const startRecording = async () => {
     pipPosRef.current = pipPos;
     fullPagePipPosRef.current = fullPagePipPos;
-    // Shared Window (getDisplayMedia) on Preview page branch.
-    const screenVideo = persistentScreenVideoRef.current;
-    let composite = compositeRef.current;
-    let preview = previewRef.current;
-    const hasContent = activeScreenStream || screenVideo?.srcObject || showPip;
+    const hasContent = activeScreenStream || persistentScreenVideoRef.current?.srcObject || showPip;
     if (!hasContent) return;
+
+    await new Promise((r) => requestAnimationFrame(r));
+    if (fullPageWhiteboard && !activeScreenStream) {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+
+    let composite = compositeRef.current;
+    let preview = previewRef.current ?? (fullPageWhiteboard && !activeScreenStream ? contentAreaRef.current : null);
     if (!preview || !composite) return;
 
-    const res = RECORD_RESOLUTIONS[recordResolution] ?? RECORD_RESOLUTIONS["1080p"];
-    composite.width = res.w;
-    composite.height = res.h;
-    // Draw several frames before capture - ensures valid pixel data (fixes "Unsupported pixel format: -1" in Electron)
-    drawCompositeRef.current?.(true);
-    drawCompositeRef.current?.(true);
-    drawCompositeRef.current?.(true);
+    setIsRecording(true);
+    await new Promise((r) => requestAnimationFrame(r));
 
-    const targetFps = 30;
+    const res = RECORD_RESOLUTIONS[recordResolution] ?? RECORD_RESOLUTIONS["1080p"];
+    const whiteboardOnly = fullPageWhiteboard && !activeScreenStream;
+    const recCanvas = document.createElement("canvas");
+    recCanvas.width = res.w;
+    recCanvas.height = res.h;
+    recordingCanvasRef.current = recCanvas;
+    if (whiteboardOnly) {
+      recCanvas.style.cssText = `position:fixed;left:-9999px;top:0;width:${res.w}px;height:${res.h}px;opacity:0.01;pointer-events:none`;
+      document.body.appendChild(recCanvas);
+    }
+
+    drawCompositeRef.current?.(true);
+    const targetFps = whiteboardOnly ? 20 : 30;
     const frameMs = 1000 / targetFps;
-    const loop = () => {
+    const doDrawAndDisplay = () => {
       recordLoopLastAtRef.current = performance.now();
       drawCompositeRef.current?.(true);
-      drawLoopIdRef.current = window.setTimeout(loop, frameMs) as unknown as number;
+      if (!whiteboardOnly) {
+        const rec = recordingCanvasRef.current;
+        const comp = compositeRef.current;
+        if (fullPageWhiteboard && rec && comp && rec.width > 0 && rec.height > 0) {
+          const pw = contentAreaRef.current?.offsetWidth ?? rec.width;
+          const ph = contentAreaRef.current?.offsetHeight ?? rec.height;
+          if (comp.width !== rec.width || comp.height !== rec.height) {
+            comp.width = rec.width;
+            comp.height = rec.height;
+          }
+          comp.style.width = `${pw}px`;
+          comp.style.height = `${ph}px`;
+          const ctx = comp.getContext("2d", { alpha: false });
+          if (ctx) ctx.drawImage(rec, 0, 0);
+        } else if (fullPageWhiteboard) {
+          drawCompositeRef.current?.(false);
+        }
+      }
     };
-    drawLoopIdRef.current = window.setTimeout(loop, frameMs) as unknown as number;
+    recordingDrawAndDisplayRef.current = doDrawAndDisplay;
+    let lastDrawAt = 0;
+    const loop = () => {
+      const now = performance.now();
+      const dragging = pipDraggingRef.current && !whiteboardOnly;
+      if (dragging || now - lastDrawAt >= frameMs) {
+        lastDrawAt = now;
+        doDrawAndDisplay();
+      }
+      drawLoopIdRef.current = whiteboardOnly
+        ? (window.setTimeout(loop, frameMs) as unknown as number)
+        : (requestAnimationFrame(loop) as unknown as number);
+    };
+    const sched = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+    if (whiteboardOnly && sched?.yield) {
+      sched.yield().then(doDrawAndDisplay).catch(doDrawAndDisplay);
+    } else {
+      doDrawAndDisplay();
+    }
+    lastDrawAt = performance.now();
+    recordingUsedRafRef.current = !whiteboardOnly;
+    drawLoopIdRef.current = whiteboardOnly
+      ? (window.setTimeout(loop, frameMs) as unknown as number)
+      : (requestAnimationFrame(loop) as unknown as number);
 
-    const canvasStream = composite.captureStream(30);
+    const ctx = recCanvas.getContext("2d");
+    if (ctx) ctx.getImageData(0, 0, 1, 1);
+    const canvasStream = recCanvas.captureStream(30);
     const audioCtx = new (window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext)();
@@ -1678,6 +1960,7 @@ export default function App() {
         mimeType,
       });
     } catch (err) {
+      setIsRecording(false);
       setCaptureError(err instanceof Error ? err.message : "Failed to initialize recorder");
       return;
     }
@@ -1688,10 +1971,14 @@ export default function App() {
       if (e.data.size) recordedChunksRef.current.push(e.data);
     };
     mediaRecorder.onstop = () => {
+      recordingDrawAndDisplayRef.current = null;
       if (drawLoopIdRef.current != null) {
-        clearTimeout(drawLoopIdRef.current);
+        (recordingUsedRafRef.current ? cancelAnimationFrame : clearTimeout)(drawLoopIdRef.current);
         drawLoopIdRef.current = null;
       }
+      const rec = recordingCanvasRef.current;
+      if (rec?.parentNode) rec.remove();
+      recordingCanvasRef.current = null;
       if (timerIdRef.current) clearInterval(timerIdRef.current);
       audioCtxRef.current?.close();
       setIsRecording(false);
@@ -1712,12 +1999,12 @@ export default function App() {
     try {
       mediaRecorder.start(1000);
     } catch (err) {
+      setIsRecording(false);
       setCaptureError(err instanceof Error ? err.message : "Failed to start recorder");
       return;
     }
     recordingStartRef.current = Date.now();
     setRecordingTime(0);
-    setIsRecording(true);
     // No resize on Start Recording - keep same window (already compacted after Capture Screen)
     timerIdRef.current = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - recordingStartRef.current) / 1000);
@@ -1767,45 +2054,7 @@ export default function App() {
     else startRecording();
   };
 
-  const handleOpenWhiteboardRequest = () => {
-    if (isCompact) {
-      // In compact mode the confirmation dialog can cover most of the viewport
-      // and feel like a freeze; default to opening whiteboard in sidebar.
-      setShowWhiteboard(true);
-      setWhiteboardInPreview(false);
-      setShowUseInPreviewDialog(false);
-      return;
-    }
-    setShowUseInPreviewDialog(true);
-  };
-
-  const openFullPageWhiteboard = () => {
-    const prev = previewRef.current;
-    const content = fullPageContentRef.current;
-    if (prev && content) {
-      const pr = prev.getBoundingClientRect();
-      const cr = content.getBoundingClientRect();
-      if (pr.width > 0 && pr.height > 0) {
-        setFullPagePipPos({
-          x: pipPos.x * (cr.width / pr.width),
-          y: pipPos.y * (cr.height / pr.height),
-        });
-      }
-    }
-  };
-
   const closeFullPageWhiteboard = () => {};
-
-  const handleUseInPreviewChoice = (useInPreview: boolean) => {
-    setShowWhiteboard(true);
-    setWhiteboardInPreview(useInPreview);
-    setShowUseInPreviewDialog(false);
-  };
-
-  const handleCloseWhiteboard = () => {
-    setShowWhiteboard(false);
-    setWhiteboardInPreview(false);
-  };
 
   const downloadRecording = (blob: Blob, ext: string) => {
     const url = URL.createObjectURL(blob);
@@ -1903,17 +2152,40 @@ export default function App() {
     };
   }, [showPip, activeScreenStream, isRecording, drawComposite]);
 
-  // Track rect for full-page portal: preview box when activeScreenStream, else full content
+  // Track rect for full-page portal: preview box when activeScreenStream; content area (whiteboard+right panel) when whiteboard-only so camera can be in right panel
   useLayoutEffect(() => {
     if (!fullPageWhiteboard || !showPip) {
       setPortalRect(null);
       return;
     }
-    const el = activeScreenStream ? previewRef.current : fullPageContentRef.current;
+    const el = activeScreenStream ? previewRef.current : contentAreaRef.current;
     if (!el) return;
     const update = () => {
-      const target = activeScreenStream ? previewRef.current : fullPageContentRef.current;
-      if (target) setPortalRect(target.getBoundingClientRect());
+      const target = activeScreenStream ? previewRef.current : contentAreaRef.current;
+      if (target) {
+        const r = target.getBoundingClientRect();
+        if (!activeScreenStream && contentAreaPrevRectRef.current) {
+          const prev = contentAreaPrevRectRef.current;
+          if (prev.w > 10 && prev.h > 10) {
+            const scaleX = r.width / prev.w;
+            const scaleY = r.height / prev.h;
+            if (Math.abs(scaleX - 1) > 0.02 || Math.abs(scaleY - 1) > 0.02) {
+              setFullPagePipPos((p) => {
+                const nextX = Math.round(p.x * scaleX);
+                const nextY = Math.round(p.y * scaleY);
+                return {
+                  x: Math.max(0, Math.min(r.width - avatarWidthDisplay, nextX)),
+                  y: Math.max(0, Math.min(r.height - avatarHeightDisplay, nextY)),
+                };
+              });
+            }
+          }
+        }
+        contentAreaPrevRectRef.current = { w: r.width, h: r.height };
+        setPortalRect(r);
+        // Redraw composite on resize to avoid black screen
+        requestAnimationFrame(() => drawCompositeRef.current?.());
+      }
     };
     update();
     const ro = new ResizeObserver(update);
@@ -1923,7 +2195,7 @@ export default function App() {
       ro.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [fullPageWhiteboard, showPip, activeScreenStream, fullPagePreviewPos]);
+  }, [fullPageWhiteboard, showPip, activeScreenStream, fullPagePreviewPos, avatarWidthDisplay, avatarHeightDisplay]);
 
   // Portal main layout camera (iframe or overlay can block events; portal ensures camera receives them)
   useLayoutEffect(() => {
@@ -1977,13 +2249,17 @@ export default function App() {
     if (isRecording || !showPip || avatarImageSrc) return;
     let id: number;
     const loop = () => {
-      if (fullPageWhiteboard && !activeScreenStream) drawCameraOverlay();
-      else drawCompositeRef.current?.();
+      if (fullPageWhiteboard) {
+        if (faceFilter !== "none" || !activeScreenStream) drawCameraOverlayRef.current?.();
+        drawCompositeRef.current?.();
+      } else {
+        drawCompositeRef.current?.();
+      }
       id = requestAnimationFrame(loop);
     };
     id = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(id);
-  }, [isRecording, showPip, avatarImageSrc, fullPageWhiteboard, activeScreenStream, drawCameraOverlay]);
+  }, [isRecording, showPip, avatarImageSrc, fullPageWhiteboard, activeScreenStream, faceFilter]);
 
   // Draw loop for full-page whiteboard
   useEffect(() => {
@@ -1997,6 +2273,48 @@ export default function App() {
     id = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(id);
   }, [fullPageWhiteboard, isRecording, activeScreenStream, showPip]);
+
+  // Export whiteboard to canvas when recording whiteboard-only. Use whiteboard's actual dimensions so export matches live viewport (fixes position/size).
+  useEffect(() => {
+    if (!isRecording || activeScreenStream) return;
+    const api = excalidrawAPIRef.current;
+    if (!api) return;
+    const res = RECORD_RESOLUTIONS[recordResolution] ?? RECORD_RESOLUTIONS["1080p"];
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      const hasLayers = whiteboardCanvasLayersRef.current.some((l) => l.width > 0 && l.height > 0);
+      if (hasLayers) return;
+      await new Promise((r) => requestAnimationFrame(r));
+      if (cancelled) return;
+      const wbEl = fullPageContentRef.current;
+      const wbW = Math.max(1, wbEl?.offsetWidth ?? res.w);
+      const wbH = Math.max(1, wbEl?.offsetHeight ?? res.h);
+      try {
+        const elements = api.getSceneElements();
+        const appState = api.getAppState();
+        const files = api.getFiles();
+        const canvas = await exportToCanvas({
+          elements: elements as Parameters<typeof exportToCanvas>[0]["elements"],
+          appState: { ...(appState as object), exportWithDarkMode: false } as Parameters<typeof exportToCanvas>[0]["appState"],
+          files: files as Parameters<typeof exportToCanvas>[0]["files"],
+          getDimensions: () => ({ width: wbW, height: wbH }),
+          exportPadding: 0,
+        });
+        if (!cancelled) whiteboardExportedRef.current = canvas;
+      } catch {
+        /* ignore */
+      }
+    };
+    run();
+    const id = setInterval(run, 200);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      whiteboardExportedRef.current = null;
+    };
+  }, [isRecording, activeScreenStream, recordResolution]);
+
 
   // Draw loop for main layout when camera on (screen optional)
   useEffect(() => {
@@ -2084,6 +2402,7 @@ export default function App() {
       fullPagePipPos,
       sidebarWidth,
       previewWidth,
+      whiteboardPanelWidth,
       whiteboardHeight,
       avatarSize,
       avatarShape,
@@ -2095,7 +2414,9 @@ export default function App() {
       recordResolution,
       letterboxBackground,
       letterboxCustomImage: letterboxCustomImage ?? undefined,
+      letterboxMode,
       previewPosition,
+      previewLayoutMode,
       fullPagePreviewPos: fullPagePreviewPos ?? undefined,
       micVolume,
       systemVolume,
@@ -2106,6 +2427,7 @@ export default function App() {
       fullPagePipPos,
       sidebarWidth,
       previewWidth,
+      whiteboardPanelWidth,
       whiteboardHeight,
       avatarSize,
       avatarShape,
@@ -2117,24 +2439,13 @@ export default function App() {
       recordResolution,
       letterboxBackground,
       letterboxCustomImage,
+      letterboxMode,
       previewPosition,
+      previewLayoutMode,
       fullPagePreviewPos,
       micVolume,
       systemVolume,
     ]);
-
-  const resetCameraSettings = () => {
-    setAvatarSize(120);
-    setAvatarShape("circle");
-    setAvatarDecor("none");
-    setGlowColor("#64c8ff");
-    setBeautyMode(false);
-    setBeautySettings(presets.natural);
-    setFaceFilter("none");
-    setMicVolume(100);
-    setSystemVolume(80);
-    clearAvatarImage();
-  };
 
   const pipPosRef = useRef(pipPos);
   const fullPagePipPosRef = useRef(fullPagePipPos);
@@ -2178,7 +2489,7 @@ export default function App() {
     const useViewportCoords = !usePreviewPagePos && !!activeScreenStream;
     const container = usePreviewPagePos
       ? previewRef.current
-      : (activeScreenStream ? null : fullPageContentRef.current);
+      : (activeScreenStream ? null : contentAreaRef.current);
     if (!pip) return;
     if (!useViewportCoords && !container) return;
     const pe = e as React.PointerEvent;
@@ -2207,6 +2518,14 @@ export default function App() {
       const { x: ox, y: oy } = pipOffsetRef.current;
       let x = ev.clientX - r.left - ox;
       let y = ev.clientY - r.top - oy;
+      if (ev instanceof PointerEvent && ev.getCoalescedEvents) {
+        const coalesced = ev.getCoalescedEvents();
+        if (coalesced.length > 0) {
+          const last = coalesced[coalesced.length - 1];
+          x = last.clientX - r.left - ox;
+          y = last.clientY - r.top - oy;
+        }
+      }
       const pipIsPortaled =
         (fullPageWhiteboard && activeScreenStream) ||
         (fullPageWhiteboard && !activeScreenStream && !!portalRect) ||
@@ -2217,6 +2536,9 @@ export default function App() {
       posRef.current = hasOffset ? { x: x - offsetX, y: y - offsetY } : { x, y };
       (pip as HTMLElement).style.left = `${px}px`;
       (pip as HTMLElement).style.top = `${py}px`;
+      if (fullPageWhiteboard && activeScreenStream) {
+        recordingDrawAndDisplayRef.current?.();
+      }
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -2309,7 +2631,7 @@ export default function App() {
     setContextFromClick(e.clientX, e.clientY);
     const pip = pipRef.current;
     const container = fullPageWhiteboard
-      ? (activeScreenStream ? previewRef.current : fullPageContentRef.current)
+      ? (activeScreenStream ? previewRef.current : contentAreaRef.current)
       : previewRef.current;
     if (!container) return;
     const buffer = 40;
@@ -2356,8 +2678,10 @@ export default function App() {
       const target = e.target as HTMLElement;
       const el = target?.nodeType === Node.ELEMENT_NODE ? target : (target as Node).parentElement as HTMLElement;
       if (target?.closest?.('[role="dialog"], [data-modal-overlay]')) return;
-      // Let header/RecordingControls (data-dreamwork-no-intercept) handle their own clicks including Teleprompter
-      if (el?.closest?.('[data-dreamwork-no-intercept]')) return;
+      // Let header/RecordingControls (data-dreamwork-no-intercept) handle their own clicks
+      if (target?.closest?.('[data-dreamwork-no-intercept]')) return;
+      // Geometric fallback: never intercept clicks in top 100px (header area)
+      if (e.clientY < 100) return;
       if (!showPip) return;
       if (pipDraggingRef.current || previewBoxDraggingRef.current) return;
       if (el?.closest?.('header, button, a, input, select, [role="button"], aside')) return;
@@ -2433,15 +2757,82 @@ export default function App() {
     }
   }, [cameraStream, fullPageWhiteboard]);
 
-  const applyPreviewPosition = async (pos: typeof previewPosition) => {
-    setPreviewPosition(pos);
-    if (isRecording) {
-      await setCompactMode(pos, 420, 320);
-    }
-  };
+  const headerEl = (
+    <header
+      data-dreamwork-no-intercept
+      className={`glass-panel fixed left-0 right-0 top-0 flex shrink-0 flex-col shadow-sm [&>*]:relative [&>*]:z-10 pointer-events-auto isolate ${
+        showLiveMeetingModal ? "z-[100030]" : "z-[999999]"
+      } ${isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"}`}
+    >
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+            <div className="flex shrink-0 items-center gap-2">
+              <img
+                src={avatarImageSrc ?? "./logo.png"}
+                alt="DreamWorks"
+                className={`shrink-0 rounded-full object-cover ring-2 ring-white/30 ${isCompact ? "size-7" : "size-9"}`}
+              />
+              <h1 className={`font-semibold tracking-tight truncate ${isCompact ? "text-sm" : "text-base"}`}>
+                DreamWorks
+              </h1>
+            </div>
+            <div className="h-6 w-px shrink-0 bg-border/60" />
+            <button
+              type="button"
+              onClick={() => setShowSettings((v) => !v)}
+              className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+              aria-label="Settings"
+            >
+              <Settings className="size-5" />
+            </button>
+            <div className="flex min-w-0 flex-1 items-center justify-between overflow-x-auto overflow-y-hidden gap-3">
+              <div className="flex shrink-0 items-center gap-3 min-w-max">
+              <RecordingControls
+                hasScreen={hasScreen}
+                hasCamera={hasCamera}
+                isRecording={isRecording}
+                isRecordingPaused={isRecordingPaused}
+                compact={isCompact}
+                recordingDisabled={inLiveMeeting}
+                onCaptureScreen={captureScreen}
+                onStopScreenShare={stopScreenShare}
+                onToggleCamera={showPip ? stopCamera : startCamera}
+                onToggleRecord={toggleRecord}
+                onPauseRecording={pauseRecording}
+                onResumeRecording={resumeRecording}
+                onOpenFullPageWhiteboard={
+                  inLiveMeeting
+                    ? () => liveMeetingRef.current?.enterCompactMode()
+                    : closeFullPageWhiteboard
+                }
+                onOpenLiveMeeting={() => setShowLiveMeetingModal(true)}
+                onToggleTeleprompter={handleToggleTeleprompter}
+                onCaptureScreenshot={captureScreenshot}
+                showWhiteboard={true}
+                showTeleprompter={showTeleprompter}
+                recordingTimeLabel={formatRecordingTime(recordingTime)}
+              />
+              </div>
+              {!isCompact && (
+                <div className="sector-card flex shrink-0 items-center gap-2 rounded-lg px-3 py-1.5 text-[8px] font-semibold">
+                  <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
+                    {hasScreen ? "✓" : "1."} Screen
+                  </span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className={hasCamera ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
+                    {hasCamera ? "✓" : "2."} Camera
+                  </span>
+                  <span className="text-muted-foreground">→</span>
+                  <span className="text-muted-foreground">3. Record</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </header>
+  );
 
   return (
     <>
+      {typeof document !== "undefined" && createPortal(headerEl, document.getElementById("dreamwork-header-root") ?? document.body)}
       <TeleprompterErrorBoundary
         key={`teleprompter-${teleprompterResetSeq}`}
         onCrash={() => {
@@ -2527,8 +2918,17 @@ export default function App() {
             }
           >
             <LiveMeetingModal
+              ref={liveMeetingRef}
               isOpen={showLiveMeetingModal}
-              onClose={() => setShowLiveMeetingModal(false)}
+              onClose={() => {
+                setShowLiveMeetingModal(false);
+                setInLiveMeeting(false);
+              }}
+              onEnterCall={() => {
+                setInLiveMeeting(true);
+                if (isRecording) stopRecording();
+              }}
+              onLeaveCall={() => setInLiveMeeting(false)}
             />
           </Suspense>
         </LiveMeetingErrorBoundary>
@@ -2553,11 +2953,11 @@ export default function App() {
         style={{
           left: fullPageWhiteboard ? -9999 : cameraViewportPos.x,
           top: fullPageWhiteboard ? -9999 : cameraViewportPos.y,
-          width: avatarWidthDisplay,
-          height: avatarHeightDisplay,
+          width: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_SIZE.w : avatarWidthDisplay,
+          height: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_SIZE.h : avatarHeightDisplay,
           zIndex: fullPageWhiteboard ? -1 : 99990,
           transform: "translate3d(0,0,0)",
-          borderRadius: avatarShape === "circle" ? "50%" : 8,
+          borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
           // Keep source for decode; fully hidden during recording to avoid duplicate preview
           opacity: isRecording ? 0 : 0.001,
         }}
@@ -2568,134 +2968,77 @@ export default function App() {
       />
       )}
       <div
-        className={`glass-bg flex h-screen flex-col ${showOutput && recordedClips.length > 0 ? "overflow-y-auto" : "overflow-hidden"}`}
+        className={`glass-bg flex h-screen w-full min-w-0 flex-col px-4 pb-4 ${showOutput && recordedClips.length > 0 ? "overflow-y-auto" : "overflow-hidden"}`}
       >
-      <header
-        data-dreamwork-no-intercept
-        className={`glass-panel fixed left-0 right-0 top-0 z-[100010] flex shrink-0 flex-col shadow-sm isolation-isolate [&>*]:relative [&>*]:z-10 ${
-          isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"
-        }`}
-      >
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="flex shrink-0 items-center gap-2">
-              <img
-                src={avatarImageSrc ?? "./logo.png"}
-                alt="DreamWorks"
-                className={`shrink-0 rounded-full object-cover ring-2 ring-white/30 ${isCompact ? "size-7" : "size-9"}`}
-              />
-              <h1 className={`font-semibold tracking-tight truncate ${isCompact ? "text-sm" : "text-base"}`}>
-                DreamWorks
-              </h1>
-            </div>
-            <div className="h-6 w-px shrink-0 bg-border/60" />
-            <button
-              type="button"
-              onClick={() => setShowSettings((v) => !v)}
-              className="shrink-0 rounded-lg p-1.5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
-              aria-label="Settings"
-            >
-              <Settings className="size-5" />
-            </button>
-            <div className="flex min-w-0 flex-1 items-center justify-between overflow-x-auto overflow-y-hidden gap-3">
-              <div className="flex shrink-0 items-center gap-3 min-w-max">
-              <RecordingControls
-                hasScreen={hasScreen}
-                hasCamera={hasCamera}
-                isRecording={isRecording}
-                isRecordingPaused={isRecordingPaused}
-                compact={isCompact}
-                onCaptureScreen={captureScreen}
-                onStopScreenShare={stopScreenShare}
-                onToggleCamera={showPip ? stopCamera : startCamera}
-                onToggleRecord={toggleRecord}
-                onPauseRecording={pauseRecording}
-                onResumeRecording={resumeRecording}
-                onOpenFullPageWhiteboard={closeFullPageWhiteboard}
-                onOpenLiveMeeting={() => setShowLiveMeetingModal(true)}
-                onToggleTeleprompter={handleToggleTeleprompter}
-                onCaptureScreenshot={captureScreenshot}
-                showWhiteboard={true}
-                showTeleprompter={showTeleprompter}
-                recordingTimeLabel={formatRecordingTime(recordingTime)}
-              />
-              </div>
-              {!isCompact && (
-                <div className="sector-card flex shrink-0 items-center gap-2 rounded-lg px-3 py-1.5 text-[8px] font-semibold">
-                  <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                    {hasScreen ? "✓" : "1."} Screen
-                  </span>
-                  <span className="text-muted-foreground">→</span>
-                  <span className={hasCamera ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                    {hasCamera ? "✓" : "2."} Camera
-                  </span>
-                  <span className="text-muted-foreground">→</span>
-                  <span className="text-muted-foreground">3. Record</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </header>
-        {/* Spacer = header height + 8px padding; header: 64px (not recording) / 96px (recording) */}
-        <div className={`shrink-0 ${isRecording ? "h-[104px]" : "h-[72px]"}`} aria-hidden />
-        {showSettings && (
-          <div className="fixed inset-y-0 right-0 z-[100011] w-[320px] border-l border-slate-200 bg-white shadow-xl" data-dreamwork-no-intercept>
-            <div className="flex h-full flex-col overflow-y-auto p-4 text-slate-900">
-              <div className="mb-4 flex items-center justify-between">
-                <span className="text-sm font-semibold text-slate-900">Settings</span>
-                <button
-                  type="button"
-                  onClick={() => setShowSettings(false)}
-                  className="rounded p-1 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                >
-                  ×
-                </button>
-              </div>
-              <SettingsPanel
-                avatarSize={avatarSize}
-                onAvatarSizeChange={setAvatarSize}
-                avatarShape={avatarShape}
-                onAvatarShapeChange={setAvatarShape}
-                avatarDecor={avatarDecor}
-                onAvatarDecorChange={setAvatarDecor}
-                glowColor={glowColor}
-                onGlowColorChange={setGlowColor}
-                avatarImageSrc={avatarImageSrc}
-                onUseImage={handleAvatarImage}
-                onClearImage={clearAvatarImage}
-                beautyMode={beautyMode}
-                onBeautyModeChange={setBeautyMode}
-                beautySettings={beautySettings}
-                onBeautySettingsChange={setBeautySettings}
-                faceFilter={faceFilter}
-                onFaceFilterChange={setFaceFilter}
-                micVolume={micVolume}
-                onMicVolumeChange={setMicVolume}
-                systemVolume={systemVolume}
-                onSystemVolumeChange={setSystemVolume}
-                recordResolution={recordResolution}
-                onRecordResolutionChange={setRecordResolution}
-                letterboxBackground={letterboxBackground}
-                onLetterboxBackgroundChange={setLetterboxBackground}
-                letterboxCustomImage={letterboxCustomImage}
-                onLetterboxCustomImageChange={setLetterboxCustomImage}
-              />
-            </div>
+        {/* Spacer = header height + padding; use 86px always to avoid layout shift when recording starts */}
+        <div className="shrink-0 h-[86px]" aria-hidden />
+        {captureError && (
+          <div className="shrink-0 mx-4 mb-2 rounded-lg bg-red-500/20 px-4 py-2 text-sm text-red-600">
+            {captureError}
           </div>
         )}
-        <div className="relative z-0 flex flex-1 min-h-0 gap-0 p-2.5 isolation-isolate">
-          <div ref={fullPageContentRef} className="relative flex-1 min-h-0 sector-card overflow-hidden bg-white">
-          {/* Composite overlay: behind whiteboard so user can draw. Draw loop updates it for recording. */}
-          {showPip && !activeScreenStream && (cameraStream || avatarImageSrc) && (
+        {showSettings &&
+          createPortal(
+            <div className="fixed inset-y-0 right-0 z-[1000000] w-[360px] min-w-[360px] border-l border-slate-200 bg-white shadow-xl" data-dreamwork-no-intercept>
+              <div className="flex h-full flex-col overflow-y-auto p-5 text-slate-900">
+                <div className="mb-5 flex items-center justify-between">
+                  <span className="text-lg font-semibold text-slate-900 tracking-tight">Settings</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowSettings(false)}
+                    className="rounded p-1 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                  >
+                    ×
+                  </button>
+                </div>
+                <SettingsPanel
+                  avatarSize={avatarSize}
+                  onAvatarSizeChange={setAvatarSize}
+                  avatarShape={avatarShape}
+                  onAvatarShapeChange={setAvatarShape}
+                  avatarDecor={avatarDecor}
+                  onAvatarDecorChange={setAvatarDecor}
+                  glowColor={glowColor}
+                  onGlowColorChange={setGlowColor}
+                  avatarImageSrc={avatarImageSrc}
+                  onUseImage={handleAvatarImage}
+                  onClearImage={clearAvatarImage}
+                  beautyMode={beautyMode}
+                  onBeautyModeChange={setBeautyMode}
+                  beautySettings={beautySettings}
+                  onBeautySettingsChange={setBeautySettings}
+                  faceFilter={faceFilter}
+                  onFaceFilterChange={setFaceFilter}
+                  micVolume={micVolume}
+                  onMicVolumeChange={setMicVolume}
+                  systemVolume={systemVolume}
+                  onSystemVolumeChange={setSystemVolume}
+                  recordResolution={recordResolution}
+                  onRecordResolutionChange={setRecordResolution}
+                  letterboxBackground={letterboxBackground}
+                  onLetterboxBackgroundChange={setLetterboxBackground}
+                  letterboxCustomImage={letterboxCustomImage}
+                  onLetterboxCustomImageChange={setLetterboxCustomImage}
+                  letterboxMode={letterboxMode}
+                  onLetterboxModeChange={setLetterboxMode}
+                />
+              </div>
+            </div>,
+            document.body
+          )}
+        <div ref={contentAreaRef} className="relative z-0 flex flex-1 min-h-0 min-w-0 gap-0 isolation-isolate overflow-hidden rounded-xl">
+          {/* Composite overlay: always render when whiteboard-only so compositeRef exists for recording (avoids black screen) */}
+          {!activeScreenStream && (
             <div
               ref={previewRef}
-              className={`absolute inset-0 z-[9997] pointer-events-none ${fullPageWhiteboard && !activeScreenStream && !isRecording ? "invisible" : ""}`}
+              className={`absolute inset-0 pointer-events-none overflow-hidden rounded-xl ${fullPageWhiteboard && !activeScreenStream ? "invisible z-0" : "z-30"}`}
               onPointerDownCapture={handlePreviewPointerDown}
             >
               <canvas
                 ref={compositeRef}
                 className="absolute inset-0 w-full h-full pointer-events-none"
               />
-              {/* Hit target for drag - same size as avatar to avoid visible extra area */}
+              {showPip && (
               <div
                 className="absolute z-10 cursor-grab touch-none pointer-events-auto"
                 style={{
@@ -2709,13 +3052,111 @@ export default function App() {
                 onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
                 aria-label="Drag to move camera"
               />
+              )}
             </div>
           )}
-            {/* Whiteboard on top so user can draw (brush, etc). Composite behind for recording. */}
-            <div className="absolute inset-0 z-[9998]">
-              <ExcalidrawBoard onCanvasLayersChange={handleWhiteboardLayersChange} />
+          {/* Layout: always [Whiteboard left] [Handle] [Capture Screen right]. When screen selected, Capture Screen is main. */}
+          <>
+            {/* Whiteboard: main when no screen, mini (40px bar) when screen selected */}
+            <div
+              ref={fullPageContentRef}
+              className={`relative z-10 flex min-h-0 sector-card overflow-hidden bg-white pr-1 ${
+                activeScreenStream ? "shrink-0 min-w-0" : "flex-1"
+              }`}
+              style={activeScreenStream ? { width: whiteboardPanelWidth } : undefined}
+            >
+              {(() => {
+                const contentW = contentAreaRef.current?.offsetWidth ?? contentAreaPrevRectRef.current?.w ?? 0;
+                const whiteboardWidth = activeScreenStream ? whiteboardPanelWidth : Math.max(0, contentW - 14 - whiteboardPanelWidth);
+                const showFull = whiteboardWidth >= 240;
+                return showFull ? (
+                <div className="absolute inset-0 z-[1]">
+                  <ExcalidrawBoard onCanvasLayersChange={handleWhiteboardLayersChange} onWhiteboardTextureChange={handleWhiteboardTextureChange} onExcalidrawReady={handleExcalidrawReady} />
+                </div>
+              ) : (
+                <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1 overflow-hidden rounded-xl bg-slate-50 m-1 p-1">
+                  <span className="text-[9px] text-gray-500 truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    drag
+                  </span>
+                  <span className="text-[9px] text-gray-600 font-medium truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    Excalidraw
+                  </span>
+                  <span className="text-slate-500 text-sm">→</span>
+                </div>
+              );
+              })()}
             </div>
-          {/* Camera: portal to body. When Capture Screen, portal is offset from composite so user can distinguish them. */}
+            <ResizeHandle
+              direction="horizontal"
+              className={`relative z-20 shrink-0 ${isRecording && !activeScreenStream ? "invisible" : ""}`}
+              data-dreamwork-no-intercept
+              onResize={(d) => {
+                const contentW = contentAreaRef.current?.offsetWidth ?? 0;
+                const maxW = contentW > 0 ? contentW - 54 : Math.max(600, window.innerWidth - 480);
+                // Layout: [Whiteboard left] [Handle] [Capture Screen right].
+                // activeScreenStream: whiteboardPanelWidth = left. Drag left → shrink left (w+d, d<0). Drag right → grow left (w+d, d>0).
+                // !activeScreenStream: whiteboardPanelWidth = right. Drag left → grow right (w-d, d<0). Drag right → shrink right (w-d, d>0).
+                const delta = activeScreenStream ? d : -d;
+                setWhiteboardPanelWidth((w) => Math.max(40, Math.min(maxW, w + delta)));
+              }}
+            />
+            {/* Capture Screen: main when screen selected, mini (40px bar) when whiteboard-only */}
+            <div
+              ref={activeScreenStream ? previewRef : screenMiniStripRef}
+              className={`relative flex min-h-0 overflow-hidden rounded-2xl border-2 border-black bg-slate-900 pl-1 ${
+                activeScreenStream ? "flex-1" : "shrink-0"
+              }`}
+              style={!activeScreenStream ? { width: whiteboardPanelWidth } : undefined}
+              onPointerDownCapture={handlePreviewPointerDown}
+            >
+              <video
+                ref={screenVideoRef}
+                className="block size-full object-contain"
+                autoPlay
+                muted
+                playsInline
+                style={{ visibility: showPip && activeScreenStream ? "hidden" : "visible" }}
+                onLoadedData={() => drawComposite()}
+              />
+              {activeScreenStream && (
+                <canvas
+                  ref={compositeRef}
+                  className="absolute inset-0 size-full object-contain pointer-events-none"
+                  style={{
+                    visibility: showPip ? "visible" : "hidden",
+                    transform: "translateZ(0)",
+                  }}
+                />
+              )}
+              {!activeScreenStream && whiteboardPanelWidth < 160 && (
+                <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1 overflow-hidden rounded-xl bg-slate-800/70 p-1 text-center pointer-events-none m-1">
+                  <span className="text-[9px] text-gray-400 truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    drag
+                  </span>
+                  <span className="text-[9px] text-gray-300 font-medium truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    Screen
+                  </span>
+                  <span className="text-slate-400 text-sm">←</span>
+                </div>
+              )}
+              {showPip && (
+                <div
+                  className="absolute z-10 cursor-grab touch-none"
+                  style={{
+                    left: Math.max(0, fullPagePipPos.x),
+                    top: Math.max(0, fullPagePipPos.y),
+                    width: avatarWidthDisplay,
+                    height: avatarHeightDisplay,
+                    touchAction: "none",
+                  }}
+                  onMouseDown={handlePipMouseDown}
+                  onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+                  aria-label="Drag to move camera"
+                />
+              )}
+            </div>
+          </>
+          {/* Camera: portal to body - always when showPip, offset in Capture Screen mode */}
           {showPip && fullPageWhiteboard && (cameraStream || avatarImageSrc) &&
             createPortal(
               <div
@@ -2726,20 +3167,22 @@ export default function App() {
                   width: avatarWidthDisplay,
                   height: avatarHeightDisplay,
                   zIndex: 99999,
-                  overflow: "hidden",
-                  borderRadius: avatarShape === "circle" ? "50%" : 8,
-                  backgroundColor: "transparent",
-                  boxShadow: activeScreenStream ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
+                  borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
+                  backgroundColor: "#000",
+                  boxShadow: activeScreenStream && !(isRecording && activeScreenStream) ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
+                  opacity: isRecording && activeScreenStream ? 0 : 1,
+                  pointerEvents: "auto",
                 }}
                 ref={pipRef}
               >
                 {/* Canvas overlay: beauty/filter when outside preview; above CircularWebcam (9999) so effects show */}
                 {(cameraOutsidePreview || (!activeScreenStream && !avatarImageSrc) || (faceFilter !== "none" && !avatarImageSrc)) && (
                   <canvas
+                    key={`overlay-${avatarShape}-${avatarDecor}-${avatarWidthDisplay}-${avatarHeightDisplay}`}
                     ref={cameraOverlayRef}
                     className="absolute inset-0 w-full h-full pointer-events-none"
                     style={{
-                      borderRadius: avatarShape === "circle" ? "50%" : 8,
+                      borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
                       zIndex: 10000,
                     }}
                   />
@@ -2782,63 +3225,8 @@ export default function App() {
               </div>,
               document.body
             )}
-          </div>
-          <ResizeHandle
-            direction="horizontal"
-            onResize={(d) => {
-              const maxW = Math.max(600, window.innerWidth - 480);
-              setPreviewWidth((w) => Math.max(80, Math.min(maxW, w - d)));
-            }}
-          />
-          {/* Preview strip: resizable */}
-          <div
-            className="flex shrink-0 flex-col overflow-hidden rounded-xl border-l border-white/20 bg-slate-900/50 p-2"
-            style={{ width: previewWidth }}
-          >
-            {activeScreenStream ? (
-              <div
-                ref={previewRef}
-                className="relative flex min-h-0 flex-1 overflow-hidden rounded-xl border-2 border-white/30 bg-slate-900"
-                onPointerDownCapture={handlePreviewPointerDown}
-              >
-                <video
-                  ref={screenVideoRef}
-                  className="block size-full object-contain"
-                  autoPlay
-                  muted
-                  playsInline
-                  style={{ visibility: showPip ? "hidden" : "visible" }}
-                  onLoadedData={() => drawComposite()}
-                />
-                <canvas
-                  ref={compositeRef}
-                  className="absolute inset-0 size-full object-contain pointer-events-none"
-                  style={{ visibility: showPip ? "visible" : "hidden" }}
-                />
-                {showPip && (
-                  <div
-                    className="absolute z-10 cursor-grab touch-none"
-                    style={{
-                      left: Math.max(0, pipPos.x),
-                      top: Math.max(0, pipPos.y),
-                      width: avatarWidthDisplay,
-                      height: avatarHeightDisplay,
-                      touchAction: "none",
-                    }}
-                    onMouseDown={handlePipMouseDown}
-                    onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
-                    aria-label="Drag to move camera"
-                  />
-                )}
-              </div>
-            ) : (
-              <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-white/20 text-sm text-muted-foreground">
-                Capture screen
-              </div>
-            )}
-          </div>
         </div>
-        {showOutput && recordedClips.length > 0 && (
+        {showOutput && recordedClips.length > 0 && !isRecording && (
           <>
             {!outputCollapsed && (
               <ResizeHandle
@@ -2919,453 +3307,6 @@ export default function App() {
           </>
         )}
       </div>
-      {false && (
-    <div className="glass-bg flex h-screen flex-col overflow-hidden">
-      {showUseInPreviewDialog && (
-        <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/40 backdrop-blur-sm" data-modal-overlay role="dialog" aria-modal="true">
-          <div className="flex flex-col gap-4 rounded-xl border border-black/10 bg-[#fafafa] p-6 shadow-xl">
-            <p className="text-sm font-medium text-foreground">Use whiteboard in preview?</p>
-            <p className="text-xs text-muted-foreground">
-              Yes: overlay on preview for recording. No: keep in sidebar.
-            </p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className="flex-1 rounded-lg border border-black/10 bg-white px-4 py-2 text-sm font-medium text-foreground shadow-sm hover:bg-gray-100"
-                onClick={() => handleUseInPreviewChoice(false)}
-              >
-                No
-              </button>
-              <button
-                type="button"
-                className="flex-1 rounded-lg border border-black/10 bg-white px-4 py-2 text-sm font-medium text-foreground shadow-sm hover:bg-gray-100"
-                onClick={() => handleUseInPreviewChoice(true)}
-              >
-                Yes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      <header
-        data-dreamwork-no-intercept
-        className={`glass-panel sticky top-0 z-[100003] flex shrink-0 flex-col shadow-sm ${
-          isCompact ? "gap-1.5 px-3 py-2" : "gap-2 px-4 py-3"
-        }`}
-      >
-        <div className={`flex min-w-0 flex-1 ${isCompact ? "flex-col gap-2" : "flex-wrap items-center gap-3"}`}>
-          <div className="flex shrink-0 items-center gap-2">
-              <img
-                src={avatarImageSrc ?? "./logo.png"}
-                alt="DreamWorks"
-              className={`shrink-0 rounded-full object-cover ring-2 ring-white/30 ${isCompact ? "size-7" : "size-9"}`}
-            />
-              <h1 className={`font-semibold tracking-tight whitespace-nowrap ${isCompact ? "text-sm" : "text-base"}`}>
-                DreamWorks
-              </h1>
-          </div>
-          {!isCompact && <div className="h-6 w-px shrink-0 bg-border/60" />}
-          <div className={`flex min-w-0 flex-1 items-center ${isCompact ? "justify-start" : "justify-center overflow-x-auto"}`}>
-            <RecordingControls
-              hasScreen={hasScreen}
-              hasCamera={hasCamera}
-              isRecording={isRecording}
-              isRecordingPaused={isRecordingPaused}
-              compact={isCompact}
-              onCaptureScreen={captureScreen}
-              onStopScreenShare={stopScreenShare}
-              onToggleCamera={handleToggleCameraFromControls}
-              onCaptureScreenshot={captureScreenshot}
-              onToggleRecord={toggleRecord}
-              onPauseRecording={pauseRecording}
-              onResumeRecording={resumeRecording}
-              onOpenFullPageWhiteboard={openFullPageWhiteboard}
-              onToggleWhiteboard={() => setShowWhiteboard((v) => !v)}
-              onOpenLiveMeeting={() => setShowLiveMeetingModal(true)}
-              onToggleTeleprompter={handleToggleTeleprompter}
-              onRecoverOverlays={handleRecoverOverlays}
-              showWhiteboard={showWhiteboard}
-              showTeleprompter={showTeleprompter}
-              recordingTimeLabel={formatRecordingTime(recordingTime)}
-            />
-          </div>
-          {!isCompact && (
-            <>
-            <div className="h-6 w-px shrink-0 bg-border/60" />
-            <div className="flex shrink-0 items-center gap-2">
-              <div className="sector-card flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[9px] font-semibold whitespace-nowrap">
-                <span className={hasScreen ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                  {hasScreen ? "✓" : "1."} Screen
-                </span>
-                <span className="text-muted-foreground">→</span>
-                <span className={hasCamera ? "font-semibold text-emerald-600" : "text-muted-foreground"}>
-                  {hasCamera ? "✓" : "2."} Camera
-                </span>
-                <span className="text-muted-foreground">→</span>
-                <span className="text-muted-foreground">3. Record</span>
-              </div>
-            </div>
-            </>
-          )}
-        </div>
-        {isRecording && (
-          <div className={`flex flex-wrap items-center gap-2 ${isCompact ? "gap-1.5" : ""}`}>
-            <div
-              className={`flex items-center gap-2 rounded-lg border border-red-400/30 bg-red-500/20 font-mono tabular-nums backdrop-blur-md ${
-                isCompact ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"
-              }`}
-            >
-              <span className={`rounded-full ${isCompact ? "h-1.5 w-1.5" : "h-2 w-2"} ${isRecordingPaused ? "bg-amber-500" : "animate-pulse bg-red-500"}`} />
-              <span>{formatRecordingTime(recordingTime)}</span>
-              <span className="font-medium text-red-600">
-                {isRecordingPaused ? "⏸" : "● LIVE"}
-              </span>
-            </div>
-            <div className="flex gap-1">
-              {(["top-left", "top-right", "bottom-left", "bottom-right"] as const).map((pos) => (
-                <GlassButton
-                  key={pos}
-                  variant={previewPosition === pos ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => applyPreviewPosition(pos)}
-                >
-                  {pos === "top-left" ? "↖" : pos === "top-right" ? "↗" : pos === "bottom-left" ? "↙" : "↘"}
-                </GlassButton>
-              ))}
-            </div>
-          </div>
-        )}
-      </header>
-
-      <div className={`flex flex-1 min-h-0 ${isRecording && isElectron && !keepFullStudioWhileRecording ? "flex-col" : ""}`}>
-        <main
-          className="flex min-w-0 flex-1 flex-col min-h-0 overflow-auto p-4"
-          style={{ minWidth: 200 }}
-        >
-          <div id="dreamwork-preview" className="sector-card flex flex-1 flex-col overflow-hidden p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Preview
-              </span>
-            </div>
-            <div
-              ref={previewRef}
-              className={`relative w-full overflow-hidden rounded-xl border border-border/80 shadow-lg aspect-video max-h-[calc(100vh-14rem)] ${activeScreenStream || showPip ? "bg-slate-900" : "bg-slate-800"}`}
-              onPointerDownCapture={handlePreviewPointerDown}
-            >
-            {captureError && !activeScreenStream && (
-              <div className="glass-panel absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 p-6">
-                <span className="text-center text-sm">{captureError}</span>
-                <span className="text-center text-xs text-muted-foreground">
-                  In the picker, use the &quot;Window&quot; tab to capture a specific app. Grant Screen Recording in
-                  System Settings if needed.
-                </span>
-                <button
-                  type="button"
-                  className="glass-panel rounded-lg border-white/20 bg-white/20 px-4 py-2 text-sm font-medium backdrop-blur-md hover:bg-white/30"
-                  onClick={captureScreen}
-                >
-                  Try again
-                </button>
-              </div>
-            )}
-            {!activeScreenStream && !captureError && !showPip && (
-              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                Capture screen to start
-              </div>
-            )}
-            <div
-              className="pointer-events-none absolute inset-0"
-              style={{ zIndex: showPip ? 25 : undefined }}
-            >
-              <video
-                ref={screenVideoRef}
-                className="block size-full object-contain"
-                autoPlay
-                muted
-                playsInline
-                style={{
-                  display: activeScreenStream ? "block" : "none",
-                  visibility: showPip ? "hidden" : "visible",
-                }}
-                onLoadedData={() => drawComposite()}
-              />
-              <canvas
-                ref={compositeRef}
-                id="composite"
-                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                style={{ display: activeScreenStream ? "block" : "none", zIndex: 1 }}
-              />
-              {showPip && activeScreenStream && !fullPageWhiteboard && (
-                <div
-                  ref={pipRef}
-                  className={`absolute z-10 cursor-grab touch-none pointer-events-auto shadow-lg ${avatarShape === "circle" ? "rounded-full" : "rounded-lg"}`}
-                  style={{
-                    left: pipPos.x,
-                    top: pipPos.y,
-                    width: avatarWidthDisplay,
-                    height: avatarHeightDisplay,
-                  }}
-                  onMouseDown={handlePipMouseDown}
-                  onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
-                  aria-label="Drag to move camera"
-                >
-                  <CircularWebcam
-                    hidden={captureWebcamHidden}
-                    useCanvasForDisplay={false}
-                    useImgForDisplay={false}
-                    externalVideoRef={cameraSourceVideoRef}
-                    cameraStream={cameraStream}
-                  avatarWidth={avatarWidthDisplay}
-                  avatarHeight={avatarHeightDisplay}
-                    avatarShape={avatarShape}
-                    avatarDecor={avatarDecor}
-                    glowColor={glowColor}
-                    beautyMode={beautyMode}
-                    beautyFilter={beautySettingsToFilter(beautySettings)}
-                    avatarImageSrc={avatarImageSrc}
-                    pipPos={{ x: 0, y: 0 }}
-                    onPipMouseDown={handlePipMouseDown}
-                    pipRef={portalCameraInnerRef}
-                    cameraVideoRef={cameraVideoRef}
-                    avatarImgRef={avatarImgRef}
-                  />
-                </div>
-              )}
-            </div>
-            {showWhiteboard && whiteboardInPreview && (
-              <div className="absolute inset-0 z-20 rounded-xl overflow-hidden bg-white">
-                <ExcalidrawBoard onCanvasLayersChange={handleWhiteboardLayersChange} />
-              </div>
-            )}
-            {showPip && !activeScreenStream && mainLayoutPortalRect &&
-              createPortal(
-                <div
-                  style={{
-                    position: "fixed",
-                    left: mainLayoutPortalRect!.left + pipPos.x,
-                    top: mainLayoutPortalRect!.top + pipPos.y,
-                    width: avatarWidthDisplay,
-                    height: avatarHeightDisplay,
-                    zIndex: 99999,
-                    cursor: "grab",
-                    touchAction: "none",
-                  }}
-                  ref={pipRef}
-                  onMouseDown={handlePipMouseDown}
-                  onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
-                  aria-label="Drag to move camera"
-                >
-                  <div
-                    style={{
-                      position: "absolute",
-                      left: 0,
-                      top: 0,
-                      width: avatarWidthDisplay,
-                      height: avatarHeightDisplay,
-                      borderRadius: avatarShape === "circle" ? "50%" : undefined,
-                    }}
-                  >
-                    {(faceFilter !== "none" && !avatarImageSrc) && (
-                      <canvas
-                        ref={cameraOverlayRef}
-                        className="absolute inset-0 w-full h-full pointer-events-none"
-                        style={{
-                          borderRadius: avatarShape === "circle" ? "50%" : 8,
-                          zIndex: 10000,
-                        }}
-                      />
-                    )}
-                    <CircularWebcam
-                    hidden={false}
-                    useCanvasForDisplay={false}
-                    useImgForDisplay={false}
-                    externalVideoRef={cameraSourceVideoRef}
-                    cameraStream={cameraStream}
-                  avatarWidth={avatarWidthDisplay}
-                  avatarHeight={avatarHeightDisplay}
-                    avatarShape={avatarShape}
-                    avatarDecor={avatarDecor}
-                    glowColor={glowColor}
-                    beautyMode={beautyMode}
-                    beautyFilter={beautySettingsToFilter(beautySettings)}
-                    avatarImageSrc={avatarImageSrc}
-                    pipPos={{ x: 0, y: 0 }}
-                    onPipMouseDown={handlePipMouseDown}
-                    pipRef={portalCameraInnerRef}
-                    cameraVideoRef={cameraVideoRef}
-                    avatarImgRef={avatarImgRef}
-                  />
-                </div>
-                </div>,
-                document.body
-              )}
-            {showPip && !activeScreenStream && !mainLayoutPortalRect && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: pipPos.x,
-                  top: pipPos.y,
-                  width: avatarWidthDisplay,
-                  height: avatarHeightDisplay,
-                  zIndex: 9999,
-                }}
-              >
-                <CircularWebcam
-                  hidden={false}
-                  useCanvasForDisplay={false}
-                  useImgForDisplay={false}
-                  externalVideoRef={cameraSourceVideoRef}
-                  cameraStream={cameraStream}
-                  avatarWidth={avatarWidthDisplay}
-                  avatarHeight={avatarHeightDisplay}
-                  avatarShape={avatarShape}
-                  avatarDecor={avatarDecor}
-                  glowColor={glowColor}
-                  beautyMode={beautyMode}
-                  beautyFilter={beautySettingsToFilter(beautySettings)}
-                  avatarImageSrc={avatarImageSrc}
-                  pipPos={{ x: 0, y: 0 }}
-                  onPipMouseDown={handlePipMouseDown}
-                  pipRef={pipRef}
-                  cameraVideoRef={cameraVideoRef}
-                  avatarImgRef={avatarImgRef}
-                />
-              </div>
-            )}
-            </div>
-
-            {showOutput && recordedClips.length > 0 && (
-            <div
-              className="glass-panel mt-4 flex flex-col overflow-hidden rounded-xl p-4 transition-[height] duration-200 ease-out cursor-pointer"
-              style={{ height: outputCollapsed ? OUTPUT_COLLAPSED_HEIGHT : undefined, minHeight: outputCollapsed ? OUTPUT_COLLAPSED_HEIGHT : undefined }}
-              onClick={() => {
-                if (outputCollapsed) {
-                  if (outputHoverExpandTimerRef.current) {
-                    clearTimeout(outputHoverExpandTimerRef.current);
-                    outputHoverExpandTimerRef.current = null;
-                  }
-                  setOutputCollapsed(false);
-                }
-              }}
-              onMouseEnter={() => {
-                if (outputIdleTimerRef.current) {
-                  clearTimeout(outputIdleTimerRef.current);
-                  outputIdleTimerRef.current = null;
-                }
-                if (outputCollapsed) {
-                  if (outputHoverExpandTimerRef.current) return;
-                  outputHoverExpandTimerRef.current = window.setTimeout(() => {
-                    outputHoverExpandTimerRef.current = null;
-                    setOutputCollapsed(false);
-                  }, OUTPUT_HOVER_EXPAND_MS);
-                }
-              }}
-              onMouseLeave={() => {
-                if (outputHoverExpandTimerRef.current) {
-                  clearTimeout(outputHoverExpandTimerRef.current);
-                  outputHoverExpandTimerRef.current = null;
-                }
-                if (!outputCollapsed) {
-                  outputIdleTimerRef.current = window.setTimeout(() => {
-                    outputIdleTimerRef.current = null;
-                    setOutputCollapsed(true);
-                  }, OUTPUT_IDLE_MS);
-                }
-              }}
-            >
-              {outputCollapsed ? (
-                <div className="flex flex-1 items-center justify-center">
-                  <span className="text-xs text-muted-foreground">
-                    {recordedClips.length}/3 clips — click or hover 3s to expand
-                  </span>
-                </div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-3 gap-4">
-                    {recordedClips.map(({ id, blob }) => (
-                      <ClipPreview
-                        key={id}
-                        blob={blob}
-                        onSave={(b, ext) => downloadRecording(b, ext)}
-                        onCopy={() => copyRecording(blob)}
-                      />
-                    ))}
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    {recordedClips.length}/3 clips — save before recording again
-                  </span>
-                </>
-              )}
-            </div>
-            )}
-          </div>
-        </main>
-
-        {(!isRecording || !isElectron) && (
-          <>
-            <ResizeHandle
-              direction="horizontal"
-              onResize={(d) =>
-                setSidebarWidth((w) => Math.max(240, Math.min(600, w - d)))
-              }
-            />
-            <aside
-              data-sidebar
-              className="flex min-h-0 shrink-0 flex-col overflow-hidden"
-              style={{ width: sidebarWidth }}
-            >
-          <Sidebar
-            showWhiteboard={showWhiteboard}
-            whiteboardInPreview={whiteboardInPreview}
-            whiteboardHeight={whiteboardHeight}
-            onWhiteboardHeightChange={setWhiteboardHeight}
-            onOpenWhiteboardRequest={handleOpenWhiteboardRequest}
-            onCloseWhiteboard={handleCloseWhiteboard}
-            onMoveWhiteboardToSidebar={() => setWhiteboardInPreview(false)}
-            onToggleWhiteboard={() => setShowWhiteboard((v) => !v)}
-            onScrollToPreview={() => {
-              document.getElementById("dreamwork-preview")?.scrollIntoView({
-                behavior: "smooth",
-                block: "nearest",
-              });
-            }}
-            showPip={showPip}
-            avatarSize={avatarSize}
-            onAvatarSizeChange={setAvatarSize}
-            avatarShape={avatarShape}
-            onAvatarShapeChange={setAvatarShape}
-            avatarDecor={avatarDecor}
-            onAvatarDecorChange={setAvatarDecor}
-            glowColor={glowColor}
-            onGlowColorChange={setGlowColor}
-            avatarImageSrc={avatarImageSrc}
-            onUseImage={handleAvatarImage}
-            onClearImage={clearAvatarImage}
-            beautyMode={beautyMode}
-            onBeautyModeChange={setBeautyMode}
-            beautySettings={beautySettings}
-            onBeautySettingsChange={setBeautySettings}
-            faceFilter={faceFilter}
-            onFaceFilterChange={setFaceFilter}
-            micVolume={micVolume}
-            onMicVolumeChange={setMicVolume}
-            systemVolume={systemVolume}
-            onSystemVolumeChange={setSystemVolume}
-            recordResolution={recordResolution}
-            onRecordResolutionChange={setRecordResolution}
-            letterboxBackground={letterboxBackground}
-            onLetterboxBackgroundChange={setLetterboxBackground}
-            letterboxCustomImage={letterboxCustomImage}
-            onLetterboxCustomImageChange={setLetterboxCustomImage}
-            onResetSettings={resetCameraSettings}
-          />
-            </aside>
-          </>
-        )}
-      </div>
-    </div>
-      )}
     </>
   );
 }

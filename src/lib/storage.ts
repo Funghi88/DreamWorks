@@ -31,7 +31,7 @@ function validBeautySettings(s: unknown): StoredBeautySettings | undefined {
   return { skinSmoothing, brighten, glow, whiten, contrast, saturation };
 }
 
-export type StoredAvatarShape = "circle" | "rect";
+export type StoredAvatarShape = "circle" | "rect" | "portrait";
 export type StoredAvatarDecor = "none" | "simple" | "glow" | "dashed";
 
 export interface StoredBeautySettings {
@@ -46,6 +46,9 @@ export interface StoredBeautySettings {
 export type RecordResolution = "1080p" | "2K" | "4K";
 
 export type LetterboxBackground = "black" | "custom";
+export type LetterboxMode = "contain" | "cover";
+
+export type WhiteboardLayer = { id: string; name: string };
 
 export interface StoredSettings {
   glowColor?: string;
@@ -54,10 +57,14 @@ export interface StoredSettings {
   recordResolution?: RecordResolution;
   letterboxBackground?: LetterboxBackground;
   letterboxCustomImage?: string;
+  letterboxMode?: LetterboxMode;
   previewPosition?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  previewLayoutMode?: "overlay" | "side-right" | "side-bottom";
   fullPagePreviewPos?: { x: number; y: number };
   sidebarWidth?: number;
   previewWidth?: number;
+  whiteboardPanelWidth?: number;
+  capturePanelWidth?: number;
   whiteboardHeight?: number;
   avatarSize?: number;
   avatarShape?: StoredAvatarShape;
@@ -74,7 +81,14 @@ export interface StoredSettings {
   whiteboardProjects?: Array<{
     id: string;
     name: string;
-    data: { elements: unknown[]; appState: Record<string, unknown>; files?: Record<string, unknown> };
+    data: {
+      elements: unknown[];
+      appState: Record<string, unknown>;
+      files?: Record<string, unknown>;
+      layers?: WhiteboardLayer[];
+      layerAssignments?: Record<string, string>;
+      hiddenLayerIds?: string[];
+    };
     updatedAt: number;
   }>;
   activeProjectId?: string;
@@ -93,6 +107,18 @@ export interface StoredSettings {
 export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
 export type TeleprompterScript = NonNullable<StoredSettings["teleprompterScripts"]>[number];
 
+function validLayers(v: unknown): WhiteboardLayer[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: WhiteboardLayer[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    if (typeof p.id !== "string" || typeof p.name !== "string") continue;
+    out.push({ id: p.id, name: p.name });
+  }
+  return out.length ? out : undefined;
+}
+
 function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
   if (!v || typeof v !== "object") return undefined;
   const p = v as Record<string, unknown>;
@@ -100,7 +126,23 @@ function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
   const appState = p.appState as Record<string, unknown>;
   const { collaborators: _, ...rest } = appState;
   const files = p.files && typeof p.files === "object" ? (p.files as Record<string, unknown>) : undefined;
-  return { elements: p.elements, appState: rest, ...(files && Object.keys(files).length > 0 ? { files } : {}) };
+  const layers = validLayers(p.layers);
+  const layerAssignments =
+    p.layerAssignments && typeof p.layerAssignments === "object"
+      ? (p.layerAssignments as Record<string, string>)
+      : undefined;
+  const hiddenLayerIds =
+    Array.isArray(p.hiddenLayerIds) && p.hiddenLayerIds.every((x) => typeof x === "string")
+      ? (p.hiddenLayerIds as string[])
+      : undefined;
+  return {
+    elements: p.elements,
+    appState: rest,
+    ...(files && Object.keys(files).length > 0 ? { files } : {}),
+    ...(layers ? { layers } : {}),
+    ...(layerAssignments ? { layerAssignments } : {}),
+    ...(hiddenLayerIds?.length ? { hiddenLayerIds } : {}),
+  };
 }
 
 function validProjects(v: unknown): StoredSettings["whiteboardProjects"] {
@@ -153,6 +195,10 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       (p.letterboxCustomImage.startsWith("data:image/") || p.letterboxCustomImage.startsWith("blob:"))
         ? p.letterboxCustomImage
         : undefined,
+    letterboxMode:
+      p.letterboxMode && ["contain", "cover"].includes(p.letterboxMode as string)
+        ? (p.letterboxMode as LetterboxMode)
+        : undefined,
     previewPosition:
       p.previewPosition &&
       ["top-left", "top-right", "bottom-left", "bottom-right"].includes(p.previewPosition as string)
@@ -164,6 +210,11 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       typeof (p.fullPagePreviewPos as { x?: number; y?: number }).y === "number"
         ? (p.fullPagePreviewPos as { x: number; y: number })
         : undefined,
+    previewLayoutMode:
+      p.previewLayoutMode &&
+      ["overlay", "side-right", "side-bottom"].includes(p.previewLayoutMode as string)
+        ? (p.previewLayoutMode as "overlay" | "side-right" | "side-bottom")
+        : undefined,
     sidebarWidth:
       typeof p.sidebarWidth === "number" && p.sidebarWidth >= 240 && p.sidebarWidth <= 600
         ? p.sidebarWidth
@@ -172,16 +223,24 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       typeof p.previewWidth === "number" && p.previewWidth >= 80 && p.previewWidth <= 600
         ? p.previewWidth
         : undefined,
+    whiteboardPanelWidth:
+      typeof p.whiteboardPanelWidth === "number" && p.whiteboardPanelWidth >= 40 && p.whiteboardPanelWidth <= 800
+        ? p.whiteboardPanelWidth
+        : undefined,
+    capturePanelWidth:
+      typeof p.capturePanelWidth === "number" && p.capturePanelWidth >= 60 && p.capturePanelWidth <= 600
+        ? p.capturePanelWidth
+        : undefined,
     whiteboardHeight:
       typeof p.whiteboardHeight === "number" && p.whiteboardHeight >= 120 && p.whiteboardHeight <= 800
         ? p.whiteboardHeight
         : undefined,
     avatarSize:
-      typeof p.avatarSize === "number" && p.avatarSize >= 32 && p.avatarSize <= 280
+      typeof p.avatarSize === "number" && p.avatarSize >= 32 && p.avatarSize <= 400
         ? p.avatarSize
         : undefined,
     avatarShape:
-      p.avatarShape === "circle" || p.avatarShape === "rect"
+      p.avatarShape === "circle" || p.avatarShape === "rect" || p.avatarShape === "portrait"
         ? (p.avatarShape as StoredAvatarShape)
         : undefined,
     avatarDecor:

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, lazy, Suspense, Component, type ReactNode } from "react";
+import { useState, useRef, useEffect, useCallback, useImperativeHandle, forwardRef, lazy, Suspense, Component, type ReactNode } from "react";
 import { GlassCard, GlassButton } from "@/components/Glass";
 import {
   X,
@@ -13,12 +13,16 @@ import {
   Share2,
   MonitorOff,
   FileText,
+  Paperclip,
   Users,
   LayoutGrid,
   User,
+  PenSquare,
+  Maximize2,
 } from "lucide-react";
 import { io, Socket } from "socket.io-client";
 import { ChatPanel } from "./ChatPanel";
+import { FileSharePanel } from "./FileSharePanel";
 import { LiveTranscription } from "./LiveTranscription";
 import { MeetingRecorder } from "./MeetingRecorder";
 import { ParticipantsPanel } from "./ParticipantsPanel";
@@ -26,7 +30,10 @@ import { useVirtualBackground } from "./useVirtualBackground";
 import "./LiveMeetingModal.css";
 
 const VirtualBackground = lazy(() =>
-  import("./VirtualBackground").then((m) => ({ default: m.VirtualBackground }))
+  import("./VirtualBackground").then((m) => {
+    m.preloadSegmenter?.();
+    return { default: m.VirtualBackground };
+  })
 );
 
 class VirtualBackgroundErrorBoundary extends Component<
@@ -58,6 +65,22 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+/** Parse invite link like http://192.168.31.5:51697?room=2lc7l663 → { hostUrl, roomId } */
+function parseInviteLink(input: string): { hostUrl: string; roomId: string } | null {
+  const s = input.trim();
+  if (!s) return null;
+  try {
+    const url = s.startsWith("http") ? new URL(s) : new URL(`http://${s}`);
+    const room = url.searchParams.get("room") ?? url.pathname.match(/\/room\/([a-z0-9]+)/i)?.[1];
+    const hostUrl = `${url.protocol}//${url.host}`;
+    if (room) return { hostUrl, roomId: room };
+    if (url.host) return { hostUrl, roomId: "" };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 interface Participant {
   id: string;
   userName: string;
@@ -85,7 +108,14 @@ interface LiveMeetingModalProps {
   onLeaveCall?: () => void;
 }
 
-export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, onEnterCall, onLeaveCall }: LiveMeetingModalProps) {
+export interface LiveMeetingModalHandle {
+  enterCompactMode: () => void;
+}
+
+export const LiveMeetingModal = forwardRef<LiveMeetingModalHandle, LiveMeetingModalProps>(function LiveMeetingModal(
+  { isOpen, onClose, inCallFromParent = false, onEnterCall, onLeaveCall },
+  ref
+) {
   const [step, setStep] = useState<"join" | "lobby" | "in-call">("join");
   const [userName, setUserName] = useState("");
   const [roomId, setRoomId] = useState("");
@@ -98,19 +128,44 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
   const [showChat, setShowChat] = useState(false);
   const [showTranscription, setShowTranscription] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
+  const [compactMode, setCompactMode] = useState(false);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
+  const [remoteSharingParticipantId, setRemoteSharingParticipantId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"gallery" | "speaker">("gallery");
   const [isRecording, setIsRecording] = useState(false);
   const [modalSize, setModalSize] = useState({ w: 960, h: 720 });
   const [controlsVisible, setControlsVisible] = useState(true);
+  const hideControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [peerDebugRows, setPeerDebugRows] = useState<PeerDebugRow[]>([]);
   const [meetingMode, setMeetingMode] = useState<"cloud" | "local">("cloud");
   const [localRole, setLocalRole] = useState<"host" | "join">("host");
   const [localHostUrl, setLocalHostUrl] = useState("");
+  const [inviteLinkInput, setInviteLinkInput] = useState("");
   const [embeddedSignalingUrl, setEmbeddedSignalingUrl] = useState<string | null>(null);
   const [embeddedSignalingLocalhost, setEmbeddedSignalingLocalhost] = useState<string | null>(null);
-  const { mode: bgMode, setMode: setBgMode, color: bgColor, setColor: setBgColor } = useVirtualBackground();
+  const [isHost, setIsHost] = useState(false);
+  const [recordingPermission, setRecordingPermission] = useState<"host" | "all" | string[]>("host");
+  const [showRecordingPermissionPopover, setShowRecordingPermissionPopover] = useState(false);
+  const [showBackgroundPopover, setShowBackgroundPopover] = useState(false);
+  const bgPopoverRef = useRef<HTMLDivElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    enterCompactMode: () => setCompactMode(true),
+  }));
+
+  const PRESET_COLORS = [
+    "#e0f2fe",
+    "#e9d5ff",
+    "#fce7f3",
+    "#fed7aa",
+    "#fef3c7",
+    "#d1fae5",
+    "#f5f5f5",
+    "#1e293b",
+  ];
+  const { mode: bgMode, setMode: setBgMode, color: bgColor, setColor: setBgColor, imageUrl: bgImageUrl, setImageUrl: setBgImageUrl } = useVirtualBackground();
 
   const isElectron = typeof window !== "undefined" && !!(window as unknown as { electronAPI?: unknown }).electronAPI;
 
@@ -129,6 +184,8 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
   const makingOfferRef = useRef<Record<string, boolean>>({});
   const ignoreOfferRef = useRef<Record<string, boolean>>({});
   const pendingIceRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
+  const createdRoomIdRef = useRef<string | null>(null);
+  const recordingPermissionRef = useRef<"host" | "all" | string[]>("host");
 
   const debugMeeting =
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debugMeeting") === "1";
@@ -146,6 +203,31 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
       nameInputRef.current?.focus();
     }
   }, [isOpen, step]);
+
+  useEffect(() => () => {
+    if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    recordingPermissionRef.current = recordingPermission;
+  }, [recordingPermission]);
+
+  useEffect(() => {
+    if (!showBackgroundPopover) return;
+    const onOutside = (e: MouseEvent) => {
+      if (bgPopoverRef.current && !bgPopoverRef.current.contains(e.target as Node)) {
+        setShowBackgroundPopover(false);
+      }
+    };
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, [showBackgroundPopover]);
+
+  useEffect(() => {
+    if (meetingMode === "local" && !isElectron && localRole === "host") {
+      setLocalRole("join");
+    }
+  }, [meetingMode, isElectron, localRole]);
 
   useEffect(() => {
     if (!isOpen) setConnectionError(null);
@@ -368,11 +450,16 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
 
       connectedSocket.on("connect_error", (err) => {
         const msg = err.message || "Could not connect.";
-        setConnectionError(
-          meetingMode === "local"
-            ? `${msg} Same WiFi + different VPN? Try cloud mode.`
-            : `${msg} If using Render free tier, wait ~60s for cold start.`
-        );
+        const isConn = /connect|timeout|ECONNREFUSED|network|xhr poll|websocket/i.test(msg);
+        if (isConn && meetingMode === "cloud" && import.meta.env.DEV) {
+          setConnectionError("Cloud 模式需先启动 signaling：在另一终端运行 npm run signaling，再点 Join。");
+        } else if (isConn && meetingMode === "local") {
+          setConnectionError("连接失败。同一 WiFi？关闭 VPN 再试。或改用 Cloud 模式。");
+        } else if (isConn) {
+          setConnectionError("连接失败。云服务冷启动约需 60 秒，请稍候重试。或改用 Local 模式（同一 WiFi）。");
+        } else {
+          setConnectionError(msg);
+        }
       });
 
       connectedSocket.emit("join-room", roomId, userName);
@@ -395,6 +482,12 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
         });
         if (!peerConnectionsRef.current[data.id]) createPeerConnection(data.id);
         sendOffer(data.id);
+        if (roomId === createdRoomIdRef.current) {
+          connectedSocket.emit("recording-permission", {
+            roomId,
+            allowed: recordingPermissionRef.current,
+          });
+        }
       });
 
       connectedSocket.on("offer", async (data: { from: string; offer: RTCSessionDescriptionInit }) => {
@@ -447,6 +540,23 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
         setParticipants((prev) => prev.filter((p) => p.id !== id));
       });
 
+      connectedSocket.on("recording-permission", (data: { from: string; allowed: "host" | "all" | string[] }) => {
+        setRecordingPermission(data.allowed);
+      });
+
+      connectedSocket.on("screen-sharing-started", (data: { userId: string }) => {
+        setRemoteSharingParticipantId(data.userId);
+      });
+      connectedSocket.on("screen-sharing-stopped", (data: { userId: string }) => {
+        setRemoteSharingParticipantId((prev) => (prev === data.userId ? null : prev));
+      });
+
+      const host = roomId === createdRoomIdRef.current;
+      setIsHost(host);
+      setRecordingPermission("host");
+      if (host) {
+        connectedSocket.emit("recording-permission", { roomId, allowed: "host" });
+      }
       inCallRef.current = true;
       setStep("in-call");
       onEnterCall?.();
@@ -471,14 +581,18 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
         (window as unknown as { electronAPI?: { stopEmbeddedSignaling: () => Promise<void> } }).electronAPI?.stopEmbeddedSignaling?.();
       }
       const errMsg = err instanceof Error ? err.message : "Could not access camera or microphone.";
-      const isConnectionErr = /connect|timeout|ECONNREFUSED|network/i.test(errMsg);
-      setConnectionError(
-        isConnectionErr && meetingMode === "local"
-          ? `${errMsg} Same WiFi? Different VPN? Try cloud mode.`
-          : isConnectionErr
-            ? `${errMsg} If using Render free tier, wait ~60s for cold start.`
-            : errMsg
-      );
+      const isConnectionErr = /connect|timeout|ECONNREFUSED|network|xhr poll|websocket/i.test(errMsg);
+      let hint = errMsg;
+      if (isConnectionErr) {
+        if (meetingMode === "local") {
+          hint = "连接失败。同一 WiFi？关闭 VPN 再试。或改用 Cloud 模式。";
+        } else if (import.meta.env.DEV) {
+          hint = "Cloud 模式需先启动 signaling：在另一终端运行 npm run signaling，再点 Join。";
+        } else {
+          hint = "连接失败。云服务冷启动约需 60 秒，请稍候重试。或改用 Local 模式（同一 WiFi）。";
+        }
+      }
+      setConnectionError(hint);
       setStep("join");
     } finally {
       joiningRef.current = false;
@@ -486,11 +600,25 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
   };
 
   const createRoom = () => {
-    setRoomId(generateRoomId());
+    const id = generateRoomId();
+    setRoomId(id);
+    createdRoomIdRef.current = id;
   };
 
   const copyRoomId = async () => {
     await navigator.clipboard.writeText(roomId);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const copyFullInvite = async () => {
+    const text =
+      embeddedSignalingUrl && roomId
+        ? `${embeddedSignalingUrl}?room=${roomId}`
+        : embeddedSignalingUrl
+          ? `Join at ${embeddedSignalingUrl}\nRoom ID: ${roomId}`
+          : `Room ID: ${roomId}`;
+    await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -565,7 +693,26 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
     setDisplayStream(null);
     setParticipants([]);
     setStep("join");
+    setIsHost(false);
+    setRecordingPermission("host");
+    setRemoteSharingParticipantId(null);
+    createdRoomIdRef.current = null;
+    if (bgImageUrl) URL.revokeObjectURL(bgImageUrl);
+    setBgImageUrl(null);
     onClose();
+  };
+
+  const localSocketId = socketRef.current?.id ?? "";
+  const canRecord =
+    isHost ||
+    recordingPermission === "all" ||
+    (Array.isArray(recordingPermission) && recordingPermission.includes(localSocketId));
+
+  const setRecordingPermissionAndEmit = (allowed: "host" | "all" | string[]) => {
+    setRecordingPermission(allowed);
+    if (isHost && socketRef.current) {
+      socketRef.current.emit("recording-permission", { roomId, allowed });
+    }
   };
 
   const remoteStreams = participants.reduce(
@@ -583,17 +730,19 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
 
   const startRef = useRef({ w: 0, h: 0, x: 0, y: 0 });
 
-  const onResizeStart = (e: React.MouseEvent) => {
+  const onResizeStart = (fromRight: boolean) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     startRef.current = { w: modalSize.w, h: modalSize.h, x: e.clientX, y: e.clientY };
-    document.body.style.cursor = "nwse-resize";
+    document.body.style.cursor = fromRight ? "nwse-resize" : "nesw-resize";
     document.body.style.userSelect = "none";
     const onMove = (ev: MouseEvent) => {
       const dx = ev.clientX - startRef.current.x;
       const dy = ev.clientY - startRef.current.y;
-      const w = Math.max(520, Math.min(window.innerWidth - 40, startRef.current.w + dx));
-      const h = Math.max(400, Math.min(window.innerHeight - 40, startRef.current.h + dy));
+      const dw = fromRight ? dx : -dx;
+      const maxH = window.innerHeight - 140; /* 100px header + 40px margin */
+      const w = Math.max(520, Math.min(window.innerWidth - 40, startRef.current.w + dw));
+      const h = Math.max(400, Math.min(maxH, startRef.current.h + dy));
       setModalSize({ w, h });
       startRef.current = { w, h, x: ev.clientX, y: ev.clientY };
     };
@@ -610,33 +759,70 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
   if (!isOpen) return null;
 
   return (
-    <div
-      className="live-meeting-modal-overlay"
-      onClick={(e) => {
-        if (e.target !== e.currentTarget) return;
-        if (showInCallView) leaveCall();
-        else onClose();
-      }}
-    >
+    <div className={`live-meeting-modal-overlay ${compactMode ? "compact" : ""}`}>
+      {/* Backdrop for click-outside-to-close; overlay has pointer-events:none so header stays clickable */}
+      <div
+        className="live-meeting-modal-backdrop"
+        aria-hidden
+        onClick={() => {
+          if (compactMode) return;
+          if (showInCallView) leaveCall();
+          else onClose();
+        }}
+      />
       <div
         className="live-meeting-modal-wrapper"
         style={
             showJoinForm
             ? { width: 420, height: "auto", minHeight: 320 }
-            : { width: modalSize.w, height: modalSize.h }
+            : compactMode
+            ? { width: "100%", maxWidth: 900, height: 180 }
+            : { width: modalSize.w, height: modalSize.h, maxHeight: "calc(100vh - 120px)" }
         }
       >
-      <GlassCard className="live-meeting-modal">
+      <GlassCard className={`live-meeting-modal ${compactMode ? "compact" : ""}`}>
         <div className="live-meeting-modal-header">
           <h2>Live Video Meeting</h2>
-          <button
-            type="button"
-            onClick={showInCallView ? leaveCall : onClose}
-            className="live-meeting-close"
-            aria-label="Close"
-          >
-            <X size={20} />
-          </button>
+          <div className="live-meeting-header-actions">
+            {showInCallView && (
+              <>
+                <button
+                  type="button"
+                  className={`live-meeting-control-btn ${compactMode ? "active" : ""}`}
+                  onClick={() => {
+                    setCompactMode((v) => !v);
+                    if (!compactMode) {
+                      setShowChat(false);
+                      setShowFiles(false);
+                      setShowParticipants(false);
+                      setShowTranscription(false);
+                    }
+                  }}
+                  title={compactMode ? "Expand meeting" : "Share whiteboard (minimize to show whiteboard)"}
+                >
+                  {compactMode ? <Maximize2 size={18} /> : <PenSquare size={18} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={showInCallView ? leaveCall : onClose}
+                  className="live-meeting-close"
+                  aria-label="Close"
+                >
+                  <X size={20} />
+                </button>
+              </>
+            )}
+            {!showInCallView && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="live-meeting-close"
+                aria-label="Close"
+              >
+                <X size={20} />
+              </button>
+            )}
+          </div>
         </div>
 
         {showJoinForm && (
@@ -648,55 +834,71 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
               <span className="live-meeting-join-feature">Chat</span>
               <span className="live-meeting-join-feature">Recording</span>
             </div>
-            {isElectron && (
-              <div className="live-meeting-mode-row">
-                <span className="live-meeting-mode-label">Mode:</span>
-                <button
-                  type="button"
-                  className={`live-meeting-mode-btn ${meetingMode === "cloud" ? "active" : ""}`}
-                  onClick={() => { setMeetingMode("cloud"); setConnectionError(null); }}
-                >
-                  Cloud
-                </button>
-                <button
-                  type="button"
-                  className={`live-meeting-mode-btn ${meetingMode === "local" ? "active" : ""}`}
-                  onClick={() => { setMeetingMode("local"); setConnectionError(null); }}
-                >
-                  Local (same WiFi)
-                </button>
-              </div>
-            )}
+            <div className="live-meeting-mode-row">
+              <span className="live-meeting-mode-label">Mode:</span>
+              <button
+                type="button"
+                className={`live-meeting-mode-btn ${meetingMode === "cloud" ? "active" : ""}`}
+                onClick={() => { setMeetingMode("cloud"); setConnectionError(null); }}
+              >
+                Cloud
+              </button>
+              <button
+                type="button"
+                className={`live-meeting-mode-btn ${meetingMode === "local" ? "active" : ""}`}
+                onClick={() => { setMeetingMode("local"); setConnectionError(null); }}
+              >
+                Local (same WiFi)
+              </button>
+            </div>
             {meetingMode === "local" && (
               <>
                 <div className="live-meeting-mode-row">
                   <span className="live-meeting-mode-label">Role:</span>
+                  {isElectron && (
                   <button
                     type="button"
                     className={`live-meeting-mode-btn ${localRole === "host" ? "active" : ""}`}
-                    onClick={() => { setLocalRole("host"); setLocalHostUrl(""); setConnectionError(null); }}
+                    onClick={() => { setLocalRole("host"); setLocalHostUrl(""); setInviteLinkInput(""); setConnectionError(null); }}
                   >
                     Create room
                   </button>
+                  )}
                   <button
                     type="button"
                     className={`live-meeting-mode-btn ${localRole === "join" ? "active" : ""}`}
-                    onClick={() => { setLocalRole("join"); setConnectionError(null); }}
+                    onClick={() => { setLocalRole("join"); setInviteLinkInput(""); setConnectionError(null); }}
                   >
                     Join room
                   </button>
                 </div>
                 {localRole === "host" && (
-                  <span className="live-meeting-hint">Click New → enter name → Join Meeting. Share the URL shown after joining.</span>
+                  <span className="live-meeting-hint">Click New → enter name → Join Meeting. Share the invite link (one link has both) shown after joining.</span>
                 )}
                 {localRole === "join" && (
-                  <input
-                    type="text"
-                    placeholder="Host address (e.g. http://192.168.1.5:12345 or http://localhost:12345)"
-                    value={localHostUrl}
-                    onChange={(e) => { setLocalHostUrl(e.target.value); setConnectionError(null); }}
-                    className="live-meeting-input"
-                  />
+                  <>
+                    <input
+                      type="text"
+                      placeholder="Paste invite link (e.g. http://192.168.1.5:12345?room=abc123)"
+                      value={inviteLinkInput}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setInviteLinkInput(v);
+                        setConnectionError(null);
+                        if (!v.trim()) {
+                          setLocalHostUrl("");
+                          return;
+                        }
+                        const parsed = parseInviteLink(v);
+                        if (parsed) {
+                          setLocalHostUrl(parsed.hostUrl);
+                          if (parsed.roomId) setRoomId(parsed.roomId);
+                        }
+                      }}
+                      className="live-meeting-input"
+                    />
+                    <span className="live-meeting-hint">Paste the invite link from the host (one link has both address and room).</span>
+                  </>
                 )}
               </>
             )}
@@ -718,9 +920,11 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                 onKeyDown={(e) => e.key === "Enter" && userName.trim() && roomId.trim() && joinRoom()}
                 className="live-meeting-input"
               />
-              <GlassButton variant="secondary" size="sm" onClick={createRoom}>
-                New
-              </GlassButton>
+              {localRole !== "join" && (
+                <GlassButton variant="secondary" size="sm" onClick={createRoom}>
+                  New
+                </GlassButton>
+              )}
               <GlassButton variant="secondary" size="sm" onClick={copyRoomId} disabled={!roomId}>
                 {copied ? <Check size={16} /> : <Copy size={16} />}
               </GlassButton>
@@ -746,65 +950,90 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
         )}
 
         {showInCallView && (
-          <div className="live-meeting-call" ref={callAreaRef}>
+          <div className={`live-meeting-call ${compactMode ? "compact" : ""}`} ref={callAreaRef}>
             <div className="live-meeting-call-inner">
+              {!compactMode && (
+              <>
               <div className="live-meeting-info-bar">
-                {embeddedSignalingUrl && (
-                  <div className="live-meeting-share-url">
-                    <span>Share with participants: </span>
-                    <code>{embeddedSignalingUrl}</code>
-                    <button
-                      type="button"
-                      className="live-meeting-copy-url"
-                      onClick={async () => {
-                        await navigator.clipboard.writeText(embeddedSignalingUrl);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      }}
-                    >
-                      {copied ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
-                    {embeddedSignalingLocalhost && (
-                      <span className="live-meeting-share-hint">Same machine: {embeddedSignalingLocalhost}</span>
+                <div className="live-meeting-info-bar-inner">
+                  {embeddedSignalingUrl ? (
+                    <div className="live-meeting-invite-section">
+                      <div className="live-meeting-invite-section-header">Invite</div>
+                      <div className="live-meeting-invite-row">
+                        <code className="live-meeting-invite-url">{embeddedSignalingUrl}?room={roomId}</code>
+                        <button
+                          type="button"
+                          className="live-meeting-copy-invite-btn"
+                          onClick={copyFullInvite}
+                          title="Copy invite link"
+                        >
+                          Copy invite
+                        </button>
+                      </div>
+                      {embeddedSignalingLocalhost && (
+                        <div className="live-meeting-share-hint">Same machine: {embeddedSignalingLocalhost}?room={roomId}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="live-meeting-invite-section">
+                      <div className="live-meeting-invite-section-header">Room</div>
+                      <div className="live-meeting-invite-row">
+                        <code className="live-meeting-invite-url">{roomId}</code>
+                        <button
+                          type="button"
+                          className="live-meeting-copy-invite-btn"
+                          onClick={copyRoomId}
+                          title="Copy room ID"
+                        >
+                          {copied ? <Check size={14} /> : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="live-meeting-info-actions">
+                    {embeddedSignalingUrl && (
+                      <div className="live-meeting-room-code">
+                        <span className="live-meeting-room-code-label">Room</span>
+                        <span className="live-meeting-room-code-value">{roomId}</span>
+                        <button
+                          type="button"
+                          onClick={copyRoomId}
+                          className="live-meeting-copy-btn"
+                          title="Copy room ID"
+                        >
+                          {copied ? <Check size={14} /> : <Copy size={14} />}
+                        </button>
+                      </div>
+                    )}
+                    <div className="live-meeting-view-toggle">
+                      <button
+                        type="button"
+                        className={`live-meeting-view-btn ${viewMode === "gallery" ? "active" : ""}`}
+                        onClick={() => setViewMode("gallery")}
+                        title="Gallery"
+                      >
+                        <LayoutGrid size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        className={`live-meeting-view-btn ${viewMode === "speaker" ? "active" : ""}`}
+                        onClick={() => setViewMode("speaker")}
+                        title="Speaker"
+                      >
+                        <User size={12} />
+                      </button>
+                    </div>
+                    {isRecording && (
+                      <div className="live-meeting-recording-badge">
+                        <span />
+                        REC
+                      </div>
                     )}
                   </div>
-                )}
+                </div>
                 {connectionError && (
                   <div className="live-meeting-connection-error">
                     {connectionError}
-                  </div>
-                )}
-                <div className="live-meeting-room-code">
-                  <span>{roomId}</span>
-                  <button
-                    type="button"
-                    onClick={copyRoomId}
-                    className="live-meeting-control-btn"
-                    title="Copy room ID"
-                  >
-                    {copied ? <Check size={14} /> : <Copy size={14} />}
-                  </button>
-                </div>
-                <div className="live-meeting-view-toggle">
-                  <button
-                    type="button"
-                    className={`live-meeting-view-btn ${viewMode === "gallery" ? "active" : ""}`}
-                    onClick={() => setViewMode("gallery")}
-                  >
-                    <LayoutGrid size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    className={`live-meeting-view-btn ${viewMode === "speaker" ? "active" : ""}`}
-                    onClick={() => setViewMode("speaker")}
-                  >
-                    <User size={12} />
-                  </button>
-                </div>
-                {isRecording && (
-                  <div className="live-meeting-recording-badge">
-                    <span />
-                    REC
                   </div>
                 )}
               </div>
@@ -825,13 +1054,30 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                   )}
                 </div>
               )}
+              </>
+              )}
+              {compactMode && (
+                <div className="live-meeting-compact-hint">
+                  <span>Whiteboard visible above.</span>
+                  <button
+                    type="button"
+                    className="live-meeting-compact-share-btn"
+                    onClick={toggleScreenShare}
+                    disabled={isSharingScreen}
+                  >
+                    <Share2 size={14} />
+                    {isSharingScreen ? "Stop sharing" : "Share screen"}
+                  </button>
+                  <span>to share with participants.</span>
+                </div>
+              )}
 
               <div
                 className={`live-meeting-main-row ${
-                  !showChat && !showTranscription && !showParticipants ? "no-panels" : ""
+                  !showChat && !showTranscription && !showParticipants && !showFiles ? "no-panels" : ""
                 }`}
               >
-                {(showChat || showTranscription) && (
+                {(showChat || showFiles) && (
                 <div className="live-meeting-left-panels">
                   <ChatPanel
                     socket={socketRef.current}
@@ -840,10 +1086,12 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                     isOpen={showChat}
                     onClose={() => setShowChat(false)}
                   />
-                  <LiveTranscription
-                    isOpen={showTranscription}
-                    onClose={() => setShowTranscription(false)}
-                    localStream={localStream}
+                  <FileSharePanel
+                    socket={socketRef.current}
+                    roomId={roomId}
+                    userName={userName}
+                    isOpen={showFiles}
+                    onClose={() => setShowFiles(false)}
                   />
                 </div>
                 )}
@@ -865,9 +1113,9 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                               autoPlay
                               muted
                               playsInline
-                              style={bgMode !== "none" ? { visibility: "hidden", position: "absolute", inset: 0, zIndex: 0, width: "100%", height: "100%", objectFit: "cover" } : undefined}
+                              style={bgMode !== "none" && !(bgMode === "image" && !bgImageUrl) ? { visibility: "hidden", position: "absolute", inset: 0, zIndex: 0, width: "100%", height: "100%", objectFit: "cover" } : undefined}
                             />
-                            {bgMode !== "none" && (
+                            {bgMode !== "none" && !(bgMode === "image" && !bgImageUrl) && (
                               <VirtualBackgroundErrorBoundary>
                                 <Suspense fallback={null}>
                                   <VirtualBackground
@@ -875,6 +1123,7 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                                     enabled
                                     mode={bgMode}
                                     color={bgColor}
+                                    imageUrl={bgImageUrl}
                                   />
                                 </Suspense>
                               </VirtualBackgroundErrorBoundary>
@@ -902,16 +1151,25 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                 </div>
                 </div>
 
-                {showParticipants && (
-                  <div className="live-meeting-right-panel">
-                    <ParticipantsPanel
-                      participants={participants}
-                      localName={userName}
-                      isMuted={isMuted}
-                      isVideoOff={isVideoOff}
-                      isOpen={showParticipants}
-                      onClose={() => setShowParticipants(false)}
-                    />
+                {(showParticipants || showTranscription) && (
+                  <div className="live-meeting-right-panels">
+                    {showParticipants && (
+                      <ParticipantsPanel
+                        participants={participants}
+                        localName={userName}
+                        isMuted={isMuted}
+                        isVideoOff={isVideoOff}
+                        isOpen={showParticipants}
+                        onClose={() => setShowParticipants(false)}
+                      />
+                    )}
+                    {showTranscription && (
+                      <LiveTranscription
+                        isOpen={showTranscription}
+                        onClose={() => setShowTranscription(false)}
+                        localStream={localStream}
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -919,8 +1177,19 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
 
             <div
               className="live-meeting-control-bar-zone"
-              onMouseEnter={() => setControlsVisible(true)}
-              onMouseLeave={() => setControlsVisible(false)}
+              onMouseEnter={() => {
+                if (hideControlsTimerRef.current) {
+                  clearTimeout(hideControlsTimerRef.current);
+                  hideControlsTimerRef.current = null;
+                }
+                setControlsVisible(true);
+              }}
+              onMouseLeave={() => {
+                hideControlsTimerRef.current = setTimeout(() => {
+                  hideControlsTimerRef.current = null;
+                  setControlsVisible(false);
+                }, 400);
+              }}
             >
               <div className={`live-meeting-controls-wrap ${controlsVisible ? "" : "hidden"}`}>
               <div className="live-meeting-controls">
@@ -958,6 +1227,14 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                 </button>
                 <button
                   type="button"
+                  className={`live-meeting-control-btn ${showFiles ? "active" : ""}`}
+                  onClick={() => setShowFiles((v) => !v)}
+                  title="Files"
+                >
+                  <Paperclip size={18} />
+                </button>
+                <button
+                  type="button"
                   className={`live-meeting-control-btn ${showParticipants ? "active" : ""}`}
                   onClick={() => setShowParticipants((v) => !v)}
                   title="Participants"
@@ -972,29 +1249,182 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
                 >
                   <FileText size={18} />
                 </button>
-                <select
-                  value={bgMode}
-                  onChange={(e) => setBgMode(e.target.value as "none" | "blur" | "color")}
-                  className="live-meeting-bg-select"
-                  title="Virtual background"
-                >
-                  <option value="none">Background</option>
-                  <option value="blur">Blur</option>
-                  <option value="color">Color</option>
-                </select>
-                {bgMode === "color" && (
-                  <input
-                    type="color"
-                    value={bgColor}
-                    onChange={(e) => setBgColor(e.target.value)}
-                    className="live-meeting-bg-color-picker"
-                    title="Change background color"
-                  />
+                <div className="live-meeting-bg-wrap" ref={bgPopoverRef}>
+                  <button
+                    type="button"
+                    className="live-meeting-bg-select"
+                    onClick={() => setShowBackgroundPopover((v) => !v)}
+                    title="Virtual background"
+                  >
+                    Background
+                  </button>
+                  {showBackgroundPopover && (
+                    <div className="live-meeting-bg-popover">
+                      <div className="live-meeting-bg-tabs">
+                        <button
+                          type="button"
+                          className={bgMode === "none" ? "active" : ""}
+                          onClick={() => { setBgMode("none"); setShowBackgroundPopover(false); }}
+                        >
+                          None
+                        </button>
+                        <button
+                          type="button"
+                          className={bgMode === "blur" ? "active" : ""}
+                          onClick={() => { setBgMode("blur"); setShowBackgroundPopover(false); }}
+                        >
+                          Blur
+                        </button>
+                        <button
+                          type="button"
+                          className={bgMode === "color" ? "active" : ""}
+                          onClick={() => setBgMode("color")}
+                        >
+                          Color
+                        </button>
+                        <button
+                          type="button"
+                          className={bgMode === "image" ? "active" : ""}
+                          onClick={() => setBgMode("image")}
+                        >
+                          Image
+                        </button>
+                      </div>
+                      {bgMode === "color" && (
+                        <div className="live-meeting-bg-grid">
+                          {PRESET_COLORS.map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              className={`live-meeting-bg-swatch ${bgColor === c ? "active" : ""}`}
+                              style={{ background: c }}
+                              onClick={() => { setBgColor(c); setShowBackgroundPopover(false); }}
+                              title={c}
+                            />
+                          ))}
+                          <button
+                            type="button"
+                            className="live-meeting-bg-swatch live-meeting-bg-custom"
+                            title="Custom color"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="color"
+                              value={bgColor}
+                              onChange={(e) => setBgColor(e.target.value)}
+                              className="live-meeting-bg-color-input"
+                            />
+                          </button>
+                        </div>
+                      )}
+                      {bgMode === "image" && (
+                        <div className="live-meeting-bg-image-row">
+                          <label className="live-meeting-bg-image-btn">
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) setBgImageUrl(URL.createObjectURL(f));
+                                e.target.value = "";
+                              }}
+                              className="live-meeting-bg-file-input"
+                            />
+                            Choose image
+                          </label>
+                          {bgImageUrl && (
+                            <button
+                              type="button"
+                              className="live-meeting-bg-clear-btn"
+                              onClick={() => {
+                                URL.revokeObjectURL(bgImageUrl);
+                                setBgImageUrl(null);
+                                setBgMode("none");
+                                setShowBackgroundPopover(false);
+                              }}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {isHost && (
+                  <div className="live-meeting-recording-permission-wrap">
+                    <select
+                      value={Array.isArray(recordingPermission) ? "custom" : recordingPermission}
+                      onChange={(e) => {
+                        const v = e.target.value as "host" | "all" | "custom";
+                        if (v === "custom") {
+                          setShowRecordingPermissionPopover(true);
+                          const initial =
+                            recordingPermission === "all"
+                              ? participants.map((p) => p.id)
+                              : Array.isArray(recordingPermission)
+                                ? recordingPermission
+                                : [];
+                          setRecordingPermissionAndEmit(initial);
+                        } else {
+                          setShowRecordingPermissionPopover(false);
+                          setRecordingPermissionAndEmit(v);
+                        }
+                      }}
+                      className="live-meeting-bg-select"
+                      title="Who can record"
+                    >
+                      <option value="host">Only host</option>
+                      <option value="all">All</option>
+                      <option value="custom">Select...</option>
+                    </select>
+                    {showRecordingPermissionPopover && (
+                      <div className="live-meeting-recording-popover">
+                        <div className="live-meeting-recording-popover-header">Allow recording</div>
+                        {participants.map((p) => {
+                          const allowed = Array.isArray(recordingPermission) && recordingPermission.includes(p.id);
+                          return (
+                            <label key={p.id} className="live-meeting-recording-popover-item">
+                              <input
+                                type="checkbox"
+                                checked={allowed}
+                                onChange={(e) => {
+                                  const next = Array.isArray(recordingPermission)
+                                    ? [...recordingPermission]
+                                    : [];
+                                  if (e.target.checked) {
+                                    if (!next.includes(p.id)) next.push(p.id);
+                                  } else {
+                                    const i = next.indexOf(p.id);
+                                    if (i >= 0) next.splice(i, 1);
+                                  }
+                                  setRecordingPermissionAndEmit(next);
+                                }}
+                              />
+                              <span>{p.userName}</span>
+                            </label>
+                          );
+                        })}
+                        {participants.length === 0 && (
+                          <div className="live-meeting-recording-popover-empty">No participants yet</div>
+                        )}
+                        <button
+                          type="button"
+                          className="live-meeting-recording-popover-close"
+                          onClick={() => setShowRecordingPermissionPopover(false)}
+                        >
+                          Done
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
                 <MeetingRecorder
                   localStream={displayStream}
                   remoteStreams={remoteStreams}
+                  remoteSharingParticipantId={remoteSharingParticipantId}
                   onRecordingChange={setIsRecording}
+                  canRecord={canRecord}
                 />
                 <button
                   type="button"
@@ -1009,19 +1439,27 @@ export function LiveMeetingModal({ isOpen, onClose, inCallFromParent = false, on
             </div>
           </div>
         )}
-        {step !== "join" && (
-        <div
-          className="live-meeting-resize-handle"
-          onMouseDown={onResizeStart}
-          title="Drag to resize"
-          aria-label="Resize meeting window"
-        />
+        {step !== "join" && !compactMode && (
+        <>
+          <div
+            className="live-meeting-resize-handle live-meeting-resize-handle-right"
+            onMouseDown={onResizeStart(true)}
+            title="Drag to resize"
+            aria-label="Resize meeting window"
+          />
+          <div
+            className="live-meeting-resize-handle live-meeting-resize-handle-left"
+            onMouseDown={onResizeStart(false)}
+            title="Drag to resize"
+            aria-label="Resize meeting window"
+          />
+        </>
         )}
       </GlassCard>
       </div>
     </div>
   );
-}
+});
 
 function RemoteVideo({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLVideoElement>(null);
