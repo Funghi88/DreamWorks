@@ -39,6 +39,8 @@ interface CircularWebcamProps {
   pipRef: React.RefObject<HTMLDivElement | null>;
   cameraVideoRef?: React.Ref<HTMLVideoElement | null>;
   avatarImgRef: React.RefObject<HTMLImageElement | null>;
+  /** 拖动时关掉外层大发光，减轻合成拖影 */
+  suppressHeavyShadow?: boolean;
 }
 
 export function CircularWebcam({
@@ -62,6 +64,7 @@ export function CircularWebcam({
   pipRef,
   cameraVideoRef,
   avatarImgRef,
+  suppressHeavyShadow = false,
 }: CircularWebcamProps) {
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -194,9 +197,10 @@ export function CircularWebcam({
         opacity: hidden || forceCanvasDisplay ? 0.01 : 1,
         pointerEvents: "auto",
         zIndex: 9999,
-        ...(avatarDecor === "glow" && {
-          boxShadow: `0 0 48px ${hexToRgba(glowColor, 0.85)}, 0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 20px rgba(255,255,255,0.15)`,
-        }),
+        ...(avatarDecor === "glow" &&
+          !suppressHeavyShadow && {
+            boxShadow: `0 0 48px ${hexToRgba(glowColor, 0.85)}, 0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 20px rgba(255,255,255,0.15)`,
+          }),
       }}
       onMouseDown={onPipMouseDown}
       onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}

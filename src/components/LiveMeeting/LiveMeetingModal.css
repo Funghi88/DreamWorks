@@ -9,15 +9,7 @@
   justify-content: center;
   padding-top: 60px; /* header height */
   box-sizing: border-box;
-  background: linear-gradient(
-    135deg,
-    #f0f4ff 0%,
-    #e8eeff 25%,
-    #f5f0ff 50%,
-    #f0f8ff 75%,
-    #f5f5ff 100%
-  );
-  background-size: 200% 200%;
+  background: linear-gradient(135deg, #eef2f7 0%, #e8ecf0 40%, #f1f5f9 100%);
   backdrop-filter: blur(8px);
   z-index: 100020;
   pointer-events: none;

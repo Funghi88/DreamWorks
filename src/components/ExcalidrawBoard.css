@@ -1,3 +1,8 @@
+/* When using a paper texture, Excalidraw must stay visually transparent so the canvas can show the layer behind. */
+.dreamwork-whiteboard-has-paper .excalidraw {
+  background-color: transparent !important;
+}
+
 /* Touch-friendly styles for iPad / Sidecar */
 .dreamwork-whiteboard-touch {
   touch-action: none;

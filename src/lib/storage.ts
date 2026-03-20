@@ -85,6 +85,8 @@ export interface StoredSettings {
       elements: unknown[];
       appState: Record<string, unknown>;
       files?: Record<string, unknown>;
+      /** DreamWorks backup: texture + full files map (Excalidraw may omit from sibling keys). */
+      dreamwork?: { v: 1; whiteboardTexture?: string; files?: Record<string, unknown> };
       layers?: WhiteboardLayer[];
       layerAssignments?: Record<string, string>;
       hiddenLayerIds?: string[];
@@ -135,10 +137,26 @@ function validWhiteboardData(v: unknown): StoredSettings["whiteboardData"] {
     Array.isArray(p.hiddenLayerIds) && p.hiddenLayerIds.every((x) => typeof x === "string")
       ? (p.hiddenLayerIds as string[])
       : undefined;
+  let dreamwork: { v: 1; whiteboardTexture?: string; files?: Record<string, unknown> } | undefined;
+  const dwRaw = p.dreamwork;
+  if (dwRaw && typeof dwRaw === "object" && (dwRaw as { v?: unknown }).v === 1) {
+    const d = dwRaw as Record<string, unknown>;
+    const dt =
+      typeof d.whiteboardTexture === "string" && d.whiteboardTexture.length > 0 ? d.whiteboardTexture : undefined;
+    const dfs = d.files && typeof d.files === "object" && !Array.isArray(d.files) ? (d.files as Record<string, unknown>) : undefined;
+    if (dt || (dfs && Object.keys(dfs).length > 0)) {
+      dreamwork = {
+        v: 1,
+        ...(dt ? { whiteboardTexture: dt } : {}),
+        ...(dfs && Object.keys(dfs).length > 0 ? { files: dfs } : {}),
+      };
+    }
+  }
   return {
     elements: p.elements,
     appState: rest,
     ...(files && Object.keys(files).length > 0 ? { files } : {}),
+    ...(dreamwork ? { dreamwork } : {}),
     ...(layers ? { layers } : {}),
     ...(layerAssignments ? { layerAssignments } : {}),
     ...(hiddenLayerIds?.length ? { hiddenLayerIds } : {}),
@@ -357,6 +375,13 @@ export async function loadSettingsAsync(): Promise<StoredSettings> {
         s = fromLocal;
         api.saveSettings(s).catch(() => {});
       }
+    }
+    // Electron: disk is source of truth; mirror into localStorage so loadSettings() matches.
+    // Otherwise App's UI auto-save used {} from LS and overwrote whiteboardProjects + images on disk.
+    try {
+      localStorage.setItem(KEY, JSON.stringify(s));
+    } catch {
+      /* quota */
     }
     return s;
   } catch {

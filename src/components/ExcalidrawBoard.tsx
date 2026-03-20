@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, startTransition } from "react";
 import { createPortal } from "react-dom";
-import { Excalidraw, MainMenu, loadFromBlob, serializeAsJSON, exportToBlob } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu, loadFromBlob, serializeAsJSON, exportToBlob, getSceneVersion } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import "./ExcalidrawBoard.css";
 import {
@@ -44,18 +44,66 @@ const WHITEBOARD_TEXTURES = [
 // Use relative path so textures load in packed Electron (file:// protocol)
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}whiteboard-textures/`;
 
+/** Normalize Excalidraw's files map (plain object or Map). */
+function normalizeFileMapInput(input: unknown): Record<string, unknown> | null {
+  if (input == null) return null;
+  if (input instanceof Map) {
+    const o: Record<string, unknown> = {};
+    input.forEach((v, k) => {
+      if (v != null) o[String(k)] = v;
+    });
+    return o;
+  }
+  if (typeof input === "object" && !Array.isArray(input)) return input as Record<string, unknown>;
+  return null;
+}
+
+/** Merge file blobs; later sources win. Survives getFiles()/storage skew. */
+function mergeFileMaps(...sources: unknown[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const s of sources) {
+    const n = normalizeFileMapInput(s);
+    if (!n) continue;
+    for (const [k, v] of Object.entries(n)) {
+      if (v != null) out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** Backup payload so Excalidraw's JSON pipeline can't strip DreamWorks-only data. */
+type DreamworkFilePayload = {
+  v: 1;
+  whiteboardTexture?: string;
+  files?: Record<string, unknown>;
+};
+
+type PersistExtra = boolean | { skipStateUpdate?: boolean; skipReact?: boolean };
+
 type Props = {
   onCanvasLayersChange?: (layers: HTMLCanvasElement[]) => void;
   onWhiteboardTextureChange?: (textureId: string | null) => void;
   onExcalidrawReady?: (api: ExcalidrawAPI) => void;
 };
 
+type ProjectRow = { id: string; name: string };
+
 type ExcalidrawAPI = {
   updateScene: (s: { elements?: unknown[]; appState?: Record<string, unknown>; files?: Record<string, unknown> }) => void;
+  /** Required to load image binaries — updateScene ignores `files` in Excalidraw 0.18. */
+  addFiles: (data: Record<string, unknown> | unknown[]) => void;
   getSceneElements: () => readonly unknown[];
   getAppState: () => Record<string, unknown>;
   getFiles: () => Record<string, unknown>;
 };
+
+/** Derived name for a new project when opening a file (Electron path). */
+function projectNameFromOpenPath(filePath: string): string {
+  const parts = filePath.split(/[/\\]/);
+  const base = parts[parts.length - 1]?.trim() ?? "";
+  const withoutExt = base.replace(/\.(excalidraw|json)$/i, "").trim();
+  return withoutExt || "Imported";
+}
 
 export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChange, onExcalidrawReady }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -70,11 +118,41 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const saveAsInputRef = useRef<HTMLInputElement | null>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestSceneRef = useRef<{ elements: unknown[]; appState: Record<string, unknown> }>({ elements: [], appState: {} });
+  /** Last autosave was "viewport only" (Excalidraw scene version unchanged) — persist skips React setState to avoid jank on next pointer. */
+  const pendingViewOnlyPersistRef = useRef(false);
+  /** getSceneVersion after last successful persist; null until first save for this project session. */
+  const lastSavedSceneVerRef = useRef<number | null>(null);
+  /** Throttle texture background fix — without this, Excalidraw resets canvas fill during hand-pan and we were calling updateScene every tick (very janky). */
+  const textureBgFixLastRef = useRef(0);
+  const latestSceneRef = useRef<{
+    elements: unknown[];
+    appState: Record<string, unknown>;
+    files?: Record<string, unknown>;
+  }>({ elements: [], appState: {} });
   const excalidrawRef = useRef<ExcalidrawAPI | null>(null);
   const twoFingerRef = useRef<{ startTime: number; startX: number; startY: number } | null>(null);
   const [gestureBarVisible, setGestureBarVisible] = useState(false);
   const prevElementIdsRef = useRef<Set<string>>(new Set());
+  const projectsRef = useRef(projects);
+  const activeIdRef = useRef(activeId);
+  const menuSigRef = useRef("");
+  const menuRowsRef = useRef<ProjectRow[]>([]);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  const onExcalidrawReadyRef = useRef(onExcalidrawReady);
+  useEffect(() => {
+    onExcalidrawReadyRef.current = onExcalidrawReady;
+  }, [onExcalidrawReady]);
+
+  const bindExcalidrawApi = useCallback((api: unknown) => {
+    excalidrawRef.current = api as unknown as ExcalidrawAPI;
+    onExcalidrawReadyRef.current?.(api as unknown as ExcalidrawAPI);
+  }, []);
 
   const isElectron =
     typeof window !== "undefined" && !!(window as unknown as { electronAPI?: unknown }).electronAPI;
@@ -87,6 +165,20 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         };
       }).electronAPI
     : null;
+
+  const excalidrawUiOptions = useMemo(
+    () =>
+      ({
+        canvasActions: {
+          loadScene: true,
+          saveToActiveFile: !isElectron,
+          saveAsImage: true,
+          changeViewBackgroundColor: true,
+          clearCanvas: true,
+        },
+      }) as React.ComponentProps<typeof Excalidraw>["UIOptions"],
+    [isElectron]
+  );
 
   const loadProjects = useCallback(async () => {
     const s = isElectron ? await loadSettingsAsync() : loadSettings();
@@ -226,10 +318,13 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     };
 
     // Wheel: Sidecar 两指横滑可能转为 wheel (deltaX)
+    // 必须挂在 whiteboard root 上而非 document：document + passive:false 会令每次全局 wheel
+    //（含双指缩放）同步等待 JS，触摸板缩放手感发涩。
     const wheelDebounceRef = { last: 0 };
     const onWheel = (e: WheelEvent) => {
-      if (!isInWhiteboard(e.target)) return;
-      if (e.ctrlKey || e.metaKey) return; // 不干扰 pinch zoom
+      if (!e.composedPath().includes(root)) return;
+      if (e.ctrlKey || e.metaKey) return; // 双指缩放 / 浏览器缩放
+      if (e.deltaZ !== 0) return; // 部分环境用 deltaZ 表示 zoom
       const dx = Math.abs(e.deltaX);
       const dy = Math.abs(e.deltaY);
       if (dx > 60 && dx > dy * 2) {
@@ -247,51 +342,56 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     document.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
     document.addEventListener("pointerup", onPointerUp, { capture: true, passive: false });
     document.addEventListener("pointercancel", onPointerUp, { capture: true, passive: false });
-    document.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    root.addEventListener("wheel", onWheel, { capture: true, passive: false });
     return () => {
       document.removeEventListener("touchstart", onTouchStart, { capture: true });
       document.removeEventListener("touchend", onTouchEnd, { capture: true });
       document.removeEventListener("pointerdown", onPointerDown, { capture: true });
       document.removeEventListener("pointerup", onPointerUp, { capture: true });
       document.removeEventListener("pointercancel", onPointerUp, { capture: true });
-      document.removeEventListener("wheel", onWheel, { capture: true });
+      root.removeEventListener("wheel", onWheel, { capture: true });
     };
   }, [ready, triggerUndo]);
 
   const currentProject = projects.find((p) => p.id === activeId);
-  const storedTexture = (currentProject?.data?.appState as Record<string, unknown> | undefined)?.whiteboardTexture as string | undefined;
-
-  useEffect(() => {
-    onWhiteboardTextureChange?.(storedTexture ?? null);
-  }, [storedTexture, onWhiteboardTextureChange]);
   const projData = currentProject?.data as
     | {
         elements?: unknown[];
         appState?: Record<string, unknown>;
         files?: Record<string, unknown>;
+        dreamwork?: DreamworkFilePayload;
         layers?: WhiteboardLayer[];
         layerAssignments?: Record<string, string>;
         hiddenLayerIds?: string[];
       }
     | undefined;
+  const storedTexture =
+    (typeof projData?.dreamwork?.whiteboardTexture === "string" && projData.dreamwork.whiteboardTexture
+      ? projData.dreamwork.whiteboardTexture
+      : undefined) ??
+    ((currentProject?.data?.appState as Record<string, unknown> | undefined)?.whiteboardTexture as string | undefined);
+
+  useEffect(() => {
+    onWhiteboardTextureChange?.(storedTexture ?? null);
+  }, [storedTexture, onWhiteboardTextureChange]);
   const hiddenLayerIds = projData?.hiddenLayerIds ?? [];
   const layerAssignmentsForFilter = projData?.layerAssignments ?? {};
   const visibleElements =
     projData?.elements?.filter(
       (el) => !hiddenLayerIds.includes((layerAssignmentsForFilter as Record<string, string>)[(el as { id?: string }).id ?? ""] ?? "base")
     ) ?? projData?.elements ?? [];
+  const initialFiles = mergeFileMaps(projData?.dreamwork?.files, currentProject?.data?.files);
   const initialData = currentProject?.data
     ? {
         elements: hiddenLayerIds.length > 0 ? visibleElements : (projData?.elements ?? []),
         appState: {
           ...currentProject.data.appState,
-          ...(storedTexture ? { viewBackgroundColor: "transparent" } : {}),
+          ...(storedTexture
+            ? { whiteboardTexture: storedTexture, viewBackgroundColor: "transparent" }
+            : {}),
           activeLayerId: (currentProject.data.appState as Record<string, unknown>)?.activeLayerId ?? "base",
         },
-        // 图片等文件数据必须传入，否则 pack 后重开会变空
-        ...(currentProject.data.files && Object.keys(currentProject.data.files).length > 0
-          ? { files: currentProject.data.files }
-          : {}),
+        ...(Object.keys(initialFiles).length > 0 ? { files: initialFiles } : {}),
       }
     : undefined;
 
@@ -302,28 +402,57 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     }
   }, [currentProject?.name]);
 
+  // Excalidraw restore strips custom keys; canvas default fill hides the z-0 texture layer unless background is transparent.
+  useEffect(() => {
+    if (!ready || !storedTexture || !excalidrawRef.current) return;
+    excalidrawRef.current.updateScene({
+      appState: {
+        viewBackgroundColor: "transparent",
+        whiteboardTexture: storedTexture,
+      },
+    });
+  }, [ready, storedTexture, activeId]);
+
   const persist = useCallback(
-    (elements: readonly unknown[], appState: Record<string, unknown>) => {
+    (elements: readonly unknown[], appState: Record<string, unknown>, persistExtra?: PersistExtra) => {
+      const skipStateUpdate =
+        persistExtra === true || (typeof persistExtra === "object" && persistExtra.skipStateUpdate === true);
+      // Viewport-only: also skip getFiles() in merge — scene version unchanged.
+      const skipReact = typeof persistExtra === "object" && persistExtra.skipReact === true;
+      const activeIdSnap = activeIdRef.current;
+      const projectsSnap = projectsRef.current;
+      const projectSnap = projectsSnap.find((p) => p.id === activeIdSnap);
       const { collaborators: _, ...rest } = appState;
-      const projData = currentProject?.data as
+      const projData = projectSnap?.data as
         | {
             appState?: Record<string, unknown>;
+            dreamwork?: DreamworkFilePayload;
             layerAssignments?: Record<string, string>;
             layers?: WhiteboardLayer[];
             hiddenLayerIds?: string[];
             elements?: unknown[];
           }
         | undefined;
-      const existingTexture = projData?.appState?.whiteboardTexture;
+      const existingTexture =
+        projData?.appState?.whiteboardTexture ?? projData?.dreamwork?.whiteboardTexture;
       const existingActiveLayer = projData?.appState?.activeLayerId as string | undefined;
       const appStateToSave = {
         ...rest,
         ...(existingTexture && rest.whiteboardTexture === undefined ? { whiteboardTexture: existingTexture } : {}),
         ...(existingActiveLayer !== undefined && rest.activeLayerId === undefined ? { activeLayerId: existingActiveLayer } : {}),
       };
+      const textureIdPersist =
+        (typeof appStateToSave.whiteboardTexture === "string" && appStateToSave.whiteboardTexture.length > 0
+          ? appStateToSave.whiteboardTexture
+          : undefined) ??
+        (typeof existingTexture === "string" && existingTexture.length > 0 ? existingTexture : undefined);
+      const appStateFinal =
+        textureIdPersist !== undefined
+          ? { ...appStateToSave, whiteboardTexture: textureIdPersist, viewBackgroundColor: "transparent" }
+          : appStateToSave;
       let layers: WhiteboardLayer[] = projData?.layers ?? [BASE_LAYER];
       let layerAssignments: Record<string, string> = { ...(projData?.layerAssignments ?? {}) };
-      const activeLayerId = (appStateToSave.activeLayerId as string) ?? "base";
+      const activeLayerId = (appStateFinal.activeLayerId as string) ?? "base";
       const elemArr = elements as { id: string }[];
       for (const el of elemArr) {
         if (layerAssignments[el.id] === undefined) {
@@ -340,52 +469,132 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         ...hiddenElements.filter((el) => !visibleIds.has(el.id)),
         ...elements,
       ] as unknown[];
-      const files = excalidrawRef.current?.getFiles();
+      const filesMap = mergeFileMaps(
+        (projectSnap?.data as { files?: Record<string, unknown> } | undefined)?.files,
+        latestSceneRef.current.files,
+        skipReact ? undefined : excalidrawRef.current?.getFiles()
+      );
+      const files = Object.keys(filesMap).length > 0 ? filesMap : undefined;
       const data: {
         elements: unknown[];
         appState: Record<string, unknown>;
         files?: Record<string, unknown>;
+        dreamwork?: DreamworkFilePayload;
         layers?: WhiteboardLayer[];
         layerAssignments?: Record<string, string>;
         hiddenLayerIds?: string[];
       } = {
         elements: fullElements,
-        appState: appStateToSave,
+        appState: appStateFinal,
         layers,
         layerAssignments,
         ...(hiddenIds.length > 0 ? { hiddenLayerIds: hiddenIds } : {}),
       };
-      if (files && Object.keys(files).length > 0) data.files = files;
+      if (files) data.files = files;
+      const texPersist =
+        typeof appStateFinal.whiteboardTexture === "string" && appStateFinal.whiteboardTexture.length > 0
+          ? appStateFinal.whiteboardTexture
+          : undefined;
+      if (texPersist || files) {
+        const dw: DreamworkFilePayload = { v: 1 };
+        if (texPersist) dw.whiteboardTexture = texPersist;
+        if (files) dw.files = files;
+        data.dreamwork = dw;
+      }
       const now = Date.now();
-      const nextProjects = projects.map((p) =>
-        p.id === activeId ? { ...p, data, name: p.name, updatedAt: now } : p
+      const nextProjects = projectsSnap.map((p) =>
+        p.id === activeIdSnap ? { ...p, data, name: p.name, updatedAt: now } : p
       );
-      if (!nextProjects.some((p) => p.id === activeId)) {
-        nextProjects.push({ id: activeId, name: currentProject?.name ?? "Untitled", data, updatedAt: now });
+      if (!nextProjects.some((p) => p.id === activeIdSnap)) {
+        nextProjects.push({ id: activeIdSnap, name: projectSnap?.name ?? "Untitled", data, updatedAt: now });
       }
-      const next = saveWhiteboardProjects(loadSettings(), nextProjects, activeId);
-      if (isElectron) {
-        loadSettingsAsync().then((s) => {
-          const merged = { ...s, whiteboardProjects: nextProjects, activeProjectId: activeId };
-          if (merged.whiteboardData) delete merged.whiteboardData;
-          saveSettings(merged);
-        });
+      /** Web: JSON.stringify + localStorage blocks the main thread; defer so the next pan starts cleanly. Flush path stays sync. */
+      const flushDisk = () => {
+        if (isElectron) {
+          loadSettingsAsync().then((s) => {
+            const merged = { ...s, whiteboardProjects: nextProjects, activeProjectId: activeIdSnap };
+            if (merged.whiteboardData) delete merged.whiteboardData;
+            saveSettings(merged);
+          });
+        } else {
+          const next = saveWhiteboardProjects(loadSettings(), nextProjects, activeIdSnap);
+          saveSettings(next);
+        }
+      };
+      if (!skipStateUpdate) {
+        projectsRef.current = nextProjects;
+        if (!skipReact) {
+          startTransition(() => setProjects(nextProjects));
+        }
+        window.setTimeout(flushDisk, 0);
       } else {
-        saveSettings(next);
+        flushDisk();
       }
-      setProjects(nextProjects);
+      lastSavedSceneVerRef.current = getSceneVersion(elements as never);
     },
-    [projects, activeId, currentProject, isElectron]
+    [isElectron]
   );
 
   const handleChange = useCallback(
-    (elements: readonly unknown[], appState: Record<string, unknown>) => {
+    (elements: readonly unknown[], appState: Record<string, unknown>, filesFromScene?: unknown) => {
       const { collaborators: _, ...rest } = appState;
-      latestSceneRef.current = { elements: [...elements], appState: rest };
+      const prev = latestSceneRef.current;
+      const activeToolEarly = (rest as { activeTool?: { type?: string } }).activeTool?.type;
+      // Excalidraw calls onChange(elements, state, files). Avoid getFiles() on every hand-pan tick when the third arg is present.
+      // Hand pan: images map does not change — getFiles() is costly; keep prev.files until a real edit supplies filesFromScene.
+      const files = mergeFileMaps(
+        prev.files,
+        filesFromScene,
+        filesFromScene === undefined && activeToolEarly !== "hand"
+          ? excalidrawRef.current?.getFiles()
+          : undefined
+      );
+      // Paper texture: keep view background transparent. Excalidraw often flips it during scroll/pan — fix on a throttle only.
+      const bgMismatch = !!storedTexture && rest.viewBackgroundColor !== "transparent";
+      const restPatched =
+        bgMismatch
+          ? { ...rest, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture }
+          : rest;
+      // updateScene during hand-pan fights Excalidraw's drag loop; patch local ref only, fix after tool change / idle.
+      if (bgMismatch && activeToolEarly !== "hand") {
+        const now = performance.now();
+        if (now - textureBgFixLastRef.current >= 280) {
+          textureBgFixLastRef.current = now;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              excalidrawRef.current?.updateScene({
+                appState: { viewBackgroundColor: "transparent", whiteboardTexture: storedTexture },
+              });
+            });
+          });
+        }
+      }
+      const elArr = elements as unknown[];
+      const nextElements = prev.elements === elArr ? prev.elements : [...elements];
+      latestSceneRef.current = {
+        elements: nextElements,
+        appState: restPatched,
+        files: Object.keys(files).length > 0 ? files : prev.files,
+      };
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-      saveTimeoutRef.current = setTimeout(() => persist(elements, appState), 500);
+      const appStateForPersist = bgMismatch ? { ...appState, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture } : appState;
+      const elSameRef = prev.elements === elArr;
+      const structuralChange =
+        lastSavedSceneVerRef.current === null ||
+        (!elSameRef && getSceneVersion(elements as never) !== lastSavedSceneVerRef.current);
+      pendingViewOnlyPersistRef.current = !structuralChange;
+      const debounceMs = structuralChange ? 520 : 2500;
+      saveTimeoutRef.current = setTimeout(() => {
+        const viewOnly = pendingViewOnlyPersistRef.current;
+        const runPersist = () => persist(elements, appStateForPersist, viewOnly ? { skipReact: true } : undefined);
+        if (viewOnly && typeof requestIdleCallback !== "undefined") {
+          requestIdleCallback(() => requestAnimationFrame(runPersist), { timeout: 800 });
+        } else {
+          requestAnimationFrame(runPersist);
+        }
+      }, debounceMs);
     },
-    [persist]
+    [persist, storedTexture]
   );
 
   const flushPersist = useCallback(() => {
@@ -397,19 +606,20 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     const elements = api?.getSceneElements() ?? latestSceneRef.current.elements;
     const appState = api?.getAppState() ?? latestSceneRef.current.appState;
     if (elements.length > 0 || Object.keys(appState).length > 0) {
-      persist(elements, appState as Record<string, unknown>);
+      persist(elements, appState as Record<string, unknown>, true); // skipStateUpdate to avoid re-render loop
     }
   }, [persist]);
 
   const switchProject = useCallback(
     (id: string) => {
-      const proj = projects.find((p) => p.id === id);
-      if (!proj || id === activeId) return;
+      const proj = projectsRef.current.find((p) => p.id === id);
+      if (!proj || id === activeIdRef.current) return;
       flushPersist();
+      lastSavedSceneVerRef.current = null;
       prevElementIdsRef.current = new Set();
       setActiveId(id);
     },
-    [projects, activeId, flushPersist]
+    [flushPersist]
   );
 
   useEffect(() => {
@@ -434,6 +644,24 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     prevElementIdsRef.current = new Set(ids);
   }, [activeId]);
 
+  // Sync latestSceneRef from project data so flushPersist has correct data when user hasn't edited yet
+  useEffect(() => {
+    const data = currentProject?.data;
+    if (!data) return;
+    const projData = data as {
+      elements?: unknown[];
+      appState?: Record<string, unknown>;
+      files?: Record<string, unknown>;
+      dreamwork?: DreamworkFilePayload;
+    };
+    const syncedFiles = mergeFileMaps(projData.dreamwork?.files, projData.files);
+    latestSceneRef.current = {
+      elements: projData.elements ?? [],
+      appState: projData.appState ?? {},
+      ...(Object.keys(syncedFiles).length > 0 ? { files: syncedFiles } : {}),
+    };
+  }, [activeId, currentProject?.data]);
+
   const newProject = useCallback(() => {
     const id = "proj-" + Date.now();
     const proj: WhiteboardProject = {
@@ -442,11 +670,16 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       data: { elements: [], appState: {} },
       updatedAt: Date.now(),
     };
-    const next = [...projects, proj];
-    setProjects(next);
+    setProjects((prev) => {
+      const next = [...prev, proj];
+      projectsRef.current = next;
+      saveSettings(saveWhiteboardProjects(loadSettings(), next, id));
+      return next;
+    });
     setActiveId(id);
-    saveSettings(saveWhiteboardProjects(loadSettings(), next, id));
-  }, [projects]);
+    activeIdRef.current = id;
+    lastSavedSceneVerRef.current = null;
+  }, []);
 
   const deleteProject = useCallback(
     (id: string) => {
@@ -456,6 +689,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       const newActiveId = activeId === id ? (next[0]?.id ?? "default") : activeId;
       setProjects(next);
       setActiveId(newActiveId);
+      lastSavedSceneVerRef.current = null;
       saveSettings(saveWhiteboardProjects(loadSettings(), next, newActiveId));
     },
     [projects, activeId, flushPersist]
@@ -466,7 +700,9 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
-    const projData = currentProject?.data as
+    const aid = activeIdRef.current;
+    const cp = projectsRef.current.find((p) => p.id === aid);
+    const projData = cp?.data as
       | { layers?: WhiteboardLayer[]; appState?: Record<string, unknown> }
       | undefined;
     const layers = projData?.layers ?? [BASE_LAYER];
@@ -486,22 +722,24 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     excalidrawRef.current?.updateScene({ appState: nextAppState });
     latestSceneRef.current = { ...latestSceneRef.current, appState: nextAppState };
     const elements = excalidrawRef.current?.getSceneElements() ?? [];
-    const layerAssignments = (currentProject?.data as { layerAssignments?: Record<string, string> })?.layerAssignments ?? {};
+    const layerAssignments = (cp?.data as { layerAssignments?: Record<string, string> })?.layerAssignments ?? {};
     const files = excalidrawRef.current?.getFiles();
     const data = {
-      ...currentProject?.data,
+      ...cp?.data,
       elements: [...elements],
       appState: nextAppState,
       layers: nextLayers,
       layerAssignments: { ...layerAssignments },
       ...(files && Object.keys(files).length > 0 ? { files } : {}),
     };
-    const nextProjects = projects.map((p) =>
-      p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
+    const nextProjects = projectsRef.current.map((p) =>
+      p.id === aid ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
     );
+    projectsRef.current = nextProjects;
     setProjects(nextProjects);
-    saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, activeId));
-  }, [currentProject, projects, activeId]);
+    lastSavedSceneVerRef.current = null;
+    saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, aid));
+  }, []);
 
   const deleteLayer = useCallback(
     (layerId: string) => {
@@ -668,18 +906,28 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       const trimmed = name.trim() || "Untitled";
       const id = "proj-" + Date.now();
       const { elements, appState } = latestSceneRef.current;
-      const projData = currentProject?.data as
+      const aid = activeIdRef.current;
+      const projSnap = projectsRef.current.find((p) => p.id === aid);
+      const projData = projSnap?.data as
         | {
             appState?: Record<string, unknown>;
+            files?: Record<string, unknown>;
             layerAssignments?: Record<string, string>;
             layers?: WhiteboardLayer[];
             hiddenLayerIds?: string[];
             elements?: unknown[];
           }
         | undefined;
-      const texture = appState.whiteboardTexture ?? projData?.appState?.whiteboardTexture;
-      const appStateWithTexture = texture !== undefined ? { ...appState, whiteboardTexture: texture } : appState;
-      const files = excalidrawRef.current?.getFiles();
+      const textureRaw = appState.whiteboardTexture ?? projData?.appState?.whiteboardTexture;
+      const texStr =
+        typeof textureRaw === "string" && textureRaw.length > 0
+          ? textureRaw
+          : undefined;
+      const appStateWithTexture =
+        texStr !== undefined
+          ? { ...appState, whiteboardTexture: texStr, viewBackgroundColor: "transparent" }
+          : appState;
+      const files = mergeFileMaps(projData?.files, latestSceneRef.current.files, excalidrawRef.current?.getFiles());
       const layers = projData?.layers ?? [BASE_LAYER];
       const layerAssignments = projData?.layerAssignments ?? {};
       const hiddenIds = projData?.hiddenLayerIds ?? [];
@@ -688,37 +936,49 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       );
       const visibleIds = new Set((elements as { id: string }[]).map((e) => e.id));
       const fullElements = [...hiddenElements.filter((el) => !visibleIds.has(el.id)), ...elements];
+      const tex = texStr;
       const data = {
         elements: fullElements,
         appState: appStateWithTexture,
         layers,
         layerAssignments: { ...layerAssignments },
         ...(hiddenIds.length > 0 ? { hiddenLayerIds: hiddenIds } : {}),
-        ...(files && Object.keys(files).length > 0 ? { files } : {}),
+        ...(Object.keys(files).length > 0 ? { files } : {}),
       };
+      if (tex || Object.keys(files).length > 0) {
+        const dw: DreamworkFilePayload = { v: 1 };
+        if (tex) dw.whiteboardTexture = tex;
+        if (Object.keys(files).length > 0) dw.files = files;
+        (data as { dreamwork?: DreamworkFilePayload }).dreamwork = dw;
+      }
       const proj: WhiteboardProject = {
         id,
         name: trimmed,
         data,
         updatedAt: Date.now(),
       };
-      const next = [...projects, proj];
+      const next = [...projectsRef.current, proj];
+      projectsRef.current = next;
       setProjects(next);
       setActiveId(id);
+      activeIdRef.current = id;
+      lastSavedSceneVerRef.current = null;
       saveSettings(saveWhiteboardProjects(loadSettings(), next, id));
       setSaveAsDialog(false);
     },
-    [projects, currentProject?.data?.appState]
+    []
   );
 
   const handleLoadScene = useCallback(async () => {
     if (isElectron && electronAPI?.openFile) {
       const result = await electronAPI.openFile([{ name: "Excalidraw", extensions: ["excalidraw", "json"] }]);
-      if (!result?.content || !excalidrawRef.current) return;
+      if (!result?.content) return;
+      flushPersist();
       const parsed = JSON.parse(result.content) as {
         elements?: unknown[];
         appState?: Record<string, unknown>;
         files?: Record<string, unknown>;
+        dreamwork?: DreamworkFilePayload;
         layers?: WhiteboardLayer[];
         layerAssignments?: Record<string, string>;
         hiddenLayerIds?: string[];
@@ -737,17 +997,39 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
               (el) => !hiddenIds.includes(layerAssignments[el.id] ?? "base")
             )
           : scene.elements;
-      excalidrawRef.current.updateScene({
-        elements: visibleElements,
-        appState: scene.appState,
-        ...(scene.files && Object.keys(scene.files).length > 0 ? { files: scene.files } : {}),
-      });
-      latestSceneRef.current = { elements: visibleElements, appState: scene.appState };
+      const dw = parsed.dreamwork;
+      // dreamwork first: written by DreamWorks on save; Excalidraw restore can still drop custom blobs.
+      const mergedFilesRaw = mergeFileMaps(dw?.files, parsed.files, scene.files);
+      const mergedFiles = Object.keys(mergedFilesRaw).length > 0 ? mergedFilesRaw : undefined;
+      const rawSavedApp = parsed.appState as Record<string, unknown> | undefined;
+      const textureFromFile =
+        (typeof dw?.whiteboardTexture === "string" && dw.whiteboardTexture
+          ? dw.whiteboardTexture
+          : undefined) ??
+        (typeof rawSavedApp?.whiteboardTexture === "string" && rawSavedApp.whiteboardTexture
+          ? rawSavedApp.whiteboardTexture
+          : undefined);
+      const mergedAppState = {
+        ...scene.appState,
+        ...(textureFromFile
+          ? { whiteboardTexture: textureFromFile, viewBackgroundColor: "transparent" }
+          : {}),
+      };
+      const { collaborators: _c, ...appRest } = mergedAppState as Record<string, unknown> & { collaborators?: unknown };
+      latestSceneRef.current = {
+        elements: [...visibleElements],
+        appState: appRest as Record<string, unknown>,
+        ...(mergedFiles ? { files: mergedFiles } : {}),
+      };
       prevElementIdsRef.current = new Set((scene.elements as { id: string }[]).map((e) => e.id));
+      const dwOut: DreamworkFilePayload = { v: 1 };
+      if (textureFromFile) dwOut.whiteboardTexture = textureFromFile;
+      if (mergedFiles) dwOut.files = mergedFiles;
       const data = {
         elements: scene.elements,
-        appState: scene.appState,
-        ...(scene.files && Object.keys(scene.files).length > 0 ? { files: scene.files } : {}),
+        appState: mergedAppState,
+        ...(mergedFiles ? { files: mergedFiles } : {}),
+        ...((textureFromFile || mergedFiles) ? { dreamwork: dwOut } : {}),
         layers:
           Array.isArray(parsed.layers) && parsed.layers.every((l: unknown) => l && typeof (l as { id?: unknown }).id === "string" && typeof (l as { name?: unknown }).name === "string")
             ? (parsed.layers as WhiteboardLayer[])
@@ -755,19 +1037,37 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         layerAssignments,
         ...(hiddenIds.length > 0 ? { hiddenLayerIds: hiddenIds } : {}),
       };
-      const nextProjects = projects.map((p) =>
-        p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
-      );
-      setProjects(nextProjects);
-      saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, activeId));
+      const newId = "proj-" + Date.now();
+      const proj: WhiteboardProject = {
+        id: newId,
+        name: projectNameFromOpenPath(result.path),
+        data: data as WhiteboardProject["data"],
+        updatedAt: Date.now(),
+      };
+      const next = [...projectsRef.current, proj];
+      projectsRef.current = next;
+      setProjects(next);
+      setActiveId(newId);
+      activeIdRef.current = newId;
+      lastSavedSceneVerRef.current = getSceneVersion(scene.elements as never);
+      saveSettings(saveWhiteboardProjects(loadSettings(), next, newId));
     }
-  }, [isElectron, electronAPI, projects, activeId]);
+  }, [isElectron, electronAPI, flushPersist]);
 
   const handleSaveToFile = useCallback(async () => {
     if (isElectron && electronAPI?.saveFile && excalidrawRef.current) {
-      const visibleElements = excalidrawRef.current.getSceneElements();
-      const projData = currentProject?.data as {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+      const api = excalidrawRef.current;
+      const aid = activeIdRef.current;
+      const project = projectsRef.current.find((p) => p.id === aid);
+      const visibleElements = api.getSceneElements();
+      const projData = project?.data as {
         elements?: unknown[];
+        appState?: Record<string, unknown>;
+        files?: Record<string, unknown>;
         layers?: WhiteboardLayer[];
         layerAssignments?: Record<string, string>;
         hiddenLayerIds?: string[];
@@ -779,32 +1079,50 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       );
       const visibleIds = new Set((visibleElements as { id: string }[]).map((e) => e.id));
       const fullElements = [...hiddenElements.filter((el) => !visibleIds.has(el.id)), ...visibleElements];
-      const rawAppState = excalidrawRef.current.getAppState();
-      const texture =
-        (rawAppState as Record<string, unknown>).whiteboardTexture ??
-        (currentProject?.data?.appState as Record<string, unknown> | undefined)?.whiteboardTexture;
-      const appState = texture !== undefined ? { ...rawAppState, whiteboardTexture: texture } : rawAppState;
-      const files = excalidrawRef.current.getFiles();
+      const rawAppState = api.getAppState();
+      const textureRaw =
+        (rawAppState as Record<string, unknown>).whiteboardTexture ?? projData?.appState?.whiteboardTexture;
+      const texture = typeof textureRaw === "string" && textureRaw.length > 0 ? textureRaw : undefined;
+      const appState =
+        texture !== undefined
+          ? { ...rawAppState, whiteboardTexture: texture, viewBackgroundColor: "transparent" }
+          : rawAppState;
+      const filesMerged = mergeFileMaps(projData?.files, latestSceneRef.current.files, api.getFiles());
+      latestSceneRef.current = {
+        elements: [...fullElements],
+        appState: { ...(appState as Record<string, unknown>) },
+        ...(Object.keys(filesMerged).length > 0 ? { files: filesMerged } : {}),
+      };
       const json = serializeAsJSON(
         fullElements as Parameters<typeof serializeAsJSON>[0],
         appState as Parameters<typeof serializeAsJSON>[1],
-        files as Parameters<typeof serializeAsJSON>[2],
+        filesMerged as Parameters<typeof serializeAsJSON>[2],
         "local"
       );
       const parsed = JSON.parse(json) as Record<string, unknown>;
+      if (!parsed.appState || typeof parsed.appState !== "object") parsed.appState = {};
+      const appStateInJson = parsed.appState as Record<string, unknown>;
       if (texture !== undefined) {
-        const appStateInJson = parsed.appState as Record<string, unknown> | undefined;
-        if (appStateInJson) appStateInJson.whiteboardTexture = texture;
+        appStateInJson.whiteboardTexture = texture;
+        appStateInJson.viewBackgroundColor = "transparent";
       }
+      // Force files onto disk: serializeAsJSON can still omit entries vs. live scene.
+      if (Object.keys(filesMerged).length > 0) {
+        parsed.files = mergeFileMaps(parsed.files, filesMerged) as Record<string, unknown>;
+      }
+      const dw: DreamworkFilePayload = { v: 1 };
+      if (texture !== undefined) dw.whiteboardTexture = texture;
+      if (Object.keys(filesMerged).length > 0) dw.files = filesMerged;
+      parsed.dreamwork = dw;
       if (projData?.layers?.length) parsed.layers = projData.layers;
       if (projData?.layerAssignments && Object.keys(projData.layerAssignments ?? {}).length > 0) parsed.layerAssignments = projData.layerAssignments;
       if (hiddenIds.length > 0) parsed.hiddenLayerIds = hiddenIds;
       const finalJson = JSON.stringify(parsed);
-      await electronAPI.saveFile(finalJson, `${currentProject?.name ?? "drawing"}.excalidraw`, [
+      await electronAPI.saveFile(finalJson, `${project?.name ?? "drawing"}.excalidraw`, [
         { name: "Excalidraw", extensions: ["excalidraw", "json"] },
       ]);
     }
-  }, [isElectron, electronAPI, currentProject?.name]);
+  }, [isElectron, electronAPI]);
 
   const handleExport = useCallback(async () => {
     await handleSaveToFile();
@@ -812,9 +1130,19 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
 
   const handleExportImage = useCallback(async () => {
     if (isElectron && electronAPI?.saveImage && excalidrawRef.current) {
+      const project = projectsRef.current.find((p) => p.id === activeIdRef.current);
       const elements = excalidrawRef.current.getSceneElements();
-      const appState = excalidrawRef.current.getAppState();
-      const files = excalidrawRef.current.getFiles();
+      const rawAppState = excalidrawRef.current.getAppState();
+      const projData = project?.data as {
+        appState?: Record<string, unknown>;
+        files?: Record<string, unknown>;
+      } | undefined;
+      const texture =
+        (rawAppState as Record<string, unknown>).whiteboardTexture ??
+        projData?.appState?.whiteboardTexture;
+      const appState =
+        texture !== undefined ? { ...rawAppState, whiteboardTexture: texture } : rawAppState;
+      const files = mergeFileMaps(projData?.files, latestSceneRef.current.files, excalidrawRef.current.getFiles());
       const blob = await exportToBlob({
         elements: elements as Parameters<typeof exportToBlob>[0]["elements"],
         appState: appState as Parameters<typeof exportToBlob>[0]["appState"],
@@ -827,9 +1155,9 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         r.onerror = reject;
         r.readAsDataURL(blob);
       });
-      await electronAPI.saveImage(base64, `${currentProject?.name ?? "export"}.png`);
+      await electronAPI.saveImage(base64, `${project?.name ?? "export"}.png`);
     }
-  }, [isElectron, electronAPI, currentProject?.name]);
+  }, [isElectron, electronAPI]);
 
   useEffect(() => {
     return () => {
@@ -903,17 +1231,118 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       onCanvasLayersChange(layers);
     };
 
+    let rafId = 0;
+    const scheduleCollect = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        collect();
+      });
+    };
+
     collect();
-    const mo = new MutationObserver(collect);
-    mo.observe(root, { childList: true, subtree: true, attributes: true });
-    const ro = new ResizeObserver(collect);
+    // Avoid attributes: true — Excalidraw updates styles/transforms constantly while panning/zooming,
+    // which fired this observer + querySelectorAll hundreds of times per second and janked the UI.
+    const mo = new MutationObserver(scheduleCollect);
+    mo.observe(root, { childList: true, subtree: true });
+    const ro = new ResizeObserver(scheduleCollect);
     ro.observe(root);
     return () => {
+      if (rafId) cancelAnimationFrame(rafId);
       mo.disconnect();
       ro.disconnect();
       onCanvasLayersChange([]);
     };
   }, [onCanvasLayersChange]);
+
+  const menuSig = projects.map((p) => `${p.id}:${p.name}`).join("|");
+  if (menuSig !== menuSigRef.current) {
+    menuSigRef.current = menuSig;
+    menuRowsRef.current = projects.map((p) => ({ id: p.id, name: p.name }));
+  }
+
+  const excalidrawMainMenu = useMemo(
+    () => {
+      const menuRows = menuRowsRef.current;
+      return (
+        <MainMenu>
+          {isElectron ? (
+            <MainMenu.Item onSelect={handleLoadScene}>Open</MainMenu.Item>
+          ) : (
+            <MainMenu.DefaultItems.LoadScene />
+          )}
+          {isElectron ? (
+            <MainMenu.Item onSelect={handleSaveToFile}>Save to...</MainMenu.Item>
+          ) : (
+            <MainMenu.DefaultItems.SaveToActiveFile />
+          )}
+          {isElectron ? (
+            <MainMenu.Item onSelect={handleExport}>Export...</MainMenu.Item>
+          ) : (
+            <MainMenu.DefaultItems.Export />
+          )}
+          {isElectron ? (
+            <MainMenu.Item onSelect={handleExportImage}>Export image...</MainMenu.Item>
+          ) : (
+            <MainMenu.DefaultItems.SaveAsImage />
+          )}
+          <MainMenu.Separator />
+          <MainMenu.Item onSelect={triggerUndo}>Undo</MainMenu.Item>
+          <MainMenu.Item onSelect={triggerRedo}>Redo</MainMenu.Item>
+          <MainMenu.DefaultItems.SearchMenu />
+          <MainMenu.DefaultItems.Help />
+          <MainMenu.DefaultItems.ClearCanvas />
+          <MainMenu.Separator />
+          <MainMenu.Group title="Project">
+            {menuRows.map((p) => (
+              <MainMenu.Item
+                key={p.id}
+                onSelect={() => switchProject(p.id)}
+                selected={p.id === activeId}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setContextMenu({ x: e.clientX, y: e.clientY, projectId: p.id });
+                }}
+              >
+                {p.name}
+              </MainMenu.Item>
+            ))}
+            <MainMenu.Item onSelect={newProject}>New project</MainMenu.Item>
+            <MainMenu.Item onSelect={openSaveAsDialog}>Save as...</MainMenu.Item>
+          </MainMenu.Group>
+          <MainMenu.Separator />
+          <MainMenu.Group title="Layers">
+            <MainMenu.Item onSelect={() => setLayersDialog(true)}>Layers...</MainMenu.Item>
+            <MainMenu.Item onSelect={addAnnotationsLayer}>New annotation layer</MainMenu.Item>
+          </MainMenu.Group>
+          <MainMenu.Separator />
+          <MainMenu.Group title="Paper texture">
+            <MainMenu.Item onSelect={() => setTextureDialog(true)}>Choose texture...</MainMenu.Item>
+          </MainMenu.Group>
+          <MainMenu.Separator />
+          <MainMenu.DefaultItems.Socials />
+          <MainMenu.DefaultItems.ToggleTheme />
+          <MainMenu.DefaultItems.ChangeCanvasBackground />
+        </MainMenu>
+      );
+    },
+    [
+      menuSig,
+      activeId,
+      isElectron,
+      triggerUndo,
+      triggerRedo,
+      handleLoadScene,
+      handleSaveToFile,
+      handleExport,
+      handleExportImage,
+      switchProject,
+      newProject,
+      openSaveAsDialog,
+      addAnnotationsLayer,
+    ]
+  );
 
   if (!ready) {
     return (
@@ -924,34 +1353,6 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       </div>
     );
   }
-
-  const renderLoadItem = () =>
-    isElectron ? (
-      <MainMenu.Item onSelect={handleLoadScene}>Open</MainMenu.Item>
-    ) : (
-      <MainMenu.DefaultItems.LoadScene />
-    );
-
-  const renderSaveItem = () =>
-    isElectron ? (
-      <MainMenu.Item onSelect={handleSaveToFile}>Save to...</MainMenu.Item>
-    ) : (
-      <MainMenu.DefaultItems.SaveToActiveFile />
-    );
-
-  const renderExportItem = () =>
-    isElectron ? (
-      <MainMenu.Item onSelect={handleExport}>Export...</MainMenu.Item>
-    ) : (
-      <MainMenu.DefaultItems.Export />
-    );
-
-  const renderSaveAsImageItem = () =>
-    isElectron ? (
-      <MainMenu.Item onSelect={handleExportImage}>Export image...</MainMenu.Item>
-    ) : (
-      <MainMenu.DefaultItems.SaveAsImage />
-    );
 
   const renameDialogProject = renameDialog ? projects.find((p) => p.id === renameDialog.projectId) : null;
 
@@ -1228,71 +1629,20 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
           style={{ backgroundImage: `url(${TEXTURE_BASE}${storedTexture})` }}
         />
       )}
-      <div className="dreamwork-whiteboard-touch relative z-10 min-h-0 flex-1" style={storedTexture ? { backgroundColor: "transparent" } : undefined}>
+      <div
+        className={`dreamwork-whiteboard-touch relative z-10 min-h-0 flex-1${storedTexture ? " dreamwork-whiteboard-has-paper" : ""}`}
+        style={storedTexture ? { backgroundColor: "transparent" } : undefined}
+      >
         <Excalidraw
         key={activeId}
         langCode="en"
         viewModeEnabled={false}
         initialData={(initialData ?? undefined) as React.ComponentProps<typeof Excalidraw>["initialData"]}
         onChange={handleChange as unknown as React.ComponentProps<typeof Excalidraw>["onChange"]}
-        excalidrawAPI={(api) => {
-          excalidrawRef.current = api as unknown as ExcalidrawAPI;
-          onExcalidrawReady?.(api as unknown as ExcalidrawAPI);
-        }}
-        UIOptions={{
-          canvasActions: {
-            loadScene: true,
-            saveToActiveFile: true,
-            saveAsImage: true,
-            changeViewBackgroundColor: true,
-            clearCanvas: true,
-          },
-        }}
+        excalidrawAPI={bindExcalidrawApi}
+        UIOptions={excalidrawUiOptions}
       >
-        <MainMenu>
-          {renderLoadItem()}
-          {renderSaveItem()}
-          {renderExportItem()}
-          {renderSaveAsImageItem()}
-          <MainMenu.Separator />
-          <MainMenu.Item onSelect={triggerUndo}>Undo</MainMenu.Item>
-          <MainMenu.Item onSelect={triggerRedo}>Redo</MainMenu.Item>
-          <MainMenu.DefaultItems.SearchMenu />
-          <MainMenu.DefaultItems.Help />
-          <MainMenu.DefaultItems.ClearCanvas />
-          <MainMenu.Separator />
-          <MainMenu.Group title="Project">
-            {projects.map((p) => (
-              <MainMenu.Item
-                key={p.id}
-                onSelect={() => switchProject(p.id)}
-                selected={p.id === activeId}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setContextMenu({ x: e.clientX, y: e.clientY, projectId: p.id });
-                }}
-              >
-                {p.name}
-              </MainMenu.Item>
-            ))}
-            <MainMenu.Item onSelect={newProject}>New project</MainMenu.Item>
-            <MainMenu.Item onSelect={openSaveAsDialog}>Save as...</MainMenu.Item>
-          </MainMenu.Group>
-          <MainMenu.Separator />
-          <MainMenu.Group title="Layers">
-            <MainMenu.Item onSelect={() => setLayersDialog(true)}>Layers...</MainMenu.Item>
-            <MainMenu.Item onSelect={addAnnotationsLayer}>New annotation layer</MainMenu.Item>
-          </MainMenu.Group>
-          <MainMenu.Separator />
-          <MainMenu.Group title="Paper texture">
-            <MainMenu.Item onSelect={() => setTextureDialog(true)}>Choose texture...</MainMenu.Item>
-          </MainMenu.Group>
-          <MainMenu.Separator />
-          <MainMenu.DefaultItems.Socials />
-          <MainMenu.DefaultItems.ToggleTheme />
-          <MainMenu.DefaultItems.ChangeCanvasBackground />
-        </MainMenu>
+        {excalidrawMainMenu}
       </Excalidraw>
       </div>
     </div>

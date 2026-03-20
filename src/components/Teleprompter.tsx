@@ -523,16 +523,17 @@ export function TeleprompterPanel({
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [saveAsOpen]);
-  const idleTimerRef = useRef<number | null>(null);
+  const autoMinimizeTimerRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollTopByScriptRef = useRef<Record<string, number>>({});
   const draggingRef = useRef(false);
+  const lastPointerDuringDragRef = useRef({ x: 0, y: 0 });
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const panelLivePosRef = useRef<{ x: number; y: number } | null>(null);
   const [panelLivePos, setPanelLivePos] = useState<{ x: number; y: number } | null>(null);
 
-  const expandedWidth = 360;
+  const expandedWidth = 380;
   const expandedHeight = 420;
   const collapsedWidth = 230;
   const collapsedHeight = 44;
@@ -551,24 +552,28 @@ export function TeleprompterPanel({
     panelLivePosRef.current = position;
   }, [position]);
 
-  const resetIdleTimer = useCallback(() => {
-    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => setCollapsed(true), 15000);
+  const AUTO_MINIMIZE_MS = 3000;
+
+  const clearAutoMinimizeTimer = useCallback(() => {
+    if (autoMinimizeTimerRef.current != null) {
+      window.clearTimeout(autoMinimizeTimerRef.current);
+      autoMinimizeTimerRef.current = null;
+    }
   }, []);
 
-  const onPanelActivity = useCallback(() => {
-    if (collapsed) return;
-    resetIdleTimer();
-  }, [collapsed, resetIdleTimer]);
+  /** 鼠标离开「提词器控制面板」整块区域一段时间后收起（鼠标在编辑器/按钮/下拉等任一子区域内均视为仍在面板内）。 */
+  const scheduleAutoMinimize = useCallback(() => {
+    if (collapsed || draggingRef.current) return;
+    clearAutoMinimizeTimer();
+    autoMinimizeTimerRef.current = window.setTimeout(() => setCollapsed(true), AUTO_MINIMIZE_MS);
+  }, [collapsed, clearAutoMinimizeTimer]);
 
   useEffect(() => {
     if (!isVisible) return;
     setCollapsed(false);
-    resetIdleTimer();
-    return () => {
-      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    };
-  }, [isVisible, resetIdleTimer]);
+    clearAutoMinimizeTimer();
+    return clearAutoMinimizeTimer;
+  }, [isVisible, clearAutoMinimizeTimer]);
 
   // Restore textarea scroll position when panel expands (e.g. after returning from whiteboard)
   useEffect(() => {
@@ -589,7 +594,8 @@ export function TeleprompterPanel({
     const panelEl = panelRef.current;
     if (!panelEl) return;
     e.preventDefault();
-    if (!collapsed) resetIdleTimer();
+    if (!collapsed) clearAutoMinimizeTimer();
+    lastPointerDuringDragRef.current = { x: e.clientX, y: e.clientY };
     const rect = panelEl.getBoundingClientRect();
     draggingRef.current = true;
     const start = panelLivePosRef.current ?? position ?? { x: rect.left, y: rect.top };
@@ -600,6 +606,7 @@ export function TeleprompterPanel({
     if (target.setPointerCapture && e.pointerId != null) target.setPointerCapture(e.pointerId);
     const onMove = (ev: PointerEvent) => {
       if (!draggingRef.current) return;
+      lastPointerDuringDragRef.current = { x: ev.clientX, y: ev.clientY };
       const width = collapsed ? collapsedWidth : expandedWidth;
       const height = collapsed ? collapsedHeight : expandedHeight;
       const vp = getViewportSize();
@@ -615,6 +622,13 @@ export function TeleprompterPanel({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      const el = panelRef.current;
+      if (el && !collapsed) {
+        const { x, y } = lastPointerDuringDragRef.current;
+        const r = el.getBoundingClientRect();
+        const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        if (!inside) scheduleAutoMinimize();
+      }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -651,7 +665,7 @@ export function TeleprompterPanel({
             className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px]"
             onClick={() => {
               setCollapsed(false);
-              resetIdleTimer();
+              clearAutoMinimizeTimer();
             }}
           >
             Open
@@ -668,24 +682,30 @@ export function TeleprompterPanel({
     );
   }
 
+  /** Same height / radius / horizontal padding as GlassButton `sm` overrides (h-7, rounded-lg, px-2). */
+  const tpActionClass =
+    "!h-7 min-h-0 shrink-0 !px-2 !py-0 !text-[10px] font-normal leading-tight";
+  const tpSelectClass =
+    "box-border h-7 min-w-0 flex-1 rounded-lg border border-white/20 bg-black/45 px-2 py-0 text-[10px] font-normal leading-7 text-white outline-none";
+
   return (
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
-      className="fixed z-[1000000] w-[360px] rounded-xl border border-white/30 bg-black/70 p-3 text-xs text-white shadow-2xl backdrop-blur-md"
+      className="fixed z-[1000000] w-[min(380px,calc(100vw-24px))] rounded-xl border border-white/30 bg-black/70 p-2.5 text-[11px] text-white shadow-2xl backdrop-blur-md"
       style={{ left, top }}
-      onPointerDown={onPanelActivity}
-      onKeyDown={onPanelActivity}
+      onMouseEnter={clearAutoMinimizeTimer}
+      onMouseLeave={scheduleAutoMinimize}
     >
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-1.5 flex items-center gap-2">
         <div
-          className={`h-7 w-8 shrink-0 rounded border border-white/25 bg-black/45 text-center leading-7 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
+          className={`h-6 w-7 shrink-0 rounded border border-white/25 bg-black/45 text-center text-[10px] leading-6 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
           onPointerDown={onPanelDragDown}
           title={locked ? "Position locked" : "Drag panel"}
         >
           ::
         </div>
-        <span className="mr-auto font-semibold">Teleprompter</span>
+        <span className="mr-auto text-[12px] font-semibold">Teleprompter</span>
         <button
           type="button"
           onClick={onToggleLocked}
@@ -695,26 +715,31 @@ export function TeleprompterPanel({
           {locked ? "Locked" : "Lock"}
         </button>
       </div>
-      <div className="mb-2 flex flex-wrap gap-1">
-        <GlassButton size="sm" variant={isPlaying ? "primary" : "secondary"} onClick={() => onSetPlaying(!isPlaying)}>
+      <div className="mb-1.5 flex w-full min-w-0 flex-wrap gap-1">
+        <GlassButton
+          size="sm"
+          className={tpActionClass}
+          variant={isPlaying ? "primary" : "secondary"}
+          onClick={() => onSetPlaying(!isPlaying)}
+        >
           {isPlaying ? "Pause" : "Play"}
         </GlassButton>
-        <GlassButton size="sm" variant="secondary" onClick={onReset}>
+        <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={onReset}>
           Reset
         </GlassButton>
-        <GlassButton size="sm" variant="secondary" onClick={() => setCollapsed(true)}>
+        <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={() => setCollapsed(true)}>
           Min
         </GlassButton>
-        <GlassButton size="sm" variant="ghost" onClick={onHide}>
+        <GlassButton size="sm" className={tpActionClass} variant="ghost" onClick={onHide}>
           Hide
         </GlassButton>
       </div>
-      <div className="mb-2 flex items-center gap-1">
+      <div className="mb-2 flex w-full min-w-0 items-center gap-1">
         {editingScriptName ? (
           <input
             type="text"
             defaultValue={currentScript?.name ?? "Untitled"}
-            className="min-w-0 flex-1 rounded border border-white/20 bg-black/45 px-2 py-1 text-xs text-white outline-none"
+            className={tpSelectClass}
             autoFocus
             onBlur={(e) => {
               const name = e.target.value.trim() || (currentScript?.name ?? "Untitled");
@@ -734,7 +759,7 @@ export function TeleprompterPanel({
           <select
             value={activeScriptId}
             onChange={(e) => onSwitchScript(e.target.value)}
-            className="flex-1 rounded border border-white/20 bg-black/45 px-2 py-1 text-xs text-white"
+            className={tpSelectClass}
           >
             {scripts.map((s) => (
               <option key={s.id} value={s.id}>
@@ -743,12 +768,13 @@ export function TeleprompterPanel({
             ))}
           </select>
         )}
-        <GlassButton size="sm" variant="secondary" onClick={onNewScript} title="New script">
+        <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={onNewScript} title="New script">
           New
         </GlassButton>
-        <div ref={saveAsRef} className="relative">
+        <div ref={saveAsRef} className="relative shrink-0">
           <GlassButton
             size="sm"
+            className={`${tpActionClass} whitespace-nowrap`}
             variant="secondary"
             onClick={() => setSaveAsOpen((o) => !o)}
             title="Save as new script or export to file"
@@ -757,12 +783,12 @@ export function TeleprompterPanel({
           </GlassButton>
           {saveAsOpen && (
             <div
-              className="absolute left-0 top-full z-50 mt-1 min-w-[140px] rounded border border-white/20 bg-black/90 py-1 shadow-xl"
+              className="absolute left-0 top-full z-50 mt-1 min-w-[148px] rounded border border-white/20 bg-black/90 py-0.5 shadow-xl"
               data-dreamwork-no-intercept
             >
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
                 onClick={() => {
                   setSaveAsOpen(false);
                   onSaveAsScript();
@@ -772,14 +798,14 @@ export function TeleprompterPanel({
               </button>
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
                 onClick={() => downloadScript("md")}
               >
                 Download as .md
               </button>
               <button
                 type="button"
-                className="block w-full px-3 py-1.5 text-left text-xs hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
                 onClick={() => downloadScript("txt")}
               >
                 Download as .txt
@@ -789,6 +815,7 @@ export function TeleprompterPanel({
         </div>
         <GlassButton
           size="sm"
+          className={`${tpActionClass} whitespace-nowrap`}
           variant="secondary"
           onClick={() => setEditingScriptName(true)}
           title="Rename script"
@@ -821,27 +848,27 @@ export function TeleprompterPanel({
             onSetPlaying(false);
           }
         }}
-        className="mb-3 h-36 w-full resize-y rounded-md border border-white/20 bg-black/45 p-2 text-xs text-white outline-none"
+        className="mb-2 h-36 w-full resize-y rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
         placeholder="Paste script here..."
       />
-      <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-        <label className="col-span-2 flex flex-col gap-1">
-          <span>Speed: {Math.round(speed)} px/s</span>
+      <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[10px]">
+        <label className="col-span-2 flex flex-col gap-0.5">
+          <span className="text-white/90">Speed: {Math.round(speed)} px/s</span>
           <input type="range" min={10} max={80} step={2} value={speed} onChange={(e) => onSetSpeed(Number(e.target.value))} />
           <span className="text-[10px] text-white/55">
             Ref: 30–40 news | 40–50 interview | 50–60 casual
           </span>
         </label>
-        <label className="flex flex-col gap-1">
-          <span>Font: {Math.round(fontSize)} px</span>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-white/90">Font: {Math.round(fontSize)} px</span>
           <input type="range" min={18} max={52} step={1} value={fontSize} onChange={(e) => onSetFontSize(Number(e.target.value))} />
         </label>
-        <label className="flex flex-col gap-1">
-          <span>Opacity: {opacity.toFixed(2)}</span>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-white/90">Opacity: {opacity.toFixed(2)}</span>
           <input type="range" min={0.35} max={1} step={0.01} value={opacity} onChange={(e) => onSetOpacity(Number(e.target.value))} />
         </label>
-        <label className="flex flex-col gap-1">
-          <span>Width: {Math.round(overlayWidth)} px</span>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-white/90">Width: {Math.round(overlayWidth)} px</span>
           <input
             type="range"
             min={320}
@@ -852,11 +879,13 @@ export function TeleprompterPanel({
           />
         </label>
       </div>
-      <label className="mt-2 flex items-center gap-2">
+      <label className="mt-1.5 flex items-center gap-2 text-[10px] text-white/90">
         <input type="checkbox" checked={nearCamera} onChange={(e) => onSetNearCamera(e.target.checked)} />
         <span>Near camera</span>
       </label>
-      <p className="mt-2 text-[11px] text-white/70">Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag overlay to scroll. Scroll editor to sync overlay.</p>
+      <p className="mt-1.5 text-[10px] leading-snug text-white/60">
+        Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag overlay to scroll. Scroll editor to sync overlay.
+      </p>
     </div>
   );
 }

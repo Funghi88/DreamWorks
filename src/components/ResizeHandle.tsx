@@ -7,9 +7,9 @@ interface ResizeHandleProps {
   "data-dreamwork-no-intercept"?: boolean;
 }
 
-/** glass-bg purple: #e8eeff, #f5f0ff. Hover: match; dragging: more solid */
-const HANDLE_HOVER = "rgba(232, 238, 255, 0.5)";
-const HANDLE_DRAG = "rgba(200, 208, 240, 0.85)";
+/** Match neutral shell (.glass-bg); hover/drag give contrast without pink-tint stops */
+const HANDLE_HOVER = "rgba(220, 228, 238, 0.55)";
+const HANDLE_DRAG = "rgba(190, 200, 216, 0.88)";
 
 export function ResizeHandle({
   onResize,
@@ -62,7 +62,7 @@ export function ResizeHandle({
       } ${className}`}
       style={{
         cursor: isHorizontal ? "col-resize" : "row-resize",
-        backgroundColor: "#e8eeff",
+        backgroundColor: "#e8ecf0",
       }}
       onMouseEnter={() => setIsHover(true)}
       onMouseLeave={() => setIsHover(false)}

@@ -19,6 +19,8 @@ function createMainWindow() {
     minHeight: 600,
     icon: iconPath,
     title: APP_NAME,
+    /* Avoid transparent GPU clear flashes before first paint / during resize */
+    backgroundColor: "#eef2f7",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

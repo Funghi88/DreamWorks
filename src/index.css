@@ -155,34 +155,19 @@
   border-color: rgba(255, 255, 255, 0.08);
 }
 
-/* Animated gradient background */
-@keyframes gradient-shift {
-  0%, 100% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-}
-
+/* Static cool-neutral shell background (no animated position).
+   Moving a large gradient exposed pink-lavender stops (#f5f0ff) and caused visible “flashes” on some Electron/GPU setups. */
 .glass-bg {
   background: linear-gradient(
     135deg,
-    #f0f4ff 0%,
-    #e8eeff 25%,
-    #f5f0ff 50%,
-    #f0f8ff 75%,
-    #f5f5ff 100%
+    #eef2f7 0%,
+    #e8ecf0 40%,
+    #f1f5f9 100%
   );
-  background-size: 200% 200%;
-  animation: gradient-shift 15s ease infinite;
 }
 
 .dark .glass-bg {
-  background: linear-gradient(
-    135deg,
-    #0f172a 0%,
-    #1e293b 25%,
-    #1a1a2e 50%,
-    #16213e 75%,
-    #0f172a 100%
-  );
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
 }
 
 /* NotebookLM-style sector cards - off-white rounded rectangular */
