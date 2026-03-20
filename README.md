@@ -107,12 +107,9 @@ npm run dev
 
 ### 截图
 
-
-| 主界面           | Live Meeting     | 录制与导出   |
-| ------------- | ---------------- | ------- |
-| 主界面           | Live Meeting     | 录制与导出   |
-| 录屏 + 画中画 + 白板 | 视频会议界面（Local 模式） | 录制控制与导出 |
-
+| 主界面 | Live Meeting | 录制与导出 |
+| --- | --- | --- |
+| ![主界面：录屏 + 画中画 + 白板](docs/screenshots/main-interface.png) | ![Live Meeting：视频会议（Local 模式）](docs/screenshots/live-meeting.png) | ![录制与导出：控制与导出](docs/screenshots/recording.png) |
 
 ### 项目进展
 
@@ -227,12 +224,9 @@ The app opens in an Electron window.
 
 ### Screenshots
 
-
-| Main UI                   | Live Meeting               | Recording & Export            |
-| ------------------------- | -------------------------- | ----------------------------- |
-| Main UI                   | Live Meeting               | Recording                     |
-| Screen + PiP + Whiteboard | Video meeting (Local mode) | Recording controls and export |
-
+| Main UI | Live Meeting | Recording & export |
+| --- | --- | --- |
+| ![Main UI: screen + PiP + whiteboard](docs/screenshots/main-interface.png) | ![Live Meeting: video call (Local mode)](docs/screenshots/live-meeting.png) | ![Recording: controls and export](docs/screenshots/recording.png) |
 
 ### Project status
 
