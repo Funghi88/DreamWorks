@@ -53,6 +53,33 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 4. **Live Meeting** — WebRTC 视频会议，支持聊天、屏幕共享、录制、虚拟背景、实时转录
 5. **Record** — 录制屏幕 + 摄像头合成画面，支持保存 WebM / MP4
 
+### Excalidraw 白板：体验、存储与和录制的算力平衡
+
+本节概括我们在 **Excalidraw** 集成上的工程取舍：让画布跟手、**贴图与场景不丢**、并在 **白板 + 摄像头录制** 时尽量少抢 CPU/GPU。
+
+#### 交互与流畅度
+
+- **缩放 / 触摸板**：`wheel` 只挂在**白板根节点**上，并配合 `composedPath` 过滤；避免在 `document` 上对全局 `wheel` 使用 `passive: false`，否则双指缩放会与主线程同步耦合、手感发涩。
+- **平移（手型工具）**：`onChange` 在第三参已有 **files** 时尽量不再每帧调用 `getFiles()`；仅在实际编辑合并 **files** 映射，减轻大手笔场景下的主线程压力。
+- **纸纹背景**：发现 Excalidraw 在平移时会改 `viewBackgroundColor` 时，用 **ref 修补 + 节流后的 `updateScene`**，避免在手型拖拽循环里和内核抢布局。
+
+#### 图片与存储（不丢贴图 / 纹理）
+
+- **多项目**：白板以 `whiteboardProjects` 存盘；单项目内保留 `elements`、`appState`、可选的 **`files`**（嵌入图片等二进制映射）。
+- **`dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 **`whiteboardTexture`**（纸纹 id）与完整 **`files`**，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
+- **`latestSceneRef`**：在 React 重渲染或 API 暂不可用时，仍能拿到最近一次场景的 **elements / appState / files**，供 **flush** 与导出使用。
+- **持久化节奏**：结构性改动较快落盘；纯视口类变化可 **`requestIdleCallback` + rAF** 延后写入。Web 上磁盘写入 **`setTimeout(0)` 微延迟**，减轻 `JSON.stringify` 与 storage 同步卡住下一帧平移；**flushPersist**（切项目、页签隐藏、`beforeunload`、卸载）仍 **同步队列**，保证退出前数据一致。
+
+#### 录制时摄像头与白板的 CPU/GPU 权衡
+
+- **合成帧率**：白板录制使用 **固定目标帧率（如 30fps）** 的 canvas 捕获 + **rAF 节流**，避免与 Excalidraw 每帧抢满主线程。
+- **非录制时省绘制**：全屏白板且未在录制时，**跳过**对大面积离屏合成的空闲重绘，把算力留给画布与指针。
+- **画中画采样**：白板录制优先走 **门户内可见 `video` 直出**，并省略仅用于防抖的 **mirror cache** 填充路径，减少重复 `drawImage` 与格式转换。
+- **发光 / 装饰**：白板录制时段 **抑制重阴影（glow）**，减轻合成与 GPU 混合成本。
+- **白板位图来源**：录制侧在可能的情况下 stack 视口内多层 canvas，并按需 **`exportToCanvas`**；导出节奏与白板是否带摄像头等条件平衡，避免与合成环路同时打满。
+
+---
+
 ### 本地使用指南
 
 **环境要求**：Node.js 18+，npm 或 yarn
@@ -143,6 +170,33 @@ Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
 3. **Whiteboard** — Excalidraw overlay for drawing and annotation
 4. **Live Meeting** — WebRTC video calls with chat, screen share, recording, virtual backgrounds, live transcription
 5. **Record** — Composite screen + webcam; save as WebM or MP4
+
+### Excalidraw whiteboard: UX, storage, and balancing CPU/GPU with recording
+
+This section summarizes how we integrate **Excalidraw**: keep the canvas responsive, **persist images and scenes reliably**, and **avoid fighting the GPU/CPU** when **recording the whiteboard with the webcam PiP**.
+
+#### Interaction & smoothness
+
+- **Zoom / trackpad:** `wheel` listeners are attached to the **whiteboard root** only, with `composedPath` filtering—**not** the whole `document` with `passive: false`, which can serialize pinch-zoom on the main thread and feel “sticky.”
+- **Pan (hand tool):** In `onChange`, when Excalidraw passes **files** as the third argument, we avoid calling `getFiles()` on every tick; we merge the **files** map only when edits require it, which helps on image-heavy boards.
+- **Paper texture:** If panning flips `viewBackgroundColor`, we **patch via ref** and apply a **throttled `updateScene`**, avoiding fighting Excalidraw’s hand-drag loop every frame.
+
+#### Images & storage (no lost embeds / texture)
+
+- **Projects:** Boards are stored under **`whiteboardProjects`**; each project keeps `elements`, `appState`, and optional **`files`** (binary map for pasted images, etc.).
+- **`dreamwork` backup:** `data.dreamwork` redundantly stores **`whiteboardTexture`** (texture id) and the full **`files`** map when needed, so a slim serialization path doesn’t drop blobs.
+- **`latestSceneRef`:** Holds the latest **elements / appState / files** even when React or the API is between states—used for **flush** paths and exports.
+- **Persistence pacing:** Structural edits flush sooner; view-only changes may use **`requestIdleCallback` + rAF**. On the web, disk writes are **deferred one macrotask** to keep the next pan smooth; **`flushPersist`** (project switch, tab hidden, `beforeunload`, unmount) still runs **synchronously** so data is consistent on exit.
+
+#### CPU/GPU trade-offs while recording (camera vs whiteboard)
+
+- **Composite rate:** Whiteboard recording uses a **fixed target FPS** for canvas capture plus **rAF throttling**, so the compositor doesn’t starve Excalidraw every frame.
+- **Idle work:** When **not** recording, full-page whiteboard mode **skips** expensive idle composite repaints so the canvas stays prioritized.
+- **PiP sampling:** For whiteboard recording we prefer **drawing straight from the visible portal `<video>`** and **skip filling** the mirror-only canvas cache path when possible, cutting redundant `drawImage` work.
+- **Decorations:** **Heavy glow / shadow** around the PiP is **suppressed** during whiteboard recording to reduce blending cost.
+- **Board pixels for the encoder:** The recorder may prefer stacking **in-viewport canvases** and periodically **`exportToCanvas`**, tuned so export bursts don’t align every frame with the composite loop.
+
+---
 
 ### Local setup
 
