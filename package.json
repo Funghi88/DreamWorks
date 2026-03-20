@@ -1,7 +1,7 @@
 {
   "name": "dreamwork",
   "productName": "DreamWorks",
-  "description": "Lightweight screen recorder with circular webcam PiP, whiteboard, and live meeting. Built with Electron + React.",
+  "description": "Experience-first screen recorder: circular webcam PiP, whiteboard, and live meeting. Electron + React.",
   "author": "Annabelle Lee <annabellelee8@gmail.com>",
   "private": true,
   "repository": "github.com/Funghi88/DreamWorks",
@@ -10,11 +10,11 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:dev": "npm run dev",
     "dev:web": "vite --port 5173",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron": "electron .",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "pack": "npm run create-icns && rm -rf dist && npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "signaling": "npx tsx server/signaling-server.ts",

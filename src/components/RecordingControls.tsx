@@ -72,13 +72,18 @@ export function RecordingControls({
   }, [countdown, pendingPreset, onCaptureScreenshot]);
 
   useEffect(() => {
-    if (!captureOpen || !captureRef.current) return;
-    const btn = captureRef.current.querySelector("button");
-    if (btn) {
-      const r = btn.getBoundingClientRect();
-      const headerBottom = 60;
-      setDropdownRect({ top: Math.max(r.bottom + 4, headerBottom), left: r.left });
-    }
+    if (!captureOpen) return;
+    const updatePos = () => {
+      const btn = captureRef.current?.querySelector("button");
+      if (btn) {
+        const r = btn.getBoundingClientRect();
+        const headerBottom = 60;
+        setDropdownRect({ top: Math.max(r.bottom + 4, headerBottom), left: r.left });
+      }
+    };
+    updatePos();
+    window.addEventListener("resize", updatePos);
+    return () => window.removeEventListener("resize", updatePos);
   }, [captureOpen]);
 
   useEffect(() => {

@@ -10,6 +10,37 @@ const helperWindows = new Map();
 
 const APP_NAME = "DreamWorks";
 
+/**
+ * Native picker when the OS provides it (useSystemPicker: true).
+ * Fallback only: request screen sources first, then window — never assume a combined list order.
+ */
+function installNativeDisplayMediaHandler() {
+  const thumb = { width: 150, height: 150 };
+  session.defaultSession.setDisplayMediaRequestHandler(
+    (_request, callback) => {
+      (async () => {
+        try {
+          const screens = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: thumb });
+          if (screens.length > 0) {
+            callback({ video: screens[0], audio: "loopback" });
+            return;
+          }
+          // Do not fall back to a random window: that looked like “can’t share desktop” and caused
+          // infinite-mirror previews when the window was DreamWorks. If screens is empty, fix Screen Recording.
+          console.warn(
+            "[DreamWorks] No display sources from desktopCapturer — Screen Recording permission or system issue."
+          );
+          callback({});
+        } catch (err) {
+          console.error("Capture Screen error:", err);
+          callback({});
+        }
+      })();
+    },
+    { useSystemPicker: true }
+  );
+}
+
 function createMainWindow() {
   const iconPath = path.join(__dirname, "icon.png");
   mainWindow = new BrowserWindow({
@@ -140,29 +171,8 @@ app.whenReady().then(() => {
     }
   });
 
-  // Enable getDisplayMedia for Capture Screen. useSystemPicker: true shows native picker
-  // so user can choose Screen or Window. When system picker is available (macOS 15+),
-  // the handler is not invoked. Fallback handler for older systems.
-  session.defaultSession.setDisplayMediaRequestHandler(
-    (request, callback) => {
-      desktopCapturer
-        .getSources({ types: ["screen", "window"], thumbnailSize: { width: 150, height: 150 } })
-        .then((sources) => {
-          // When handler runs (fallback): prefer first source. User didn't get system picker.
-          const source = sources[0];
-          if (source) {
-            callback({ video: source, audio: "loopback" });
-          } else {
-            callback({});
-          }
-        })
-        .catch((err) => {
-          console.error("Capture Screen error:", err);
-          callback({});
-        });
-    },
-    { useSystemPicker: true }
-  );
+  installNativeDisplayMediaHandler();
+
   createMainWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

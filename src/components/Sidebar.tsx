@@ -95,8 +95,16 @@ export function Sidebar({
             </div>
           ) : (
             <div
-              className="flex min-h-[80px] flex-1 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-white/20 transition-all hover:bg-white/20"
+              role="button"
+              tabIndex={0}
+              className="flex min-h-[80px] flex-1 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-white/20 transition-[background-color] duration-200 hover:bg-white/20 motion-reduce:transition-none"
               onClick={onOpenWhiteboardRequest}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpenWhiteboardRequest();
+                }
+              }}
             >
               <span className="text-sm text-muted-foreground">✏️ Click to open</span>
             </div>

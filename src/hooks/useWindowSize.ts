@@ -28,14 +28,20 @@ export function useWindowLiveResize(settleMs = 100) {
 
   useEffect(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
+    let raf = 0;
     const onResize = () => {
-      setActive(true);
-      if (t) clearTimeout(t);
-      t = setTimeout(() => setActive(false), settleMs);
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setActive(true);
+        if (t) clearTimeout(t);
+        t = setTimeout(() => setActive(false), settleMs);
+      });
     };
     window.addEventListener("resize", onResize);
     return () => {
       window.removeEventListener("resize", onResize);
+      if (raf) cancelAnimationFrame(raf);
       if (t) clearTimeout(t);
     };
   }, [settleMs]);

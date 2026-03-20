@@ -132,7 +132,12 @@
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  transition: all 0.3s ease;
+  /* Avoid `transition: all` with backdrop-filter — expensive; animate only safe props */
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease,
+    box-shadow 0.3s ease,
+    border-color 0.3s ease;
 }
 
 /* Header portal: fixed bar at top so header receives clicks above all content */
@@ -181,4 +186,24 @@
 .dark .sector-card {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* After Stop sharing: subtle “land” on expanded whiteboard (paired with App screenShareStopPhase). */
+@media (prefers-reduced-motion: no-preference) {
+  .dreamwork-whiteboard-restore-in {
+    animation: dreamwork-wb-restore 0.46s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes dreamwork-wb-restore {
+  from {
+    opacity: 0.9;
+    filter: brightness(0.96);
+    transform: scale(0.994);
+  }
+  to {
+    opacity: 1;
+    filter: brightness(1);
+    transform: scale(1);
+  }
 }

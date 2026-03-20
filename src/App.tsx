@@ -1,4 +1,14 @@
-import { Component, useRef, useState, useEffect, useLayoutEffect, useCallback, type ReactNode } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useRef,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { RecordingControls } from "@/components/RecordingControls";
 import { TeleprompterOverlay, TeleprompterPanel } from "@/components/Teleprompter";
@@ -29,11 +39,19 @@ import {
 } from "@/lib/faceFilters";
 import { createCircularIcon } from "@/lib/circularIcon";
 import { recordContentFit80 } from "@/lib/recordLayout";
+import {
+  trimMacOSScreenSharePadding,
+  snapScreenTrimRect,
+  mergeStableScreenTrim,
+  SCREEN_TRIM_REFRESH_FRAMES,
+  type ScreenTrimRect,
+} from "@/lib/screenShareTrim";
+import { isDisplayMediaUserCancellation } from "@/lib/userMediaError";
 import { Settings } from "lucide-react";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { setNormalMode } from "@/lib/windowUtils";
-import { lazy, Suspense } from "react";
 import { ResizeHandle } from "@/components/ResizeHandle";
+import { SplitAffordanceHint } from "@/components/SplitAffordanceHint";
 
 const LiveMeetingModal = lazy(() =>
   import("@/components/LiveMeeting/LiveMeetingModal").then((m) => ({ default: m.LiveMeetingModal }))
@@ -51,6 +69,12 @@ const RECORD_BITRATES: Record<RecordResolution, number> = {
   "2K": 18_000_000,
   "4K": 28_000_000,
 };
+
+/** Whiteboard ↔ capture split width during drag (CSS var); avoids setState every move. */
+const DW_SPLIT_PANEL_VAR = "--dw-split-panel";
+/** Stop sharing: fade capture first, then clear stream + subtle whiteboard “land” (see index.css). */
+const SCREEN_SHARE_EXIT_MS = 400;
+const SCREEN_SHARE_RESTORE_MS = 460;
 
 function requestCanvasCaptureFrame(track: MediaStreamTrack | null) {
   if (!track) return;
@@ -413,7 +437,17 @@ export default function App() {
   /** 白板模式下右侧 Capture 条宽度 */
   const [whiteboardPanelWidth, setWhiteboardPanelWidth] = useState(() => loadSettings().whiteboardPanelWidth ?? 40);
   const whiteboardPanelWidthRef = useRef(whiteboardPanelWidth);
-  whiteboardPanelWidthRef.current = whiteboardPanelWidth;
+  /** True while dragging the whiteboard/capture split (CSS var path; don’t overwrite ref from state). */
+  const splitPanelDragActiveRef = useRef(false);
+  if (!splitPanelDragActiveRef.current) {
+    whiteboardPanelWidthRef.current = whiteboardPanelWidth;
+  }
+  /** Measured from content area RO — avoids ref-read-during-render (0 width) so split affordance hints stay correct. */
+  const [contentAreaSplitWidth, setContentAreaSplitWidth] = useState(0);
+  /** `exiting`: stream still on, capture panel fades; `restoring`: stream off, whiteboard plays settle animation. */
+  const [screenShareStopPhase, setScreenShareStopPhase] = useState<"idle" | "exiting" | "restoring">("idle");
+  const screenShareExitTimerRef = useRef<number | null>(null);
+  const screenShareRestoreTimerRef = useRef<number | null>(null);
   const [outputHeight, setOutputHeight] = useState(240);
   const [outputCollapsed, setOutputCollapsed] = useState(false);
   const outputIdleTimerRef = useRef<number | null>(null);
@@ -431,8 +465,16 @@ export default function App() {
   const previewBoxDraggingRef = useRef(false);
   const previewBoxOffsetRef = useRef({ x: 0, y: 0 });
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const captureScreenInFlightRef = useRef(false);
+  /** Throttle macOS trim + reduce flicker (per-frame re-trim oscillates). */
+  const screenTrimCacheRef = useRef<{ key: string; rect: ScreenTrimRect } | null>(null);
+  const screenTrimFrameRef = useRef(0);
   const fullPageWhiteboard = true;
   const activeScreenStream = whiteboardScreenStream ?? previewScreenStream;
+  useEffect(() => {
+    screenTrimCacheRef.current = null;
+    screenTrimFrameRef.current = 0;
+  }, [activeScreenStream]);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -497,6 +539,14 @@ export default function App() {
     };
   }, [showOutput, recordedClips.length]);
   const [showSettings, setShowSettings] = useState(false);
+  useEffect(() => {
+    if (!showSettings) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowSettings(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showSettings]);
   const [showLiveMeetingModal, setShowLiveMeetingModal] = useState(false);
   const [inLiveMeeting, setInLiveMeeting] = useState(false);
   const liveMeetingRef = useRef<LiveMeetingModalHandle | null>(null);
@@ -790,12 +840,10 @@ export default function App() {
       setTeleprompterAnchorRect(null);
       return;
     }
-    let raf = 0;
-    const updateRect = () => {
+    const tick = () => {
       const rect = pipRef.current?.getBoundingClientRect();
       setTeleprompterAnchorRect((prev) => {
         if (!rect) return prev === null ? prev : null;
-        // Quantize values so tiny sub-pixel jitter doesn't trigger re-renders.
         const next = {
           left: Math.round(rect.left),
           top: Math.round(rect.top),
@@ -813,11 +861,13 @@ export default function App() {
         }
         return next;
       });
-      raf = requestAnimationFrame(updateRect);
     };
-    raf = requestAnimationFrame(updateRect);
-    return () => cancelAnimationFrame(raf);
-  }, [showTeleprompter, teleprompterNearCamera, showPip]);
+    tick();
+    /** ~40fps while dragging PiP, ~10fps when static — avoids a 60fps setState loop. */
+    const ms = pipDragging ? 24 : 100;
+    const id = window.setInterval(tick, ms);
+    return () => clearInterval(id);
+  }, [showTeleprompter, teleprompterNearCamera, showPip, pipDragging]);
 
   const handleToggleTeleprompter = () => {
     setShowTeleprompter((prev) => {
@@ -1050,7 +1100,6 @@ export default function App() {
 
   const drawComposite = useCallback(
     (forceRecordRes = false, overrideRes?: { w: number; h: number }) => {
-      const screenVideo = persistentScreenVideoRef.current;
       const cameraVideoMain = cameraVideoRef.current;
       const cameraVideoSource = cameraSourceVideoRef.current;
       // 录制采样：全屏白板时 cameraSourceVideoRef 被摆在屏外 + opacity 0，部分浏览器几乎不更新帧，
@@ -1088,7 +1137,11 @@ export default function App() {
       let prevH = preview.offsetHeight;
       const wbSnap = recordWhiteboardPreviewSizeRef.current;
       const wbOnlyRecording = forceRecordRes && fullPageWhiteboard && !activeScreenStream;
-      if (wbOnlyRecording) {
+      if (activeScreenStream) {
+        // Inner content box (excludes border). offset* includes border → wrong scale vs <video> object-contain → top/left gap.
+        prevW = Math.max(1, preview.clientWidth);
+        prevH = Math.max(1, preview.clientHeight);
+      } else if (wbOnlyRecording) {
         // Match on-screen CSS box (Mac/non-16:9): frozen wbSnap can be smaller than real layout → PiP scales up in export.
         const pr = preview.getBoundingClientRect();
         prevW = Math.max(1, Math.round(pr.width));
@@ -1128,11 +1181,42 @@ export default function App() {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = useRecordRes ? "high" : "medium";
       ctx.clearRect(0, 0, w, h);
-      if (screenVideo?.srcObject && screenVideo.readyState >= 2) {
+      const screenPersistent = persistentScreenVideoRef.current;
+      const screenVisible = screenVideoRef.current;
+      const videoForDraw =
+        activeScreenStream &&
+        screenVisible &&
+        screenVisible.srcObject &&
+        screenVisible.readyState >= 2 &&
+        screenVisible.videoWidth > 0
+          ? screenVisible
+          : screenPersistent;
+
+      if (videoForDraw?.srcObject && videoForDraw.readyState >= 2) {
         drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current);
-        const sw = screenVideo.videoWidth || w;
-        const sh = screenVideo.videoHeight || h;
+        const sw0 = videoForDraw.videoWidth || w;
+        const sh0 = videoForDraw.videoHeight || h;
         const screenOnlyRecord = activeScreenStream && (forceRecordRes || fullPageWhiteboard);
+        let trimmed: { sx: number; sy: number; sw: number; sh: number };
+        if (screenOnlyRecord) {
+          const key = `${sw0}x${sh0}`;
+          screenTrimFrameRef.current += 1;
+          const cached = screenTrimCacheRef.current;
+          if (cached?.key === key && screenTrimFrameRef.current % SCREEN_TRIM_REFRESH_FRAMES !== 0) {
+            trimmed = cached.rect;
+          } else {
+            const raw = trimMacOSScreenSharePadding(videoForDraw, sw0, sh0);
+            let next = snapScreenTrimRect(raw, sw0, sh0);
+            if (cached?.key === key) {
+              next = mergeStableScreenTrim(cached.rect, next);
+            }
+            screenTrimCacheRef.current = { key, rect: next };
+            trimmed = next;
+          }
+        } else {
+          trimmed = { sx: 0, sy: 0, sw: sw0, sh: sh0 };
+        }
+        const { sx, sy, sw, sh } = trimmed;
         let dw: number;
         let dh: number;
         let dx: number;
@@ -1151,19 +1235,21 @@ export default function App() {
           dx = (w - dw) / 2;
           dy = (h - dh) / 2;
         }
+        let screenContentRad = 0;
         if (screenOnlyRecord) {
-          const rad = Math.min(AVATAR_RECT_RADIUS * scaleX, dw / 2, dh / 2);
+          screenContentRad = Math.min(AVATAR_RECT_RADIUS * scaleX, dw / 2, dh / 2);
           ctx.save();
-          roundRectPath(ctx, dx, dy, dw, dh, rad);
+          ctx.beginPath();
+          roundRectPath(ctx, dx, dy, dw, dh, screenContentRad);
           ctx.clip();
         }
-        ctx.drawImage(screenVideo, 0, 0, sw, sh, dx, dy, dw, dh);
+        ctx.drawImage(videoForDraw, sx, sy, sw, sh, dx, dy, dw, dh);
         if (screenOnlyRecord) {
           ctx.restore();
+          ctx.beginPath();
+          roundRectPath(ctx, dx, dy, dw, dh, screenContentRad);
           ctx.strokeStyle = "#000000";
-          ctx.lineWidth = 3;
-          const rad = Math.min(AVATAR_RECT_RADIUS * scaleX, dw / 2, dh / 2);
-          roundRectPath(ctx, dx, dy, dw, dh, rad);
+          ctx.lineWidth = Math.max(2, scaleX * 1.25);
           ctx.stroke();
         }
       } else if ((useRecordRes || fullPageWhiteboard) && fullPageWhiteboard && !activeScreenStream) {
@@ -1821,79 +1907,117 @@ export default function App() {
     });
   }, [showPip, pipDragging, fullPageWhiteboard, activeScreenStream, avatarWidthDisplay, avatarHeightDisplay, fullPagePreviewPos, whiteboardPanelWidth]);
 
-  const stopScreenShare = () => {
-    if (isRecording) {
-      stopRecording();
-    }
-    const stream = whiteboardScreenStream ?? previewScreenStream;
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-    }
-    setWhiteboardScreenStream(null);
-    setPreviewScreenStream(null);
-    if (persistentScreenVideoRef.current?.srcObject) {
-      persistentScreenVideoRef.current.srcObject = null;
-    }
-    if (screenVideoRef.current?.srcObject) {
-      screenVideoRef.current.srcObject = null;
-    }
-    if (isElectron) {
-      setNormalMode().catch(() => undefined);
-    }
-  };
+  /** [Whiteboard | handle | Capture]: `whiteboardPanelWidth` is the left strip when screen is shared, else the right strip. */
+  const handleMainPanelResize = useCallback((delta: number) => {
+    splitPanelDragActiveRef.current = true;
+    const contentW = contentAreaRef.current?.offsetWidth ?? 0;
+    const maxW = contentW > 0 ? contentW - 54 : Math.max(600, window.innerWidth - 480);
+    const d = activeScreenStream ? delta : -delta;
+    const next = Math.max(40, Math.min(maxW, Math.round(whiteboardPanelWidthRef.current + d)));
+    if (next === whiteboardPanelWidthRef.current) return;
+    whiteboardPanelWidthRef.current = next;
+    contentAreaRef.current?.style.setProperty(DW_SPLIT_PANEL_VAR, `${next}px`);
+  }, [activeScreenStream]);
+
+  const handleMainPanelResizeEnd = useCallback(() => {
+    const w = whiteboardPanelWidthRef.current;
+    splitPanelDragActiveRef.current = false;
+    setWhiteboardPanelWidth(w);
+    requestAnimationFrame(() => {
+      contentAreaRef.current?.style.removeProperty(DW_SPLIT_PANEL_VAR);
+    });
+  }, []);
+
+  /** Window/content resize: clamp split width and clear CSS var so fixed px width can’t fight flex (was “whiteboard zooming” on resize). */
+  useLayoutEffect(() => {
+    const root = contentAreaRef.current;
+    if (!root) return;
+    let raf = 0;
+    const onContentSizeChange = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (splitPanelDragActiveRef.current) return;
+        const cw = root.offsetWidth;
+        if (cw <= 0) return;
+        setContentAreaSplitWidth(cw);
+        const maxW = Math.max(40, cw - 54);
+        root.style.removeProperty(DW_SPLIT_PANEL_VAR);
+        setWhiteboardPanelWidth((w) => {
+          const next = Math.min(maxW, Math.max(40, w));
+          if (next === w) return w;
+          whiteboardPanelWidthRef.current = next;
+          return next;
+        });
+      });
+    };
+    const ro = new ResizeObserver(onContentSizeChange);
+    ro.observe(root);
+    window.addEventListener("resize", onContentSizeChange);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      window.removeEventListener("resize", onContentSizeChange);
+    };
+  }, []);
+
+  const handleOutputResize = useCallback((delta: number) => {
+    setOutputHeight((h) =>
+      Math.max(120, Math.min(Math.round(window.innerHeight * 0.7), Math.round(h - delta)))
+    );
+  }, []);
 
   const captureScreen = async () => {
+    if (captureScreenInFlightRef.current) return;
+    captureScreenInFlightRef.current = true;
     setCaptureError(null);
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setCaptureError("Screen capture is not available. Use HTTPS or localhost.");
-      return;
-    }
-    const applyCapturedStream = (stream: MediaStream) => {
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.onended = () => {
-          setPreviewScreenStream((s) => (s === stream ? null : s));
-          setWhiteboardScreenStream((w) => (w === stream ? null : w));
-          if (isElectron && !isRecording) setNormalMode().catch(() => undefined);
-        };
-      }
-      setWhiteboardScreenStream(stream);
-      setPreviewScreenStream(stream);
-      setWhiteboardPanelWidth(40); // Show minimal whiteboard bar when Capture Screen is main
-      setShowTeleprompter(false);
-      setTeleprompterPlaying(false);
-      setShowPip(true);
-      // Auto-start camera when capturing so user can record immediately
-      if (!cameraStream && navigator.mediaDevices?.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ video: true }).then((camStream) => {
-          setCameraStream(camStream);
-          setCaptureError(null);
-        }).catch(() => {});
-      }
-    };
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
-      applyCapturedStream(stream);
-    } catch (err: unknown) {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        setCaptureError("Screen capture is not available. Use HTTPS or localhost.");
+        return;
+      }
+      const applyCapturedStream = (stream: MediaStream) => {
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack) {
+          videoTrack.onended = () => {
+            setPreviewScreenStream((s) => (s === stream ? null : s));
+            setWhiteboardScreenStream((w) => (w === stream ? null : w));
+            if (isElectron && !isRecording) setNormalMode().catch(() => undefined);
+          };
+        }
+        setWhiteboardScreenStream(stream);
+        setPreviewScreenStream(stream);
+        setWhiteboardPanelWidth(40); // Show minimal whiteboard bar when Capture Screen is main
+        setShowTeleprompter(false);
+        setTeleprompterPlaying(false);
+        setShowPip(true);
+        if (!cameraStream && navigator.mediaDevices?.getUserMedia) {
+          navigator.mediaDevices.getUserMedia({ video: true }).then((camStream) => {
+            setCameraStream(camStream);
+            setCaptureError(null);
+          }).catch(() => {});
+        }
+      };
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
+          audio: true,
         });
         applyCapturedStream(stream);
-      } catch (err2: unknown) {
-        const msg =
-          err2 instanceof Error
-            ? err2.message
-            : "Permission denied";
+      } catch (e) {
+        if (isDisplayMediaUserCancellation(e)) {
+          setCaptureError(null);
+          return;
+        }
+        const msg = e instanceof Error ? e.message : "Permission denied";
         setCaptureError(
           msg.includes("denied") || msg.includes("NotAllowed")
             ? "Screen capture denied. On macOS, enable Screen Recording for this app in System Settings → Privacy & Security."
             : msg
         );
       }
+    } finally {
+      captureScreenInFlightRef.current = false;
     }
   };
 
@@ -2195,6 +2319,69 @@ export default function App() {
       mr.stop();
     }
   };
+
+  const performStopScreenShare = () => {
+    if (isRecording) {
+      stopRecording();
+    }
+    const stream = whiteboardScreenStream ?? previewScreenStream;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+    }
+    setWhiteboardScreenStream(null);
+    setPreviewScreenStream(null);
+    if (persistentScreenVideoRef.current?.srcObject) {
+      persistentScreenVideoRef.current.srcObject = null;
+    }
+    if (screenVideoRef.current?.srcObject) {
+      screenVideoRef.current.srcObject = null;
+    }
+    if (isElectron) {
+      setNormalMode().catch(() => undefined);
+    }
+  };
+
+  const stopScreenShare = () => {
+    const stream = whiteboardScreenStream ?? previewScreenStream;
+    if (!stream) return;
+    if (screenShareStopPhase !== "idle") return;
+
+    const reducedMotion =
+      typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) {
+      performStopScreenShare();
+      return;
+    }
+
+    setScreenShareStopPhase("exiting");
+    screenShareExitTimerRef.current = window.setTimeout(() => {
+      screenShareExitTimerRef.current = null;
+      performStopScreenShare();
+      setScreenShareStopPhase("restoring");
+      screenShareRestoreTimerRef.current = window.setTimeout(() => {
+        screenShareRestoreTimerRef.current = null;
+        setScreenShareStopPhase("idle");
+      }, SCREEN_SHARE_RESTORE_MS);
+    }, SCREEN_SHARE_EXIT_MS);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (screenShareExitTimerRef.current) clearTimeout(screenShareExitTimerRef.current);
+      if (screenShareRestoreTimerRef.current) clearTimeout(screenShareRestoreTimerRef.current);
+    };
+  }, []);
+
+  /** Stream ended from OS while our exit animation is running — don’t leave phase stuck. */
+  useEffect(() => {
+    if (!activeScreenStream && screenShareStopPhase === "exiting") {
+      if (screenShareExitTimerRef.current) {
+        clearTimeout(screenShareExitTimerRef.current);
+        screenShareExitTimerRef.current = null;
+      }
+      setScreenShareStopPhase("idle");
+    }
+  }, [activeScreenStream, screenShareStopPhase]);
 
   const pauseRecording = () => {
     const mr = mediaRecorderRef.current;
@@ -3058,6 +3245,21 @@ export default function App() {
         </header>
   );
 
+  /** Split affordance hints: narrow pane → show fade (see SplitAffordanceHint). */
+  const contentWForSplit =
+    contentAreaSplitWidth > 0
+      ? contentAreaSplitWidth
+      : (contentAreaRef.current?.offsetWidth ?? contentAreaPrevRectRef.current?.w ?? 0);
+  const whiteboardTrackW = activeScreenStream
+    ? whiteboardPanelWidth
+    : Math.max(0, contentWForSplit - 14 - whiteboardPanelWidth);
+  /** At 40px min strip, hints must stay (stable “door”); wider cap keeps hints for medium-narrow strips. */
+  const stripAtMin = whiteboardPanelWidth <= 40;
+  const showExcalidrawAffordance =
+    (activeScreenStream && stripAtMin) || (whiteboardTrackW > 0 && whiteboardTrackW < 360);
+  const showScreenAffordance =
+    (!activeScreenStream && stripAtMin) || (!activeScreenStream && whiteboardPanelWidth < 320);
+
   return (
     <>
       {typeof document !== "undefined" && createPortal(headerEl, document.getElementById("dreamwork-header-root") ?? document.body)}
@@ -3167,7 +3369,8 @@ export default function App() {
         autoPlay
         muted
         playsInline
-        className="fixed -z-50 size-0 opacity-0 pointer-events-none"
+        className="fixed pointer-events-none opacity-0"
+        style={{ width: 2, height: 2, left: -9999, top: 0, zIndex: -50 }}
         aria-hidden
       />
       {/* Persistent camera source: keep active during recording to avoid decode drops (readyState=0 flashes). */}
@@ -3207,14 +3410,29 @@ export default function App() {
         )}
         {showSettings &&
           createPortal(
-            <div className="fixed inset-y-0 right-0 z-[1000000] w-[360px] min-w-[360px] border-l border-slate-200 bg-white shadow-xl" data-dreamwork-no-intercept>
+            <div className="fixed inset-0 z-[1000000] flex justify-end" data-dreamwork-no-intercept>
+              <button
+                type="button"
+                className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px] transition-opacity motion-reduce:transition-none"
+                aria-label="Close settings"
+                onClick={() => setShowSettings(false)}
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="dreamwork-settings-title"
+                className="relative flex h-full w-[360px] min-w-[360px] flex-col border-l border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out motion-reduce:transition-none"
+              >
               <div className="flex h-full flex-col overflow-y-auto p-5 text-slate-900">
                 <div className="mb-5 flex items-center justify-between">
-                  <span className="text-lg font-semibold text-slate-900 tracking-tight">Settings</span>
+                  <span id="dreamwork-settings-title" className="text-lg font-semibold text-slate-900 tracking-tight">
+                    Settings
+                  </span>
                   <button
                     type="button"
                     onClick={() => setShowSettings(false)}
                     className="rounded p-1 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    aria-label="Close settings"
                   >
                     ×
                   </button>
@@ -3250,6 +3468,7 @@ export default function App() {
                   letterboxMode={letterboxMode}
                   onLetterboxModeChange={setLetterboxMode}
                 />
+              </div>
               </div>
             </div>,
             document.body
@@ -3288,10 +3507,16 @@ export default function App() {
             {/* Whiteboard: main when no screen, mini (40px bar) when screen selected */}
             <div
               ref={fullPageContentRef}
-              className={`relative z-10 flex min-h-0 sector-card overflow-hidden bg-white pr-1 ${
-                activeScreenStream ? "shrink-0 min-w-0" : "flex-1"
+              className={`relative z-10 flex min-h-0 min-w-0 sector-card overflow-hidden bg-white pr-1 ${
+                activeScreenStream ? "shrink-0" : "flex-1"
+              } ${activeScreenStream && windowLiveResize ? "transition-none" : ""} ${
+                screenShareStopPhase === "restoring" && !activeScreenStream ? "dreamwork-whiteboard-restore-in" : ""
               }`}
-              style={activeScreenStream ? { width: whiteboardPanelWidth } : undefined}
+              style={
+                activeScreenStream
+                  ? { width: `var(${DW_SPLIT_PANEL_VAR}, ${whiteboardPanelWidth}px)` }
+                  : undefined
+              }
             >
               {/* Excalidraw stays mounted at all widths — user content must never be lost due to layout. */}
               <div className="absolute inset-0 z-[1] min-h-0 min-w-0">
@@ -3301,49 +3526,41 @@ export default function App() {
                   onExcalidrawReady={handleExcalidrawReady}
                 />
               </div>
-              {(() => {
-                const contentW = contentAreaRef.current?.offsetWidth ?? contentAreaPrevRectRef.current?.w ?? 0;
-                const whiteboardWidth = activeScreenStream ? whiteboardPanelWidth : Math.max(0, contentW - 14 - whiteboardPanelWidth);
-                if (whiteboardWidth >= 240) return null;
-                return (
-                  <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1 overflow-hidden rounded-xl bg-slate-50 m-1 p-1 pointer-events-none">
-                    <span className="text-[9px] text-gray-500 truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                      drag
-                    </span>
-                    <span className="text-[9px] text-gray-600 font-medium truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                      Excalidraw
-                    </span>
-                    <span className="text-slate-500 text-sm">→</span>
-                  </div>
-                );
-              })()}
+              <SplitAffordanceHint
+                show={showExcalidrawAffordance}
+                variant="excalidraw"
+                minStrip={!!activeScreenStream && stripAtMin}
+              />
             </div>
             <ResizeHandle
               direction="horizontal"
-              className={`relative z-20 shrink-0 ${isRecording && !activeScreenStream ? "invisible" : ""}`}
+              className={`relative z-20 shrink-0 transition-opacity duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                isRecording && !activeScreenStream ? "invisible" : ""
+              } ${screenShareStopPhase === "exiting" && activeScreenStream ? "pointer-events-none opacity-0" : "opacity-100"}`}
               data-dreamwork-no-intercept
-              onResize={(d) => {
-                const contentW = contentAreaRef.current?.offsetWidth ?? 0;
-                const maxW = contentW > 0 ? contentW - 54 : Math.max(600, window.innerWidth - 480);
-                // Layout: [Whiteboard left] [Handle] [Capture Screen right].
-                // activeScreenStream: whiteboardPanelWidth = left. Drag left → shrink left (w+d, d<0). Drag right → grow left (w+d, d>0).
-                // !activeScreenStream: whiteboardPanelWidth = right. Drag left → grow right (w-d, d<0). Drag right → shrink right (w-d, d>0).
-                const delta = activeScreenStream ? d : -d;
-                setWhiteboardPanelWidth((w) => Math.max(40, Math.min(maxW, w + delta)));
-              }}
+              onResize={handleMainPanelResize}
+              onResizeEnd={handleMainPanelResizeEnd}
             />
             {/* Capture Screen: main when screen selected, mini (40px bar) when whiteboard-only */}
             <div
               ref={activeScreenStream ? previewRef : screenMiniStripRef}
-              className={`relative flex min-h-0 overflow-hidden rounded-2xl border-2 border-black bg-slate-900 pl-1 ${
+              className={`relative flex min-h-0 min-w-0 overflow-hidden rounded-2xl border-2 border-black bg-slate-900 transition-[opacity,transform,filter] duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 activeScreenStream ? "flex-1" : "shrink-0"
+              } ${
+                screenShareStopPhase === "exiting" && activeScreenStream
+                  ? "pointer-events-none scale-[0.985] opacity-0 blur-[2px]"
+                  : ""
               }`}
-              style={!activeScreenStream ? { width: whiteboardPanelWidth } : undefined}
+              style={
+                !activeScreenStream
+                  ? { width: `var(${DW_SPLIT_PANEL_VAR}, ${whiteboardPanelWidth}px)` }
+                  : undefined
+              }
               onPointerDownCapture={handlePreviewPointerDown}
             >
               <video
                 ref={screenVideoRef}
-                className="block size-full object-contain"
+                className="block min-h-0 min-w-0 size-full object-contain"
                 autoPlay
                 muted
                 playsInline
@@ -3360,17 +3577,11 @@ export default function App() {
                   }}
                 />
               )}
-              {!activeScreenStream && whiteboardPanelWidth < 160 && (
-                <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1 overflow-hidden rounded-xl bg-slate-800 p-1 text-center pointer-events-none m-1">
-                  <span className="text-[9px] text-gray-400 truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                    drag
-                  </span>
-                  <span className="text-[9px] text-gray-300 font-medium truncate" style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                    Screen
-                  </span>
-                  <span className="text-slate-400 text-sm">←</span>
-                </div>
-              )}
+              <SplitAffordanceHint
+                show={showScreenAffordance}
+                variant="screen"
+                minStrip={!activeScreenStream && stripAtMin}
+              />
               {showPip && (
                 <div
                   className="absolute z-10 cursor-grab touch-none"
@@ -3470,14 +3681,7 @@ export default function App() {
         {showOutput && recordedClips.length > 0 && !isRecording && (
           <>
             {!outputCollapsed && (
-              <ResizeHandle
-                direction="vertical"
-                onResize={(d) =>
-                  setOutputHeight((h) =>
-                    Math.max(120, Math.min(Math.round(window.innerHeight * 0.7), h - d))
-                  )
-                }
-              />
+              <ResizeHandle direction="vertical" onResize={handleOutputResize} />
             )}
             <div
               className="glass-panel mx-4 mb-4 flex shrink-0 flex-col overflow-hidden rounded-xl transition-[height] duration-200 ease-out cursor-pointer"

@@ -1,9 +1,9 @@
 # DreamWorks
 
-> Lightweight screen recorder with circular webcam PiP, whiteboard, and live meeting. Built with Electron + React.  
-> 轻量级录屏 + 圆形摄像头画中画 + 白板 + 在线会议。基于 Electron + React 构建。
+> Experience-first screen recorder with circular webcam PiP, whiteboard, and live meeting. Built with Electron + React — a full desktop shell, not a minimal byte-sized utility.  
+> 体验型录屏：圆形摄像头画中画、白板、在线会议。基于 Electron + React（完整桌面壳，安装体积大，不以「几 MB 极简」为卖点）。
 
-![DreamWorks 主界面](docs/screenshots/main-interface.png)
+DreamWorks 主界面
 
 ---
 
@@ -47,7 +47,8 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 
 ### 功能概览
 
-1. **Capture Screen** — 系统选择器选择屏幕、窗口或应用
+1. **Capture Screen** — 使用**系统原生**屏幕/窗口选取界面（macOS 为 Apple UI）。整屏请在原生界面中选**显示器 / Desktop**（通常在上方或顶栏），不要只选当前应用窗口。
+  - **浏览器 (仅网页)**：使用浏览器自带的屏幕共享界面。
 2. **Start Camera** — 圆形画中画，可拖拽调整位置
 3. **Whiteboard** — Excalidraw 白板，支持绘图、标注
 4. **Live Meeting** — WebRTC 视频会议，支持聊天、屏幕共享、录制、虚拟背景、实时转录
@@ -65,10 +66,10 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 
 #### 图片与存储（不丢贴图 / 纹理）
 
-- **多项目**：白板以 `whiteboardProjects` 存盘；单项目内保留 `elements`、`appState`、可选的 **`files`**（嵌入图片等二进制映射）。
-- **`dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 **`whiteboardTexture`**（纸纹 id）与完整 **`files`**，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
-- **`latestSceneRef`**：在 React 重渲染或 API 暂不可用时，仍能拿到最近一次场景的 **elements / appState / files**，供 **flush** 与导出使用。
-- **持久化节奏**：结构性改动较快落盘；纯视口类变化可 **`requestIdleCallback` + rAF** 延后写入。Web 上磁盘写入 **`setTimeout(0)` 微延迟**，减轻 `JSON.stringify` 与 storage 同步卡住下一帧平移；**flushPersist**（切项目、页签隐藏、`beforeunload`、卸载）仍 **同步队列**，保证退出前数据一致。
+- **多项目**：白板以 `whiteboardProjects` 存盘；单项目内保留 `elements`、`appState`、可选的 `**files`**（嵌入图片等二进制映射）。
+- `**dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 `**whiteboardTexture`**（纸纹 id）与完整 `**files**`，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
+- `**latestSceneRef**`：在 React 重渲染或 API 暂不可用时，仍能拿到最近一次场景的 **elements / appState / files**，供 **flush** 与导出使用。
+- **持久化节奏**：结构性改动较快落盘；纯视口类变化可 `**requestIdleCallback` + rAF** 延后写入。Web 上磁盘写入 `**setTimeout(0)` 微延迟**，减轻 `JSON.stringify` 与 storage 同步卡住下一帧平移；**flushPersist**（切项目、页签隐藏、`beforeunload`、卸载）仍 **同步队列**，保证退出前数据一致。
 
 #### 录制时摄像头与白板的 CPU/GPU 权衡
 
@@ -76,7 +77,7 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 - **非录制时省绘制**：全屏白板且未在录制时，**跳过**对大面积离屏合成的空闲重绘，把算力留给画布与指针。
 - **画中画采样**：白板录制优先走 **门户内可见 `video` 直出**，并省略仅用于防抖的 **mirror cache** 填充路径，减少重复 `drawImage` 与格式转换。
 - **发光 / 装饰**：白板录制时段 **抑制重阴影（glow）**，减轻合成与 GPU 混合成本。
-- **白板位图来源**：录制侧在可能的情况下 stack 视口内多层 canvas，并按需 **`exportToCanvas`**；导出节奏与白板是否带摄像头等条件平衡，避免与合成环路同时打满。
+- **白板位图来源**：录制侧在可能的情况下 stack 视口内多层 canvas，并按需 `**exportToCanvas`**；导出节奏与白板是否带摄像头等条件平衡，避免与合成环路同时打满。
 
 ---
 
@@ -100,14 +101,16 @@ npm run dev
 **Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
 
 **构建 macOS 应用：**
+
 - `npm run pack` — 生成 `.app`，输出至 `release/mac-arm64/DreamWorks.app`（可直接双击运行）
 - `npm run dist` — 生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`
 
 ### 截图
 
-| 主界面 | Live Meeting | 录制与导出 |
-|--------|--------------|------------|
-| ![主界面](docs/screenshots/main.png) | ![Live Meeting](docs/screenshots/live-meeting.png) | ![录制与导出](docs/screenshots/recording.png) |
+
+| 主界面           | Live Meeting     | 录制与导出   |
+| ------------- | ---------------- | ------- |
+| 主界面           | Live Meeting     | 录制与导出   |
 | 录屏 + 画中画 + 白板 | 视频会议界面（Local 模式） | 录制控制与导出 |
 
 
@@ -165,7 +168,7 @@ Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
 
 ### Features
 
-1. **Capture Screen** — System picker for screen, window, or app
+1. **Capture Screen** — Native OS screen/window picker. Browser build uses the browser’s picker.
 2. **Start Camera** — Circular PiP, draggable
 3. **Whiteboard** — Excalidraw overlay for drawing and annotation
 4. **Live Meeting** — WebRTC video calls with chat, screen share, recording, virtual backgrounds, live transcription
@@ -183,10 +186,10 @@ This section summarizes how we integrate **Excalidraw**: keep the canvas respons
 
 #### Images & storage (no lost embeds / texture)
 
-- **Projects:** Boards are stored under **`whiteboardProjects`**; each project keeps `elements`, `appState`, and optional **`files`** (binary map for pasted images, etc.).
-- **`dreamwork` backup:** `data.dreamwork` redundantly stores **`whiteboardTexture`** (texture id) and the full **`files`** map when needed, so a slim serialization path doesn’t drop blobs.
-- **`latestSceneRef`:** Holds the latest **elements / appState / files** even when React or the API is between states—used for **flush** paths and exports.
-- **Persistence pacing:** Structural edits flush sooner; view-only changes may use **`requestIdleCallback` + rAF**. On the web, disk writes are **deferred one macrotask** to keep the next pan smooth; **`flushPersist`** (project switch, tab hidden, `beforeunload`, unmount) still runs **synchronously** so data is consistent on exit.
+- **Projects:** Boards are stored under `**whiteboardProjects`**; each project keeps `elements`, `appState`, and optional `**files**` (binary map for pasted images, etc.).
+- `**dreamwork` backup:** `data.dreamwork` redundantly stores `**whiteboardTexture`** (texture id) and the full `**files**` map when needed, so a slim serialization path doesn’t drop blobs.
+- `**latestSceneRef`:** Holds the latest **elements / appState / files** even when React or the API is between states—used for **flush** paths and exports.
+- **Persistence pacing:** Structural edits flush sooner; view-only changes may use `**requestIdleCallback` + rAF**. On the web, disk writes are **deferred one macrotask** to keep the next pan smooth; `**flushPersist`** (project switch, tab hidden, `beforeunload`, unmount) still runs **synchronously** so data is consistent on exit.
 
 #### CPU/GPU trade-offs while recording (camera vs whiteboard)
 
@@ -194,7 +197,7 @@ This section summarizes how we integrate **Excalidraw**: keep the canvas respons
 - **Idle work:** When **not** recording, full-page whiteboard mode **skips** expensive idle composite repaints so the canvas stays prioritized.
 - **PiP sampling:** For whiteboard recording we prefer **drawing straight from the visible portal `<video>`** and **skip filling** the mirror-only canvas cache path when possible, cutting redundant `drawImage` work.
 - **Decorations:** **Heavy glow / shadow** around the PiP is **suppressed** during whiteboard recording to reduce blending cost.
-- **Board pixels for the encoder:** The recorder may prefer stacking **in-viewport canvases** and periodically **`exportToCanvas`**, tuned so export bursts don’t align every frame with the composite loop.
+- **Board pixels for the encoder:** The recorder may prefer stacking **in-viewport canvases** and periodically `**exportToCanvas`**, tuned so export bursts don’t align every frame with the composite loop.
 
 ---
 
@@ -218,14 +221,16 @@ The app opens in an Electron window.
 **Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
 
 **Build for macOS:**
+
 - `npm run pack` — Produces `.app` in `release/mac-arm64/DreamWorks.app` (double-click to run)
 - `npm run dist` — Produces `.dmg` and `.zip` installers in `release/`
 
 ### Screenshots
 
-| Main UI | Live Meeting | Recording & Export |
-|---------|--------------|--------------------|
-| ![Main UI](docs/screenshots/main.png) | ![Live Meeting](docs/screenshots/live-meeting.png) | ![Recording](docs/screenshots/recording.png) |
+
+| Main UI                   | Live Meeting               | Recording & Export            |
+| ------------------------- | -------------------------- | ----------------------------- |
+| Main UI                   | Live Meeting               | Recording                     |
 | Screen + PiP + Whiteboard | Video meeting (Local mode) | Recording controls and export |
 
 

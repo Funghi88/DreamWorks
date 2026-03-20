@@ -20,7 +20,11 @@ class AppErrorBoundary extends Component<
   render() {
     if (this.state.error) {
       return (
-        <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-100 p-8">
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-100 p-8"
+        >
           <h1 className="text-xl font-semibold text-slate-800">Something went wrong</h1>
           <pre className="max-w-2xl overflow-auto rounded-lg bg-slate-200 p-4 text-left text-sm text-red-700">
             {this.state.error.message}
@@ -28,6 +32,7 @@ class AppErrorBoundary extends Component<
           <button
             type="button"
             className="rounded-lg bg-slate-700 px-4 py-2 text-white hover:bg-slate-800"
+            autoFocus
             onClick={() => window.location.reload()}
           >
             Reload
