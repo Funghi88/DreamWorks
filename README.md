@@ -5,6 +5,8 @@
 
 DreamWorks 主界面
 
+![DreamWorks 主界面](docs/screenshots/main-interface.png)
+
 ---
 
 ## 中文
