@@ -104,6 +104,9 @@ export interface StoredSettings {
   teleprompterOpacity?: number;
   teleprompterWidth?: number;
   teleprompterHeight?: number;
+  /** Control panel (editor) size — separate from floating overlay width/height */
+  teleprompterPanelWidth?: number;
+  teleprompterPanelHeight?: number;
 }
 
 export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
@@ -297,6 +300,8 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterOpacity: typeof p.teleprompterOpacity === "number" && p.teleprompterOpacity >= 0.35 && p.teleprompterOpacity <= 1 ? p.teleprompterOpacity : undefined,
     teleprompterWidth: validNum(p.teleprompterWidth, 320, 900),
     teleprompterHeight: validNum(p.teleprompterHeight, 180, 500),
+    teleprompterPanelWidth: validNum(p.teleprompterPanelWidth, 280, 920),
+    teleprompterPanelHeight: validNum(p.teleprompterPanelHeight, 320, 900),
   };
 }
 

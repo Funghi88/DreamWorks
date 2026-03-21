@@ -72,6 +72,7 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 - `**dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 `**whiteboardTexture`**（纸纹 id）与完整 `**files**`，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
 - `**latestSceneRef**`：在 React 重渲染或 API 暂不可用时，仍能拿到最近一次场景的 **elements / appState / files**，供 **flush** 与导出使用。
 - **持久化节奏**：结构性改动较快落盘；纯视口类变化可 `**requestIdleCallback` + rAF** 延后写入。Web 上磁盘写入 `**setTimeout(0)` 微延迟**，减轻 `JSON.stringify` 与 storage 同步卡住下一帧平移；**flushPersist**（切项目、页签隐藏、`beforeunload`、卸载）仍 **同步队列**，保证退出前数据一致。
+- **Electron 与 Web 同一路径落盘**：自动保存统一为 `saveWhiteboardProjects(loadSettings(), …)` + `saveSettings` 同步合并，**不再**在 Electron 分支用 `loadSettingsAsync().then(...)` 拼盘，避免异步读盘与连续保存竞态把 `whiteboardProjects` 覆盖成旧快照（曾可能导致「白板内容消失」的观感）。
 
 #### 录制时摄像头与白板的 CPU/GPU 权衡
 

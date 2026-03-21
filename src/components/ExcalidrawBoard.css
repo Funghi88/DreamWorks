@@ -1,3 +1,9 @@
+/* Fill column height — avoid a blank band above the canvas when flex/absolute chains break. */
+.dreamwork-whiteboard-touch .excalidraw {
+  height: 100% !important;
+  min-height: 0 !important;
+}
+
 /* When using a paper texture, Excalidraw must stay visually transparent so the canvas can show the layer behind. */
 .dreamwork-whiteboard-has-paper .excalidraw {
   background-color: transparent !important;

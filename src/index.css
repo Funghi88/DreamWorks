@@ -114,11 +114,31 @@
 }
 
 @layer base {
+  /* Single scroll surface: avoid body + inner .glass-bg both scrolling ("滑动错乱"). */
+  html {
+    height: 100%;
+    overflow: hidden;
+  }
   * {
     @apply border-border outline-ring/50;
   }
   body {
     @apply bg-background text-foreground font-sans antialiased;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+  #root {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+/* Auto-dismiss capture error: no motion → instant hide at timeout (JS skips exit phase). */
+@media (prefers-reduced-motion: reduce) {
+  .dreamwork-capture-error-banner {
+    transition: none !important;
   }
 }
 

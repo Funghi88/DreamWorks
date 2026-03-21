@@ -186,7 +186,7 @@ app.on("window-all-closed", () => {
 // IPC: setCompactMode
 ipcMain.handle("setCompactMode", async (_, position, width, height) => {
   const win = BrowserWindow.getFocusedWindow() || mainWindow;
-  if (!win) return;
+  if (!win || win.isDestroyed()) return;
   win.setMinimumSize(240, 96);
   win.setSize(width, height);
   win.setAlwaysOnTop(true);
@@ -223,14 +223,13 @@ ipcMain.handle("setCompactMode", async (_, position, width, height) => {
   win.focus();
 });
 
-// IPC: setNormalMode
+// IPC: setNormalMode — undo compact-window chrome only; never call setBounds/setSize (preserve user size / fullscreen after recording or stop share).
 ipcMain.handle("setNormalMode", async () => {
   const win = BrowserWindow.getFocusedWindow() || mainWindow;
-  if (!win) return;
+  if (!win || win.isDestroyed()) return;
   win.setAlwaysOnTop(false);
   win.setResizable(true);
   win.setSkipTaskbar(false);
-  win.setSize(1000, 700);
   win.setMinimumSize(800, 600);
 });
 

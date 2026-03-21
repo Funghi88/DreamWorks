@@ -1,5 +1,5 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, memo } from "react";
 import { GlassButton } from "@/components/Glass";
 
 interface AnchorRect {
@@ -58,6 +58,10 @@ interface TeleprompterPanelProps {
   nearCamera: boolean;
   locked: boolean;
   position: { x: number; y: number } | null;
+  /** Editor panel dimensions (persisted). */
+  panelWidth: number;
+  panelHeight: number;
+  onPanelSizeChange: (width: number, height: number) => void;
   onSetScript: (value: string) => void;
   onSetPlaying: (playing: boolean) => void;
   onSetSpeed: (value: number) => void;
@@ -196,7 +200,7 @@ function useTeleprompterScroll({
   return { viewportRef, scrollContentRef, reset, addScrollDelta };
 }
 
-export function TeleprompterOverlay({
+export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   isVisible,
   script,
   isPlaying,
@@ -412,7 +416,7 @@ export function TeleprompterOverlay({
   return (
     <div
       data-dreamwork-no-intercept
-      className="fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+      className="!fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
       style={{ width: clampedWidth, maxWidth: "calc(100vw - 24px)", height: clampedHeight, left, top, opacity }}
       aria-hidden
     >
@@ -451,14 +455,17 @@ export function TeleprompterOverlay({
         role="button"
         tabIndex={0}
         onPointerDown={onResizePointerDown}
-        className={`absolute bottom-0 right-0 z-30 h-4 w-4 cursor-se-resize ${locked ? "pointer-events-none opacity-50" : "hover:bg-white/10"}`}
-        style={{ background: "linear-gradient(135deg, transparent 45%, rgba(255,255,255,.4) 45%)" }}
+        className={`absolute bottom-0 right-0 z-30 h-[18px] w-[18px] cursor-se-resize rounded-br-xl ${locked ? "pointer-events-none opacity-40" : "hover:bg-white/[0.06]"}`}
+        style={{
+          background:
+            "linear-gradient(to top left, rgba(255,255,255,.28) 0%, rgba(255,255,255,.28) 42%, transparent 42.5%)",
+        }}
         title="Drag to resize"
         aria-label="Resize overlay"
       />
     </div>
   );
-}
+});
 
 export function TeleprompterPanel({
   isVisible,
@@ -477,6 +484,9 @@ export function TeleprompterPanel({
   nearCamera,
   locked,
   position,
+  panelWidth,
+  panelHeight,
+  onPanelSizeChange,
   onSetScript,
   onSetPlaying,
   onSetSpeed,
@@ -495,11 +505,32 @@ export function TeleprompterPanel({
   const [editingScriptName, setEditingScriptName] = useState(false);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const saveAsRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const scrollTopByScriptRef = useRef<Record<string, number>>({});
+  const scriptPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentScript = scripts.find((s) => s.id === activeScriptId);
+  /** Local draft: avoid lifting every keystroke to App (heavy re-renders + settings effect). */
+  const [draftScript, setDraftScript] = useState(script);
+
+  useEffect(() => {
+    setDraftScript(script);
+  }, [activeScriptId]);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (ta && document.activeElement === ta) return;
+    setDraftScript(script);
+  }, [script]);
+
+  useEffect(() => {
+    return () => {
+      if (scriptPushTimerRef.current != null) clearTimeout(scriptPushTimerRef.current);
+    };
+  }, []);
 
   const downloadScript = useCallback(
     (ext: "md" | "txt") => {
-      const content = script;
+      const content = draftScript;
       const name = (currentScript?.name ?? "script").replace(/[<>:"/\\|?*]/g, "_");
       const filename = `${name}.${ext}`;
       const mime = ext === "md" ? "text/markdown" : "text/plain";
@@ -512,8 +543,16 @@ export function TeleprompterPanel({
       URL.revokeObjectURL(url);
       setSaveAsOpen(false);
     },
-    [script, currentScript?.name]
+    [draftScript, currentScript?.name]
   );
+
+  const flushDraftToParent = useCallback(() => {
+    if (scriptPushTimerRef.current != null) {
+      clearTimeout(scriptPushTimerRef.current);
+      scriptPushTimerRef.current = null;
+    }
+    onSetScript(draftScript);
+  }, [draftScript, onSetScript]);
 
   useEffect(() => {
     if (!saveAsOpen) return;
@@ -525,16 +564,22 @@ export function TeleprompterPanel({
   }, [saveAsOpen]);
   const autoMinimizeTimerRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const scrollTopByScriptRef = useRef<Record<string, number>>({});
   const draggingRef = useRef(false);
   const lastPointerDuringDragRef = useRef({ x: 0, y: 0 });
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const panelLivePosRef = useRef<{ x: number; y: number } | null>(null);
   const [panelLivePos, setPanelLivePos] = useState<{ x: number; y: number } | null>(null);
+  const [panelSize, setPanelSize] = useState({ w: panelWidth, h: panelHeight });
+  const panelSizeRef = useRef(panelSize);
+  panelSizeRef.current = panelSize;
+  const panelResizingRef = useRef(false);
 
-  const expandedWidth = 380;
-  const expandedHeight = 420;
+  useEffect(() => {
+    setPanelSize({ w: panelWidth, h: panelHeight });
+  }, [panelWidth, panelHeight]);
+
+  const expandedWidth = panelSize.w;
+  const expandedHeight = panelSize.h;
   const collapsedWidth = 230;
   const collapsedHeight = 44;
   const viewport = getViewportSize();
@@ -607,8 +652,8 @@ export function TeleprompterPanel({
     const onMove = (ev: PointerEvent) => {
       if (!draggingRef.current) return;
       lastPointerDuringDragRef.current = { x: ev.clientX, y: ev.clientY };
-      const width = collapsed ? collapsedWidth : expandedWidth;
-      const height = collapsed ? collapsedHeight : expandedHeight;
+      const width = collapsed ? collapsedWidth : panelSizeRef.current.w;
+      const height = collapsed ? collapsedHeight : panelSizeRef.current.h;
       const vp = getViewportSize();
       const x = Math.max(8, Math.min(vp.width - width - 8, ev.clientX - dragOffsetRef.current.x));
       const y = Math.max(8, Math.min(vp.height - height - 8, ev.clientY - dragOffsetRef.current.y));
@@ -635,13 +680,50 @@ export function TeleprompterPanel({
     window.addEventListener("pointercancel", onUp);
   };
 
+  const onPanelResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (locked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearAutoMinimizeTimer();
+    panelResizingRef.current = true;
+    const startW = panelSizeRef.current.w;
+    const startH = panelSizeRef.current.h;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const target = e.currentTarget as HTMLElement;
+    if (target.setPointerCapture && e.pointerId != null) target.setPointerCapture(e.pointerId);
+    let lastW = startW;
+    let lastH = startH;
+    const onMove = (ev: PointerEvent) => {
+      if (!panelResizingRef.current) return;
+      const vp = getViewportSize();
+      const maxW = Math.min(920, vp.width - 16);
+      const maxH = Math.min(900, vp.height - 16);
+      const dx = ev.clientX - sx;
+      const dy = ev.clientY - sy;
+      lastW = Math.max(280, Math.min(maxW, startW + dx));
+      lastH = Math.max(320, Math.min(maxH, startH + dy));
+      setPanelSize({ w: lastW, h: lastH });
+    };
+    const onUp = () => {
+      panelResizingRef.current = false;
+      onPanelSizeChange(lastW, lastH);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
   if (!isVisible) return null;
   if (collapsed) {
     return (
       <div
         ref={panelRef}
         data-dreamwork-no-intercept
-        className="fixed z-[1000000] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
+        className="!fixed z-[1000000] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
         style={{ left, top }}
       >
         <div
@@ -673,7 +755,10 @@ export function TeleprompterPanel({
           <button
             type="button"
             className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px]"
-            onClick={onHide}
+            onClick={() => {
+              flushDraftToParent();
+              onHide();
+            }}
           >
             Hide
           </button>
@@ -692,12 +777,19 @@ export function TeleprompterPanel({
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
-      className="fixed z-[1000000] w-[min(380px,calc(100vw-24px))] rounded-xl border border-white/30 bg-black/70 p-2.5 text-[11px] text-white shadow-2xl backdrop-blur-md"
-      style={{ left, top }}
+      className="!fixed z-[1000000] box-border flex max-h-[calc(100vh-16px)] min-h-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/70 p-2.5 text-[11px] text-white shadow-2xl backdrop-blur-md"
+      style={{
+        left,
+        top,
+        width: panelSize.w,
+        height: panelSize.h,
+        maxWidth: "min(920px, calc(100vw - 16px))",
+      }}
       onMouseEnter={clearAutoMinimizeTimer}
       onMouseLeave={scheduleAutoMinimize}
     >
-      <div className="mb-1.5 flex items-center gap-2">
+      {/* Fixed chrome — never overlaps; body uses flex-1 + min-h-0 like Figma auto-layout */}
+      <div className="mb-1.5 flex shrink-0 items-center gap-2">
         <div
           className={`h-6 w-7 shrink-0 rounded border border-white/25 bg-black/45 text-center text-[10px] leading-6 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
           onPointerDown={onPanelDragDown}
@@ -715,7 +807,7 @@ export function TeleprompterPanel({
           {locked ? "Locked" : "Lock"}
         </button>
       </div>
-      <div className="mb-1.5 flex w-full min-w-0 flex-wrap gap-1">
+      <div className="mb-1.5 flex w-full min-w-0 shrink-0 flex-wrap gap-1">
         <GlassButton
           size="sm"
           className={tpActionClass}
@@ -730,11 +822,19 @@ export function TeleprompterPanel({
         <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={() => setCollapsed(true)}>
           Min
         </GlassButton>
-        <GlassButton size="sm" className={tpActionClass} variant="ghost" onClick={onHide}>
+        <GlassButton
+          size="sm"
+          className={tpActionClass}
+          variant="ghost"
+          onClick={() => {
+            flushDraftToParent();
+            onHide();
+          }}
+        >
           Hide
         </GlassButton>
       </div>
-      <div className="mb-2 flex w-full min-w-0 items-center gap-1">
+      <div className="mb-2 flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1">
         {editingScriptName ? (
           <input
             type="text"
@@ -758,7 +858,10 @@ export function TeleprompterPanel({
         ) : (
           <select
             value={activeScriptId}
-            onChange={(e) => onSwitchScript(e.target.value)}
+            onChange={(e) => {
+              flushDraftToParent();
+              onSwitchScript(e.target.value);
+            }}
             className={tpSelectClass}
           >
             {scripts.map((s) => (
@@ -768,7 +871,16 @@ export function TeleprompterPanel({
             ))}
           </select>
         )}
-        <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={onNewScript} title="New script">
+        <GlassButton
+          size="sm"
+          className={tpActionClass}
+          variant="secondary"
+          onClick={() => {
+            flushDraftToParent();
+            onNewScript();
+          }}
+          title="New script"
+        >
           New
         </GlassButton>
         <div ref={saveAsRef} className="relative shrink-0">
@@ -791,6 +903,7 @@ export function TeleprompterPanel({
                 className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
                 onClick={() => {
                   setSaveAsOpen(false);
+                  flushDraftToParent();
                   onSaveAsScript();
                 }}
               >
@@ -823,69 +936,131 @@ export function TeleprompterPanel({
           Rename
         </GlassButton>
       </div>
-      <textarea
-        ref={textareaRef}
-        value={script}
-        onChange={(e) => onSetScript(e.target.value)}
-        onBlur={() => onFlushSave?.()}
-        onFocus={() => {
-          const el = textareaRef.current;
-          const saved = scrollTopByScriptRef.current[activeScriptId];
-          if (el && saved != null) {
-            const maxScroll = el.scrollHeight - el.clientHeight;
-            if (maxScroll > 0 && el.scrollTop !== saved) {
-              el.scrollTop = Math.min(saved, maxScroll);
+
+      {/* Scroll body: stack is non-overlapping; short panels scroll as one column (auto-layout safe) */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+        <textarea
+          ref={textareaRef}
+          value={draftScript}
+          onChange={(e) => {
+            const v = e.target.value;
+            setDraftScript(v);
+            if (scriptPushTimerRef.current != null) clearTimeout(scriptPushTimerRef.current);
+            scriptPushTimerRef.current = setTimeout(() => {
+              scriptPushTimerRef.current = null;
+              onSetScript(v);
+            }, 120);
+          }}
+          onBlur={(e) => {
+            if (scriptPushTimerRef.current != null) {
+              clearTimeout(scriptPushTimerRef.current);
+              scriptPushTimerRef.current = null;
             }
-          }
-        }}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          scrollTopByScriptRef.current[activeScriptId] = el.scrollTop;
-          const max = el.scrollHeight - el.clientHeight;
-          if (max > 0) {
-            const ratio = el.scrollTop / max;
-            onEditorScroll?.(ratio);
-            onSetPlaying(false);
-          }
-        }}
-        className="mb-2 h-36 w-full resize-y rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
-        placeholder="Paste script here..."
-      />
-      <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[10px]">
-        <label className="col-span-2 flex flex-col gap-0.5">
-          <span className="text-white/90">Speed: {Math.round(speed)} px/s</span>
-          <input type="range" min={10} max={80} step={2} value={speed} onChange={(e) => onSetSpeed(Number(e.target.value))} />
-          <span className="text-[10px] text-white/55">
-            Ref: 30–40 news | 40–50 interview | 50–60 casual
-          </span>
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-white/90">Font: {Math.round(fontSize)} px</span>
-          <input type="range" min={18} max={52} step={1} value={fontSize} onChange={(e) => onSetFontSize(Number(e.target.value))} />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-white/90">Opacity: {opacity.toFixed(2)}</span>
-          <input type="range" min={0.35} max={1} step={0.01} value={opacity} onChange={(e) => onSetOpacity(Number(e.target.value))} />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-white/90">Width: {Math.round(overlayWidth)} px</span>
-          <input
-            type="range"
-            min={320}
-            max={900}
-            step={10}
-            value={overlayWidth}
-            onChange={(e) => onSetOverlayWidth(Number(e.target.value))}
-          />
-        </label>
+            const v = e.target.value;
+            setDraftScript(v);
+            onSetScript(v);
+            onFlushSave?.();
+          }}
+          onFocus={() => {
+            const el = textareaRef.current;
+            const saved = scrollTopByScriptRef.current[activeScriptId];
+            if (el && saved != null) {
+              const maxScroll = el.scrollHeight - el.clientHeight;
+              if (maxScroll > 0 && el.scrollTop !== saved) {
+                el.scrollTop = Math.min(saved, maxScroll);
+              }
+            }
+          }}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            scrollTopByScriptRef.current[activeScriptId] = el.scrollTop;
+            const max = el.scrollHeight - el.clientHeight;
+            if (max > 0) {
+              const ratio = el.scrollTop / max;
+              onEditorScroll?.(ratio);
+              onSetPlaying(false);
+            }
+          }}
+          rows={6}
+          className="min-h-[6rem] w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
+          placeholder="Paste script here..."
+        />
+
+        <div className="mt-2 flex shrink-0 flex-col gap-2 border-t border-white/15 pt-2">
+          <div className="grid grid-cols-2 gap-x-2 gap-y-2 text-[10px]">
+            <label className="col-span-2 flex flex-col gap-1">
+              <span className="text-white/90">Speed: {Math.round(speed)} px/s</span>
+              <input
+                type="range"
+                min={10}
+                max={80}
+                step={2}
+                value={speed}
+                className="w-full"
+                onChange={(e) => onSetSpeed(Number(e.target.value))}
+              />
+              <span className="text-[10px] leading-tight text-white/55">
+                Ref: 30–40 news | 40–50 interview | 50–60 casual
+              </span>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-white/90">Font: {Math.round(fontSize)} px</span>
+              <input
+                type="range"
+                min={18}
+                max={52}
+                step={1}
+                value={fontSize}
+                className="w-full"
+                onChange={(e) => onSetFontSize(Number(e.target.value))}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-white/90">Opacity: {opacity.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0.35}
+                max={1}
+                step={0.01}
+                value={opacity}
+                className="w-full"
+                onChange={(e) => onSetOpacity(Number(e.target.value))}
+              />
+            </label>
+            <label className="col-span-2 flex flex-col gap-1">
+              <span className="text-white/90">Width: {Math.round(overlayWidth)} px</span>
+              <input
+                type="range"
+                min={320}
+                max={900}
+                step={10}
+                value={overlayWidth}
+                className="w-full"
+                onChange={(e) => onSetOverlayWidth(Number(e.target.value))}
+              />
+            </label>
+          </div>
+          <label className="flex items-center gap-2 text-[10px] text-white/90">
+            <input type="checkbox" checked={nearCamera} onChange={(e) => onSetNearCamera(e.target.checked)} />
+            <span>Near camera</span>
+          </label>
+          <p className="text-[10px] leading-snug text-white/60">
+            Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag overlay to scroll. Scroll editor to sync overlay. Drag corner to resize panel.
+          </p>
+        </div>
       </div>
-      <label className="mt-1.5 flex items-center gap-2 text-[10px] text-white/90">
-        <input type="checkbox" checked={nearCamera} onChange={(e) => onSetNearCamera(e.target.checked)} />
-        <span>Near camera</span>
-      </label>
-      <p className="mt-1.5 text-[10px] leading-snug text-white/60">
-        Shortcuts: Space play/pause, Up/Down speed, R reset, H hide. Drag overlay to scroll. Scroll editor to sync overlay.
-      </p>
+      <div
+        role="button"
+        tabIndex={0}
+        onPointerDown={onPanelResizePointerDown}
+        className={`absolute bottom-0 right-0 z-30 h-[14px] w-[14px] cursor-se-resize rounded-br-xl ${locked ? "pointer-events-none opacity-35" : "hover:bg-white/[0.06]"}`}
+        style={{
+          background:
+            "linear-gradient(to top left, rgba(255,255,255,.22) 0%, rgba(255,255,255,.22) 42%, transparent 42.5%)",
+        }}
+        title={locked ? "Unlock to resize" : "Drag to resize panel"}
+        aria-label="Resize panel"
+      />
     </div>
   );
 }

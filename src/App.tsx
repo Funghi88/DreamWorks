@@ -7,6 +7,7 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  startTransition,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -75,6 +76,10 @@ const DW_SPLIT_PANEL_VAR = "--dw-split-panel";
 /** Stop sharing: fade capture first, then clear stream + subtle whiteboard “land” (see index.css). */
 const SCREEN_SHARE_EXIT_MS = 400;
 const SCREEN_SHARE_RESTORE_MS = 460;
+/** Capture/recording banner: readable time, then exit animation (see `CAPTURE_ERROR_EXIT_MS` in class). */
+const CAPTURE_ERROR_VISIBLE_MS = 5000;
+/** Exit animation length; keep in sync with banner `duration-[420ms]` in JSX. */
+const CAPTURE_ERROR_EXIT_MS = 420;
 
 function requestCanvasCaptureFrame(track: MediaStreamTrack | null) {
   if (!track) return;
@@ -382,6 +387,8 @@ export default function App() {
   const screenMiniStripRef = useRef<HTMLDivElement>(null);
   const fullPageContentRef = useRef<HTMLDivElement>(null);
   const contentAreaRef = useRef<HTMLDivElement>(null);
+  /** Skip ResizeObserver no-op frames (same width) to avoid redundant split clamp + CSS var churn. */
+  const contentAreaWidthRoRef = useRef(0);
   const contentAreaPrevRectRef = useRef<{ w: number; h: number } | null>(null);
   const whiteboardCanvasLayersRef = useRef<HTMLCanvasElement[]>([]);
   const whiteboardExportedRef = useRef<HTMLCanvasElement | null>(null);
@@ -465,6 +472,7 @@ export default function App() {
   const previewBoxDraggingRef = useRef(false);
   const previewBoxOffsetRef = useRef({ x: 0, y: 0 });
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [captureErrorExiting, setCaptureErrorExiting] = useState(false);
   const captureScreenInFlightRef = useRef(false);
   /** Throttle macOS trim + reduce flicker (per-frame re-trim oscillates). */
   const screenTrimCacheRef = useRef<{ key: string; rect: ScreenTrimRect } | null>(null);
@@ -475,6 +483,30 @@ export default function App() {
     screenTrimCacheRef.current = null;
     screenTrimFrameRef.current = 0;
   }, [activeScreenStream]);
+
+  /** Auto-dismiss capture/recording errors: fade/slide out, then unmount (instant clear if reduced motion). */
+  useEffect(() => {
+    if (!captureError) {
+      setCaptureErrorExiting(false);
+      return;
+    }
+    setCaptureErrorExiting(false);
+    const reducedMotion =
+      typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) {
+      const id = window.setTimeout(() => setCaptureError(null), CAPTURE_ERROR_VISIBLE_MS);
+      return () => clearTimeout(id);
+    }
+    const fadeId = window.setTimeout(() => setCaptureErrorExiting(true), CAPTURE_ERROR_VISIBLE_MS);
+    const removeId = window.setTimeout(() => {
+      setCaptureError(null);
+      setCaptureErrorExiting(false);
+    }, CAPTURE_ERROR_VISIBLE_MS + CAPTURE_ERROR_EXIT_MS);
+    return () => {
+      clearTimeout(fadeId);
+      clearTimeout(removeId);
+    };
+  }, [captureError]);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -592,6 +624,8 @@ export default function App() {
   const [teleprompterOpacity, setTeleprompterOpacity] = useState(() => loadSettings().teleprompterOpacity ?? 0.68);
   const [teleprompterWidth, setTeleprompterWidth] = useState(() => loadSettings().teleprompterWidth ?? 560);
   const [teleprompterHeight, setTeleprompterHeight] = useState(() => loadSettings().teleprompterHeight ?? 210);
+  const [teleprompterPanelWidth, setTeleprompterPanelWidth] = useState(() => loadSettings().teleprompterPanelWidth ?? 420);
+  const [teleprompterPanelHeight, setTeleprompterPanelHeight] = useState(() => loadSettings().teleprompterPanelHeight ?? 520);
   const [teleprompterNearCamera, setTeleprompterNearCamera] = useState(true);
   const [teleprompterPosition, setTeleprompterPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterPanelPosition, setTeleprompterPanelPosition] = useState<{ x: number; y: number } | null>(null);
@@ -628,6 +662,8 @@ export default function App() {
     opacity: teleprompterOpacity,
     width: teleprompterWidth,
     height: teleprompterHeight,
+    panelWidth: teleprompterPanelWidth,
+    panelHeight: teleprompterPanelHeight,
   });
   teleprompterSaveRef.current = {
     scripts: teleprompterScripts,
@@ -637,6 +673,8 @@ export default function App() {
     opacity: teleprompterOpacity,
     width: teleprompterWidth,
     height: teleprompterHeight,
+    panelWidth: teleprompterPanelWidth,
+    panelHeight: teleprompterPanelHeight,
   };
   const currentTeleprompterScript = teleprompterScripts.find((s) => s.id === activeTeleprompterScriptId);
   const teleprompterScript = currentTeleprompterScript?.content ?? defaultScript;
@@ -655,6 +693,8 @@ export default function App() {
         if (s.teleprompterOpacity != null) setTeleprompterOpacity(s.teleprompterOpacity);
         if (s.teleprompterWidth != null) setTeleprompterWidth(s.teleprompterWidth);
         if (s.teleprompterHeight != null) setTeleprompterHeight(s.teleprompterHeight);
+        if (s.teleprompterPanelWidth != null) setTeleprompterPanelWidth(s.teleprompterPanelWidth);
+        if (s.teleprompterPanelHeight != null) setTeleprompterPanelHeight(s.teleprompterPanelHeight);
       });
     }
   }, [isElectron]);
@@ -670,6 +710,8 @@ export default function App() {
         teleprompterOpacity,
         teleprompterWidth,
         teleprompterHeight,
+        teleprompterPanelWidth,
+        teleprompterPanelHeight,
       });
       teleprompterSaveTimeoutRef.current = null;
     }, 300);
@@ -684,6 +726,8 @@ export default function App() {
     teleprompterOpacity,
     teleprompterWidth,
     teleprompterHeight,
+    teleprompterPanelWidth,
+    teleprompterPanelHeight,
   ]);
 
   const flushTeleprompterSave = useCallback(() => {
@@ -700,6 +744,8 @@ export default function App() {
         teleprompterOpacity: r.opacity,
         teleprompterWidth: r.width,
         teleprompterHeight: r.height,
+        teleprompterPanelWidth: r.panelWidth,
+        teleprompterPanelHeight: r.panelHeight,
       });
   }, []);
 
@@ -711,11 +757,13 @@ export default function App() {
   const handleSetTeleprompterScript = useCallback(
     (content: string) => {
       const now = Date.now();
-      setTeleprompterScripts((prev) =>
-        prev.map((s) =>
-          s.id === activeTeleprompterScriptId ? { ...s, content, updatedAt: now } : s
-        )
-      );
+      startTransition(() => {
+        setTeleprompterScripts((prev) =>
+          prev.map((s) =>
+            s.id === activeTeleprompterScriptId ? { ...s, content, updatedAt: now } : s
+          )
+        );
+      });
     },
     [activeTeleprompterScriptId]
   );
@@ -1940,6 +1988,8 @@ export default function App() {
         if (splitPanelDragActiveRef.current) return;
         const cw = root.offsetWidth;
         if (cw <= 0) return;
+        if (cw === contentAreaWidthRoRef.current) return;
+        contentAreaWidthRoRef.current = cw;
         setContentAreaSplitWidth(cw);
         const maxW = Math.max(40, cw - 54);
         root.style.removeProperty(DW_SPLIT_PANEL_VAR);
@@ -2304,7 +2354,7 @@ export default function App() {
     }
     recordingStartRef.current = Date.now();
     setRecordingTime(0);
-    // No resize on Start Recording - keep same window (already compacted after Capture Screen)
+    // No resize on start recording — window dimensions stay as-is (see Electron setNormalMode).
     timerIdRef.current = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - recordingStartRef.current) / 1000);
       recordingTimeElapsedRef.current = elapsed;
@@ -2372,12 +2422,16 @@ export default function App() {
     };
   }, []);
 
-  /** Stream ended from OS while our exit animation is running — don’t leave phase stuck. */
+  /** Stream ended from OS while exit animation is running — don’t leave phase stuck or let timers fire late. */
   useEffect(() => {
     if (!activeScreenStream && screenShareStopPhase === "exiting") {
       if (screenShareExitTimerRef.current) {
         clearTimeout(screenShareExitTimerRef.current);
         screenShareExitTimerRef.current = null;
+      }
+      if (screenShareRestoreTimerRef.current) {
+        clearTimeout(screenShareRestoreTimerRef.current);
+        screenShareRestoreTimerRef.current = null;
       }
       setScreenShareStopPhase("idle");
     }
@@ -3317,6 +3371,12 @@ export default function App() {
           nearCamera={teleprompterNearCamera}
           locked={teleprompterLocked}
           position={teleprompterPanelPosition}
+          panelWidth={teleprompterPanelWidth}
+          panelHeight={teleprompterPanelHeight}
+          onPanelSizeChange={(w, h) => {
+            setTeleprompterPanelWidth(w);
+            setTeleprompterPanelHeight(h);
+          }}
           onSetScript={handleSetTeleprompterScript}
           onSetPlaying={setTeleprompterPlaying}
           onSetSpeed={setTeleprompterSpeed}
@@ -3399,12 +3459,19 @@ export default function App() {
       />
       )}
       <div
-        className={`glass-bg flex h-screen w-full min-w-0 flex-col px-4 pb-4 ${showOutput && recordedClips.length > 0 ? "overflow-y-auto" : "overflow-hidden"}`}
+        className={`glass-bg flex h-full min-h-0 w-full min-w-0 flex-col px-4 pb-4 ${showOutput && recordedClips.length > 0 ? "overflow-y-auto overscroll-y-contain" : "overflow-hidden"}`}
       >
         {/* Spacer = header height + padding; use 86px always to avoid layout shift when recording starts */}
         <div className="shrink-0 h-[86px]" aria-hidden />
         {captureError && (
-          <div className="shrink-0 mx-4 mb-2 rounded-lg bg-red-500/20 px-4 py-2 text-sm text-red-600">
+          <div
+            role="alert"
+            className={`dreamwork-capture-error-banner shrink-0 mx-4 mb-2 rounded-xl border border-red-500/20 bg-gradient-to-b from-red-500/12 to-red-500/8 px-4 py-2.5 text-sm text-red-700 shadow-sm backdrop-blur-[2px] transition-[opacity,transform,filter] duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              captureErrorExiting
+                ? "pointer-events-none opacity-0 -translate-y-1 scale-[0.995] blur-[0.5px]"
+                : "opacity-100 translate-y-0 scale-100 blur-0"
+            }`}
+          >
             {captureError}
           </div>
         )}
@@ -3507,7 +3574,7 @@ export default function App() {
             {/* Whiteboard: main when no screen, mini (40px bar) when screen selected */}
             <div
               ref={fullPageContentRef}
-              className={`relative z-10 flex min-h-0 min-w-0 sector-card overflow-hidden bg-white pr-1 ${
+              className={`relative z-10 flex h-full min-h-0 min-w-0 sector-card overflow-hidden bg-white pr-1 ${
                 activeScreenStream ? "shrink-0" : "flex-1"
               } ${activeScreenStream && windowLiveResize ? "transition-none" : ""} ${
                 screenShareStopPhase === "restoring" && !activeScreenStream ? "dreamwork-whiteboard-restore-in" : ""
