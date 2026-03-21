@@ -48,6 +48,7 @@ import {
   type ScreenTrimRect,
 } from "@/lib/screenShareTrim";
 import { isDisplayMediaUserCancellation } from "@/lib/userMediaError";
+import { getDisplayMediaPreferMonitor } from "@/lib/displayMedia";
 import { Settings } from "lucide-react";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { setNormalMode } from "@/lib/windowUtils";
@@ -2067,10 +2068,7 @@ export default function App() {
         }
       };
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true,
-        });
+        const stream = await getDisplayMediaPreferMonitor(true);
         applyCapturedStream(stream);
       } catch (e) {
         if (isDisplayMediaUserCancellation(e)) {

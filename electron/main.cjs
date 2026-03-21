@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, session, desktopCapturer, dialog, systemPreferences } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, session, dialog, systemPreferences } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const embeddedSignaling = require("./embedded-signaling.cjs");
@@ -11,34 +11,12 @@ const helperWindows = new Map();
 const APP_NAME = "DreamWorks";
 
 /**
- * Native picker when the OS provides it (useSystemPicker: true).
- * Fallback only: request screen sources first, then window — never assume a combined list order.
+ * macOS 15+ (and compatible): Apple’s system picker — user can choose Entire Screen / Window / apps.
+ * Do NOT auto-pick desktopCapturer sources here; that bypassed the picker and removed “full display”.
+ * If useSystemPicker is unavailable, Electron falls back to default Chromium behavior.
  */
 function installNativeDisplayMediaHandler() {
-  const thumb = { width: 150, height: 150 };
-  session.defaultSession.setDisplayMediaRequestHandler(
-    (_request, callback) => {
-      (async () => {
-        try {
-          const screens = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: thumb });
-          if (screens.length > 0) {
-            callback({ video: screens[0], audio: "loopback" });
-            return;
-          }
-          // Do not fall back to a random window: that looked like “can’t share desktop” and caused
-          // infinite-mirror previews when the window was DreamWorks. If screens is empty, fix Screen Recording.
-          console.warn(
-            "[DreamWorks] No display sources from desktopCapturer — Screen Recording permission or system issue."
-          );
-          callback({});
-        } catch (err) {
-          console.error("Capture Screen error:", err);
-          callback({});
-        }
-      })();
-    },
-    { useSystemPicker: true }
-  );
+  session.defaultSession.setDisplayMediaRequestHandler(null, { useSystemPicker: true });
 }
 
 function createMainWindow() {
@@ -141,17 +119,67 @@ function createHelperWindow(kind, options = {}) {
   return win;
 }
 
+function readJsonFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const o = JSON.parse(raw);
+    return o && typeof o === "object" ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+function isEmptySettings(obj) {
+  return !obj || (typeof obj === "object" && Object.keys(obj).length === 0);
+}
+
+/**
+ * User data lives outside the .app (see README). If the primary file is missing/empty,
+ * migrate from legacy folder name `dreamwork` (older package name) or optional bundled seed.
+ */
+function loadSettingsWithMigration(settingsPath) {
+  let data = readJsonFile(settingsPath);
+  if (!isEmptySettings(data)) return data;
+
+  const userDataDir = path.dirname(settingsPath);
+  const appSupport = path.dirname(userDataDir);
+  const legacyPath = path.join(appSupport, "dreamwork", "settings.json");
+  const legacy = readJsonFile(legacyPath);
+  if (!isEmptySettings(legacy)) {
+    try {
+      fs.mkdirSync(userDataDir, { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify(legacy), "utf8");
+      console.log("[DreamWorks] Migrated settings from", legacyPath);
+    } catch (e) {
+      console.warn("[DreamWorks] Could not write migrated settings:", e);
+    }
+    return legacy;
+  }
+
+  const seedPath = path.join(process.resourcesPath || "", "defaults", "settings.json");
+  if (fs.existsSync(seedPath)) {
+    const seeded = readJsonFile(seedPath);
+    if (!isEmptySettings(seeded)) {
+      try {
+        fs.mkdirSync(userDataDir, { recursive: true });
+        fs.writeFileSync(settingsPath, JSON.stringify(seeded), "utf8");
+        console.log("[DreamWorks] Installed default settings from app bundle:", seedPath);
+      } catch (e) {
+        console.warn("[DreamWorks] Could not install seeded settings:", e);
+      }
+      return seeded;
+    }
+  }
+
+  return data || {};
+}
+
 app.whenReady().then(() => {
   app.setName(APP_NAME);
   // Register IPC handlers (must be before createMainWindow so they exist when renderer loads)
   const SETTINGS_PATH = path.join(app.getPath("userData"), "settings.json");
   ipcMain.handle("getSettings", async () => {
-    try {
-      const data = fs.readFileSync(SETTINGS_PATH, "utf8");
-      return JSON.parse(data);
-    } catch {
-      return {};
-    }
+    return loadSettingsWithMigration(SETTINGS_PATH);
   });
   ipcMain.handle("saveSettings", async (_, settings) => {
     try {

@@ -245,6 +245,12 @@ The app opens in an Electron window.
 
 **Capture Screen not working on macOS:** When developing with `npm run dev`, the process runs as **Electron**. Add **Electron** under System Settings → Privacy & Security → Screen Recording. For the built app, add **DreamWorks** instead.
 
+**Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
+
+1. **Old folder name:** Older builds may have used `~/Library/Application Support/dreamwork/` — the app now **auto-migrates** from `dreamwork` to `DreamWorks` when the new file is empty.
+2. **Web-only dev:** If you only ran the UI in a **browser** (`localhost`), data lived in **browser localStorage**, not in that file — use **Electron** (`npm run dev` or `electron .`) so saves go to disk, or copy settings manually.
+3. **Bundle a snapshot into the next pack:** Run `npm run copy-settings-to-defaults` (copies your current `settings.json` into `defaults/`), then `npm run pack`. See `defaults/README.md`.
+
 ---
 
 ## Tech stack

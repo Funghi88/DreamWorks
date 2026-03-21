@@ -27,6 +27,7 @@ import { LiveTranscription } from "./LiveTranscription";
 import { MeetingRecorder } from "./MeetingRecorder";
 import { ParticipantsPanel } from "./ParticipantsPanel";
 import { useVirtualBackground } from "./useVirtualBackground";
+import { getDisplayMediaPreferMonitor } from "@/lib/displayMedia";
 import "./LiveMeetingModal.css";
 
 const VirtualBackground = lazy(() =>
@@ -651,10 +652,7 @@ export const LiveMeetingModal = forwardRef<LiveMeetingModalHandle, LiveMeetingMo
       stopScreenShare();
     } else {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false,
-        });
+        const screenStream = await getDisplayMediaPreferMonitor(false);
         screenStreamRef.current = screenStream;
         const screenTrack = screenStream.getVideoTracks()[0];
         screenTrack.onended = stopScreenShare;
