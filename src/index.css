@@ -46,7 +46,8 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
+  /* NotebookLM-style lavender shell (matches .glass-bg) */
+  --background: #efeffb;
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -180,15 +181,9 @@
   border-color: rgba(255, 255, 255, 0.08);
 }
 
-/* Static cool-neutral shell background (no animated position).
-   Moving a large gradient exposed pink-lavender stops (#f5f0ff) and caused visible “flashes” on some Electron/GPU setups. */
+/* Static lavender shell (no animated gradient position — avoids GPU flashes on Electron). */
 .glass-bg {
-  background: linear-gradient(
-    135deg,
-    #eef2f7 0%,
-    #e8ecf0 40%,
-    #f1f5f9 100%
-  );
+  background: linear-gradient(135deg, #efeffb 0%, #eeedfa 42%, #eef0fb 100%);
 }
 
 .dark .glass-bg {

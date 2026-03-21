@@ -94,6 +94,11 @@ const CAMERA_OFFSET = 36;
 const AVATAR_RECT_RADIUS = 16;
 /** Fixed size for camera source video - avoids resize delay when shape changes */
 const CAMERA_SOURCE_VIDEO_SIZE = { w: 320, h: 240 };
+/** PiP portal vs Settings: backdrop < camera (sharp preview) < drawer */
+const Z_PIP_PORTAL = 99_999;
+const Z_PIP_PORTAL_SETTINGS = 1_000_000;
+const Z_SETTINGS_BACKDROP = "z-[999950]";
+const Z_SETTINGS_DRAWER = "z-[1000010]";
 
 function drawLetterboxBg(
   ctx: CanvasRenderingContext2D,
@@ -508,6 +513,16 @@ export default function App() {
     };
   }, [captureError]);
   const [isRecording, setIsRecording] = useState(false);
+  /** PiP position refs — declared before any hook/callback that reads them; synced from state when idle */
+  const pipPosRef = useRef(pipPos);
+  const fullPagePipPosRef = useRef(fullPagePipPos);
+  if (!isRecording && !pipDraggingRef.current) {
+    pipPosRef.current = pipPos;
+    fullPagePipPosRef.current = fullPagePipPos;
+  }
+  const wbOnlyUi = fullPageWhiteboard && !activeScreenStream;
+  const fullPagePipForRender =
+    pipDragging || (isRecording && wbOnlyUi) ? fullPagePipPosRef.current : fullPagePipPos;
   const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [recordedClips, setRecordedClips] = useState<{ id: number; blob: Blob }[]>([]);
@@ -889,6 +904,7 @@ export default function App() {
       return;
     }
     const tick = () => {
+      if (pipDraggingRef.current) return;
       const rect = pipRef.current?.getBoundingClientRect();
       setTeleprompterAnchorRect((prev) => {
         if (!rect) return prev === null ? prev : null;
@@ -911,11 +927,9 @@ export default function App() {
       });
     };
     tick();
-    /** ~40fps while dragging PiP, ~10fps when static — avoids a 60fps setState loop. */
-    const ms = pipDragging ? 24 : 100;
-    const id = window.setInterval(tick, ms);
+    const id = window.setInterval(tick, 100);
     return () => clearInterval(id);
-  }, [showTeleprompter, teleprompterNearCamera, showPip, pipDragging]);
+  }, [showTeleprompter, teleprompterNearCamera, showPip]);
 
   const handleToggleTeleprompter = () => {
     setShowTeleprompter((prev) => {
@@ -1514,8 +1528,9 @@ export default function App() {
           fullPageWhiteboard && activeScreenStream
             ? fallbackPos.y
             : prevRect.top + fallbackPos.y;
-        // Use ref for recording so we get sync position from drag; pip.getBoundingClientRect() can lag behind React.
+        // Ref tracks drag + recording; getBoundingClientRect can lag direct style updates.
         const useFallbackForComposite =
+          !!pipDraggingRef.current ||
           (fullPageWhiteboard && activeScreenStream) ||
           (forceRecordRes && fullPageWhiteboard && !activeScreenStream);
         const rect = pip && !useFallbackForComposite
@@ -1690,14 +1705,14 @@ export default function App() {
   const drawCompositeRef = useRef(drawComposite);
   drawCompositeRef.current = drawComposite;
 
-  const activePipPos = fullPageWhiteboard ? fullPagePipPos : pipPos;
+  const activePipPos = fullPageWhiteboard ? fullPagePipForRender : pipPos;
   const cameraViewportPos =
     fullPageWhiteboard
       ? activeScreenStream
-        ? fullPagePipPos
+        ? fullPagePipForRender
         : portalRect
-          ? { x: portalRect.left + fullPagePipPos.x, y: portalRect.top + fullPagePipPos.y }
-          : fullPagePipPos
+          ? { x: portalRect.left + fullPagePipForRender.x, y: portalRect.top + fullPagePipForRender.y }
+          : fullPagePipForRender
       : mainLayoutPortalRect
         ? { x: mainLayoutPortalRect.left + pipPos.x, y: mainLayoutPortalRect.top + pipPos.y }
         : pipPos;
@@ -1874,7 +1889,7 @@ export default function App() {
         let detectFrame = 0;
         const loop = () => {
           if (cancelled) return;
-          if (pipDraggingRef.current || previewBoxDraggingRef.current) {
+          if (previewBoxDraggingRef.current) {
             rafId = requestAnimationFrame(loop);
             return;
           }
@@ -1888,7 +1903,10 @@ export default function App() {
             if (detectFrame++ % 2 === 0) {
               const result = landmarker.detectForVideo(v, nextVideoTimestamp());
               if (result?.faceLandmarks?.[0]) {
-                const smoothed = smoothLandmarksForFilter(result.faceLandmarks[0]);
+                const smoothed = smoothLandmarksForFilter(
+                  result.faceLandmarks[0],
+                  pipDraggingRef.current ? 0.93 : undefined
+                );
                 faceLandmarksRef.current = smoothed;
                 lastValidLandmarksRef.current = smoothed;
                 lastValidLandmarksAtRef.current = performance.now();
@@ -2896,19 +2914,6 @@ export default function App() {
       systemVolume,
     ]);
 
-  const pipPosRef = useRef(pipPos);
-  const fullPagePipPosRef = useRef(fullPagePipPos);
-  // 录制中 ref 由 startRecording / 拖动手势维护；用滞后的 React state 覆盖 ref 会让成片坐标与门户不一致，并触发
-  //「state 写的 left/top 盖掉 onMove 的 style」→ 边框滞后与残影。
-  if (!isRecording && !pipDraggingRef.current) {
-    pipPosRef.current = pipPos;
-    fullPagePipPosRef.current = fullPagePipPos;
-  }
-
-  const wbOnlyUi = fullPageWhiteboard && !activeScreenStream;
-  const fullPagePipForRender =
-    pipDragging || (isRecording && wbOnlyUi) ? fullPagePipPosRef.current : fullPagePipPos;
-
   // Which camera to move: determined from click target so we anchor the top layer, not the one underneath.
   const previewPageContextRef = useRef(!fullPageWhiteboard);
   useLayoutEffect(() => {
@@ -2963,7 +2968,6 @@ export default function App() {
     };
     pipDraggingRef.current = true;
     setPipDragging(true);
-    let syncStateRaf = 0;
     const onMove = (ev: PointerEvent | MouseEvent) => {
       const r = useViewportCoords
         ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
@@ -2989,21 +2993,14 @@ export default function App() {
       posRef.current = hasOffset ? { x: x - offsetX, y: y - offsetY } : { x, y };
       (pip as HTMLElement).style.left = `${px}px`;
       (pip as HTMLElement).style.top = `${py}px`;
-      // 录制合成读 fullPagePipPosRef：每步更新 ref + DOM，成片与手指同步；setState 用 rAF 合并，减轻边框/描边跟拖影
+      // 录制合成读 fullPagePipPosRef：每步更新 ref + DOM；state 仅在 pointerup 同步，避免与直接写的 left/top 争用
       if (fullPageWhiteboard && activeScreenStream) {
         recordingDrawAndDisplayRef.current?.();
-      } else if (isRecording && recordingDrawAndDisplayRef.current) {
+      } else       if (isRecording && recordingDrawAndDisplayRef.current) {
         recordingDrawAndDisplayRef.current?.();
-      }
-      if (!syncStateRaf) {
-        syncStateRaf = requestAnimationFrame(() => {
-          syncStateRaf = 0;
-          setPos(posRef.current);
-        });
       }
     };
     const cleanup = () => {
-      if (syncStateRaf) cancelAnimationFrame(syncStateRaf);
       setPos(posRef.current);
       document.removeEventListener("pointermove", onMoveP);
       document.removeEventListener("pointerup", onUp);
@@ -3477,10 +3474,10 @@ export default function App() {
         )}
         {showSettings &&
           createPortal(
-            <div className="fixed inset-0 z-[1000000] flex justify-end" data-dreamwork-no-intercept>
+            <div data-dreamwork-no-intercept>
               <button
                 type="button"
-                className="absolute inset-0 bg-slate-900/20 backdrop-blur-[2px] transition-opacity motion-reduce:transition-none"
+                className={`fixed inset-0 ${Z_SETTINGS_BACKDROP} bg-slate-900/20 backdrop-blur-[2px] transition-opacity motion-reduce:transition-none`}
                 aria-label="Close settings"
                 onClick={() => setShowSettings(false)}
               />
@@ -3488,7 +3485,7 @@ export default function App() {
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="dreamwork-settings-title"
-                className="relative flex h-full w-[360px] min-w-[360px] flex-col border-l border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out motion-reduce:transition-none"
+                className={`fixed right-0 top-0 bottom-0 ${Z_SETTINGS_DRAWER} flex h-full w-[360px] min-w-[360px] flex-col border-l border-slate-200 bg-white shadow-xl transition-transform duration-200 ease-out motion-reduce:transition-none`}
               >
               <div className="flex h-full flex-col overflow-y-auto p-5 text-slate-900">
                 <div className="mb-5 flex items-center justify-between">
@@ -3556,8 +3553,8 @@ export default function App() {
               <div
                 className="absolute z-10 cursor-grab touch-none pointer-events-auto"
                 style={{
-                  left: Math.max(0, fullPagePipPos.x),
-                  top: Math.max(0, fullPagePipPos.y),
+                  left: Math.max(0, fullPagePipForRender.x),
+                  top: Math.max(0, fullPagePipForRender.y),
                   width: avatarWidthDisplay,
                   height: avatarHeightDisplay,
                   touchAction: "none",
@@ -3653,8 +3650,8 @@ export default function App() {
                 <div
                   className="absolute z-10 cursor-grab touch-none"
                   style={{
-                    left: Math.max(0, fullPagePipPos.x),
-                    top: Math.max(0, fullPagePipPos.y),
+                    left: Math.max(0, fullPagePipForRender.x),
+                    top: Math.max(0, fullPagePipForRender.y),
                     width: avatarWidthDisplay,
                     height: avatarHeightDisplay,
                     touchAction: "none",
@@ -3684,12 +3681,14 @@ export default function App() {
                       : fullPagePipForRender.y,
                   width: avatarWidthDisplay,
                   height: avatarHeightDisplay,
-                  zIndex: 99999,
+                  zIndex: showSettings ? Z_PIP_PORTAL_SETTINGS : Z_PIP_PORTAL,
                   borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
                   backgroundColor: "#000",
                   boxShadow: activeScreenStream && !(isRecording && activeScreenStream) ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
                   opacity: isRecording && activeScreenStream ? 0 : 1,
                   pointerEvents: "auto",
+                  outline: "none",
+                  transform: "translateZ(0)",
                 }}
                 ref={pipRef}
               >
@@ -3739,7 +3738,7 @@ export default function App() {
                   pipRef={portalCameraInnerRef}
                   cameraVideoRef={cameraVideoRef}
                   avatarImgRef={avatarImgRef}
-                  suppressHeavyShadow={pipDragging || (isRecording && wbOnlyUi)}
+                  suppressHeavyShadow={isRecording && wbOnlyUi}
                 />
               </div>,
               document.body

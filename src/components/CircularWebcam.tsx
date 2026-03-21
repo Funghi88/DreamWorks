@@ -296,6 +296,7 @@ export function CircularWebcam({
             className={`absolute inset-0 pointer-events-none z-[1] ${shapeClass} ${borderClass}`}
             style={{
               background: "transparent",
+              transition: "none",
               ...(avatarShape !== "circle" && { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` }),
               ...borderStyle,
             }}

@@ -55,7 +55,7 @@ function centerOf(landmarks: NormalizedLandmark[], indices: number[]) {
   return n > 0 ? { x: x / n, y: y / n } : { x: 0.5, y: 0.5 };
 }
 
-function smoothLandmarks(raw: NormalizedLandmark[]): NormalizedLandmark[] {
+function smoothLandmarks(raw: NormalizedLandmark[], alpha = SMOOTH_ALPHA): NormalizedLandmark[] {
   if (!prevSmoothed || prevSmoothed.length !== raw.length) {
     prevSmoothed = raw.map((p) => ({ ...p }));
     return prevSmoothed;
@@ -66,10 +66,10 @@ function smoothLandmarks(raw: NormalizedLandmark[]): NormalizedLandmark[] {
     const b = prevSmoothed[i];
     if (a && b) {
       out.push({
-        x: a.x * SMOOTH_ALPHA + b.x * (1 - SMOOTH_ALPHA),
-        y: a.y * SMOOTH_ALPHA + b.y * (1 - SMOOTH_ALPHA),
-        z: (a.z ?? 0) * SMOOTH_ALPHA + (b.z ?? 0) * (1 - SMOOTH_ALPHA),
-        visibility: (a.visibility ?? 1) * SMOOTH_ALPHA + (b.visibility ?? 1) * (1 - SMOOTH_ALPHA),
+        x: a.x * alpha + b.x * (1 - alpha),
+        y: a.y * alpha + b.y * (1 - alpha),
+        z: (a.z ?? 0) * alpha + (b.z ?? 0) * (1 - alpha),
+        visibility: (a.visibility ?? 1) * alpha + (b.visibility ?? 1) * (1 - alpha),
       });
     } else {
       out.push(a ? { ...a, visibility: a.visibility ?? 1 } : { x: 0.5, y: 0.5, z: 0, visibility: 1 });
@@ -79,12 +79,17 @@ function smoothLandmarks(raw: NormalizedLandmark[]): NormalizedLandmark[] {
   return out;
 }
 
-export function smoothLandmarksForFilter(raw: NormalizedLandmark[] | null): NormalizedLandmark[] | null {
+/** Optional blend alpha (higher = snappier; default SMOOTH_ALPHA). */
+export function smoothLandmarksForFilter(
+  raw: NormalizedLandmark[] | null,
+  responsiveness?: number
+): NormalizedLandmark[] | null {
   if (!raw || raw.length < 455) {
     prevSmoothed = null;
     return raw;
   }
-  return smoothLandmarks(raw);
+  const alpha = responsiveness ?? SMOOTH_ALPHA;
+  return smoothLandmarks(raw, alpha);
 }
 
 function scaleToRect(
