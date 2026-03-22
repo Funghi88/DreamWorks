@@ -46,6 +46,8 @@
 
 :root {
   --radius: 0.625rem;
+  /* NotebookLM-style lavender shell — same gradient as .glass-bg & Live Meeting overlay */
+  --dreamwork-shell-gradient: linear-gradient(135deg, #efeffb 0%, #eeedfa 42%, #eef0fb 100%);
   /* NotebookLM-style lavender shell (matches .glass-bg) */
   --background: #efeffb;
   --foreground: oklch(0.145 0 0);
@@ -81,6 +83,7 @@
 }
 
 .dark {
+  --dreamwork-shell-gradient: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -143,6 +146,24 @@
   }
 }
 
+/*
+ * Narrow side strip (Excalidraw mini bar OR Capture mini bar): width must stay at --dreamwork-strip-px
+ * when the window is resized — flex/grid content must not widen this column.
+ * Parent sets --dreamwork-strip-px (inherits here).
+ */
+[data-dreamwork-fixed-strip] {
+  /*
+   * Do NOT use !important on width — it overrides React inline widths used for flex/grid fixes.
+   * Parent sets --dreamwork-strip-px; max(40px,…) clamps bogus sub-minimum values.
+   */
+  width: max(40px, var(--dreamwork-strip-px, 40px));
+  min-width: max(40px, var(--dreamwork-strip-px, 40px));
+  max-width: max(40px, var(--dreamwork-strip-px, 40px));
+  box-sizing: border-box;
+  overflow: hidden;
+  min-height: 0;
+}
+
 /* iOS 18 glass utilities */
 .glass-panel {
   background: linear-gradient(
@@ -183,11 +204,11 @@
 
 /* Static lavender shell (no animated gradient position — avoids GPU flashes on Electron). */
 .glass-bg {
-  background: linear-gradient(135deg, #efeffb 0%, #eeedfa 42%, #eef0fb 100%);
+  background: var(--dreamwork-shell-gradient);
 }
 
 .dark .glass-bg {
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  background: var(--dreamwork-shell-gradient);
 }
 
 /* NotebookLM-style sector cards - off-white rounded rectangular */
@@ -220,5 +241,63 @@
     opacity: 1;
     filter: brightness(1);
     transform: scale(1);
+  }
+}
+
+/* Electron display-media picker: soft entrance (Share your screen) */
+@keyframes dreamwork-display-picker-backdrop {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dreamwork-display-picker-panel {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+    filter: saturate(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: saturate(1);
+  }
+}
+
+.dreamwork-display-picker-backdrop {
+  animation: dreamwork-display-picker-backdrop 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.dreamwork-display-picker-panel {
+  animation: dreamwork-display-picker-panel 0.56s cubic-bezier(0.2, 0.85, 0.25, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dreamwork-display-picker-backdrop,
+  .dreamwork-display-picker-panel {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Header “Whiteboard” ↔ capture main: View Transitions (Chromium / Electron) */
+::view-transition-old(dreamwork-wb-pane),
+::view-transition-new(dreamwork-wb-pane),
+::view-transition-old(dreamwork-capture-pane),
+::view-transition-new(dreamwork-capture-pane) {
+  animation-duration: 0.52s;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(dreamwork-wb-pane),
+  ::view-transition-new(dreamwork-wb-pane),
+  ::view-transition-old(dreamwork-capture-pane),
+  ::view-transition-new(dreamwork-capture-pane) {
+    animation-duration: 0.01ms;
   }
 }

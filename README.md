@@ -99,6 +99,8 @@ npm run dev
 
 应用会在 Electron 窗口中打开。
 
+**日常开发：** 保持 **一个** `npm run dev` 终端常开即可。修改 `src/` 由 Vite **热更新**；修改 `electron/`（主进程、preload）时 **electronmon** 会**自动重启** Electron 窗口，一般不必反复输入 `npm run dev`（只有关掉终端或结束进程后才需再开）。
+
 **仅 Web 模式（无 Electron）：** `npm run dev:web`，然后访问 [http://localhost:5173](http://localhost:5173)
 
 **Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
@@ -216,6 +218,8 @@ npm run dev
 
 The app opens in an Electron window.
 
+**Day-to-day dev:** Keep **one** `npm run dev` running. Edits under `src/` hot-reload via Vite; edits under `electron/` trigger **electronmon** to **restart** the Electron window—no need to re-run `npm run dev` each time (only after you stop the terminal or kill the process).
+
 **Web-only (no Electron):** Run `npm run dev:web`, then open [http://localhost:5173](http://localhost:5173)
 
 **Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
@@ -243,7 +247,18 @@ The app opens in an Electron window.
 
 ### Troubleshooting
 
-**Capture Screen not working on macOS:** When developing with `npm run dev`, the process runs as **Electron**. Add **Electron** under System Settings → Privacy & Security → Screen Recording. For the built app, add **DreamWorks** instead.
+**Capture Screen not working on macOS / no “Entire Screen” in the picker:**
+
+1. **Screen Recording must be ON (blue)** for the exact app you’re running — **Electron** when using `npm run dev`, **DreamWorks** when using the built `.app`. If you see both **DreamWork** and **DreamWorks** in the list, enable the one that matches your build (or enable both while testing).
+2. After changing permission, **quit and reopen** the app (macOS often won’t refresh the picker until restart).
+3. **macOS + Electron:** The main process uses a **`desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
+4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused **`getDisplayMedia` → “Not supported”** in testing on this Electron + macOS combo, so the app uses **`desktopCapturer` + the in-app sheet** instead. Upgrading Electron later may allow revisiting the native path.
+
+**Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
+
+1. **Old folder name:** Older builds may have used `~/Library/Application Support/dreamwork/` — the app **auto-migrates** from `dreamwork` to `DreamWorks` when the new file is empty or missing.
+2. **Web-only dev:** If you only ran the UI in a **browser** (`localhost`), data lived in **browser localStorage**, not in that file — use **Electron** (`npm run dev` or `electron .`) so saves go to disk, or copy settings manually.
+3. **Bundle a snapshot into the next pack:** Run `npm run copy-settings-to-defaults` (copies your current `settings.json` into `defaults/`), then `npm run pack`. See `defaults/README.md`.
 
 **Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
 

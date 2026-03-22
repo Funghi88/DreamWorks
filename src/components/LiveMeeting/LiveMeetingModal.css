@@ -9,7 +9,8 @@
   justify-content: center;
   padding-top: 60px; /* header height */
   box-sizing: border-box;
-  background: linear-gradient(135deg, #eef2f7 0%, #e8ecf0 40%, #f1f5f9 100%);
+  /* Same shell as App .glass-bg (see --dreamwork-shell-gradient in index.css) */
+  background: var(--dreamwork-shell-gradient, linear-gradient(135deg, #efeffb 0%, #eeedfa 42%, #eef0fb 100%));
   backdrop-filter: blur(8px);
   z-index: 100020;
   pointer-events: none;
@@ -27,8 +28,17 @@
   background: linear-gradient(
     180deg,
     transparent 0%,
-    rgba(240, 244, 255, 0.95) 30%,
-    rgba(232, 238, 255, 0.98) 100%
+    rgba(239, 239, 251, 0.92) 28%,
+    rgba(238, 237, 250, 0.98) 100%
+  );
+}
+
+.dark .live-meeting-modal-overlay.compact {
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(15, 23, 42, 0.88) 35%,
+    rgba(15, 23, 42, 0.96) 100%
   );
 }
 

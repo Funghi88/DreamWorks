@@ -13,6 +13,8 @@ interface RecordingControlsProps {
   recordingDisabled?: boolean;
   onCaptureScreen: () => void;
   onStopScreenShare?: () => void;
+  /** Pick another window/screen while sharing; recording continues in the same file when active. */
+  onSwitchSharedCapture?: () => void;
   onToggleCamera: () => void;
   onToggleRecord: () => void;
   onPauseRecording?: () => void;
@@ -24,6 +26,8 @@ interface RecordingControlsProps {
   onRecoverOverlays?: () => void;
   onCaptureScreenshot?: (presetId: CapturePresetId | CaptureModeId) => void;
   showWhiteboard: boolean;
+  /** When true, Whiteboard button uses primary (emphasized) style — e.g. whiteboard is the main column while sharing. */
+  whiteboardEmphasis?: boolean;
   showTeleprompter?: boolean;
   recordingTimeLabel?: string;
 }
@@ -37,6 +41,7 @@ export function RecordingControls({
   recordingDisabled = false,
   onCaptureScreen,
   onStopScreenShare,
+  onSwitchSharedCapture,
   onToggleCamera,
   onToggleRecord,
   onPauseRecording,
@@ -48,6 +53,7 @@ export function RecordingControls({
   onRecoverOverlays,
   onCaptureScreenshot,
   showWhiteboard,
+  whiteboardEmphasis,
   showTeleprompter = false,
   recordingTimeLabel = "00:00",
 }: RecordingControlsProps) {
@@ -105,6 +111,7 @@ export function RecordingControls({
   const showCompactCamera = compact;
   const showCompactCapture = compact && !hasScreen;
   const showCompactStopShare = compact && hasScreen && !!onStopScreenShare;
+  const showCompactSwitchShare = compact && hasScreen && !!onSwitchSharedCapture;
   const canCapture = !!onCaptureScreenshot;
 
   return (
@@ -125,6 +132,16 @@ export function RecordingControls({
           >
             {hasScreen ? (compact ? "Stop share" : "Stop sharing") : (compact ? "Capture" : "Capture Screen")}
           </GlassButton>
+          {hasScreen && onSwitchSharedCapture && (
+            <GlassButton
+              variant="secondary"
+              onClick={onSwitchSharedCapture}
+              size="sm"
+              title="Pick another window or screen without stopping recording"
+            >
+              Switch window
+            </GlassButton>
+          )}
           <GlassButton
             variant={hasCamera ? "primary" : "secondary"}
             onClick={onToggleCamera}
@@ -142,6 +159,16 @@ export function RecordingControls({
       {showCompactStopShare && (
         <GlassButton variant="primary" onClick={onStopScreenShare} size="sm">
           Stop share
+        </GlassButton>
+      )}
+      {showCompactSwitchShare && (
+        <GlassButton
+          variant="secondary"
+          onClick={onSwitchSharedCapture}
+          size="sm"
+          title="Pick another window or screen without stopping recording"
+        >
+          Switch
         </GlassButton>
       )}
       {showCompactCamera && (
@@ -295,7 +322,7 @@ export function RecordingControls({
       {!compact && (
         <>
           <GlassButton
-            variant={showWhiteboard ? "primary" : "secondary"}
+            variant={(whiteboardEmphasis ?? showWhiteboard) ? "primary" : "secondary"}
             onClick={onOpenFullPageWhiteboard ?? onToggleWhiteboard}
             size="sm"
           >

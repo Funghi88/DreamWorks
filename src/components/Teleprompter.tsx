@@ -951,6 +951,19 @@ export function TeleprompterPanel({
               onSetScript(v);
             }, 120);
           }}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+              e.preventDefault();
+              if (scriptPushTimerRef.current != null) {
+                clearTimeout(scriptPushTimerRef.current);
+                scriptPushTimerRef.current = null;
+              }
+              const v = textareaRef.current?.value ?? draftScript;
+              setDraftScript(v);
+              onSetScript(v);
+              onFlushSave?.();
+            }
+          }}
           onBlur={(e) => {
             if (scriptPushTimerRef.current != null) {
               clearTimeout(scriptPushTimerRef.current);

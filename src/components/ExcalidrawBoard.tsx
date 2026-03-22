@@ -6,6 +6,7 @@ import {
   loadFromBlob,
   serializeAsJSON,
   exportToBlob,
+  exportToSvg,
   getSceneVersion,
   restoreAppState,
 } from "@excalidraw/excalidraw";
@@ -20,6 +21,15 @@ import {
   type WhiteboardProject,
   type WhiteboardLayer,
 } from "@/lib/storage";
+
+/**
+ * Whiteboard autosave (designers / PMs — data loss is unacceptable):
+ * - Debounced persist on `onChange` (~520ms / 2.5s) remains the primary path.
+ * - Idle flush: no `onChange` for this long → full `flushPersist` via `requestIdleCallback` (sync from Excalidraw API).
+ * - Interval flush: long-session backup if edits never pause (crash / hang).
+ */
+const WHITEBOARD_IDLE_FLUSH_MS = 10_000;
+const WHITEBOARD_INTERVAL_FLUSH_MS = 15 * 60 * 1000;
 
 const BASE_LAYER: WhiteboardLayer = { id: "base", name: "Base" };
 const isAnnotationLayer = (id: string) => id.startsWith("ann-") || id === "annotations";
@@ -165,6 +175,8 @@ type Props = {
   onCanvasLayersChange?: (layers: HTMLCanvasElement[]) => void;
   onWhiteboardTextureChange?: (textureId: string | null) => void;
   onExcalidrawReady?: (api: ExcalidrawAPI) => void;
+  /** Bump after Electron `loadSettingsAsync` so last session’s projects + `activeProjectId` reload from disk. */
+  settingsSyncEpoch?: number;
 };
 
 type ProjectRow = { id: string; name: string };
@@ -186,7 +198,12 @@ function projectNameFromOpenPath(filePath: string): string {
   return withoutExt || "Imported";
 }
 
-export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChange, onExcalidrawReady }: Props) {
+export function ExcalidrawBoard({
+  onCanvasLayersChange,
+  onWhiteboardTextureChange,
+  onExcalidrawReady,
+  settingsSyncEpoch = 0,
+}: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [projects, setProjects] = useState<WhiteboardProject[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -196,6 +213,8 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
   const [saveAsDialog, setSaveAsDialog] = useState(false);
   const [textureDialog, setTextureDialog] = useState(false);
   const [layersDialog, setLayersDialog] = useState(false);
+  /** Electron main menu: expand/collapse image formats under "Export As". */
+  const [exportAsImageExpanded, setExportAsImageExpanded] = useState(false);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const saveAsInputRef = useRef<HTMLInputElement | null>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -218,6 +237,9 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
   const activeIdRef = useRef(activeId);
   const menuSigRef = useRef("");
   const menuRowsRef = useRef<ProjectRow[]>([]);
+  /** Keeps latest `flushPersist` for idle/interval saves without widening `handleChange` deps. */
+  const flushPersistRef = useRef<() => void>(() => {});
+  const idleFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
@@ -241,7 +263,12 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     ? (window as unknown as {
         electronAPI?: {
           openFile?: (f?: unknown) => Promise<{ path: string; content: string } | null>;
-          saveFile?: (c: string, n?: string, f?: unknown) => Promise<boolean>;
+          saveFile?: (
+            c: string,
+            n?: string,
+            f?: unknown,
+            existingPath?: string | null
+          ) => Promise<{ ok: boolean; path?: string }>;
           saveImage?: (base64: string, n?: string) => Promise<boolean>;
         };
       }).electronAPI
@@ -275,7 +302,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
 
   useEffect(() => {
     loadProjects();
-  }, [loadProjects]);
+  }, [loadProjects, settingsSyncEpoch]);
 
   const dispatchKey = useCallback((opts: { key: string; code: string; metaKey: boolean; shiftKey?: boolean }) => {
     const ev = new KeyboardEvent("keydown", {
@@ -313,6 +340,97 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       api.executeAction("clearCanvas");
     }
   }, []);
+
+  /** Opens Excalidraw’s built-in TTD dialog (AI “text to diagram” vs Mermaid tab). */
+  const openTtdDialog = useCallback((tab: "text-to-diagram" | "mermaid") => {
+    excalidrawRef.current?.updateScene({
+      appState: {
+        openDialog: { name: "ttd", tab },
+      },
+    });
+  }, []);
+
+  /**
+   * TTD modal: desktop build omits the visible close control unless mobile (Dialog__close is gated).
+   * Inject ✕ on the panel + one “ASCII Diagram to Excalidraw” row after “Mermaid…” in the toolbar Generate menu.
+   */
+  useEffect(() => {
+    if (!ready) return;
+
+    let raf = 0;
+    const closeTtd = () => {
+      excalidrawRef.current?.updateScene({ appState: { openDialog: null } });
+    };
+
+    const patch = () => {
+      const panel = document.querySelector(
+        ".excalidraw .Modal.Dialog.ttd-dialog .Modal__content"
+      ) as HTMLElement | null;
+      if (
+        panel &&
+        !panel.querySelector(".Dialog__close") &&
+        !panel.querySelector(".dreamwork-ttd-close")
+      ) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "dreamwork-ttd-close";
+        btn.setAttribute("aria-label", "Close");
+        btn.title = "Close";
+        btn.textContent = "×";
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          closeTtd();
+        });
+        panel.appendChild(btn);
+      }
+
+      for (const menu of document.querySelectorAll(".excalidraw .dropdown-menu")) {
+        for (const titleEl of menu.querySelectorAll("p.dropdown-menu-group-title")) {
+          if (titleEl.textContent?.trim() !== "Generate") continue;
+          const group = titleEl.parentElement;
+          if (!group?.classList.contains("dropdown-menu-group")) continue;
+          if (group.querySelector("[data-dreamwork-ttd-extra]")) continue;
+
+          const asciiBtn = document.createElement("button");
+          asciiBtn.type = "button";
+          asciiBtn.setAttribute("data-dreamwork-ttd-extra", "");
+          asciiBtn.className = "dropdown-menu-item dropdown-menu-item-base";
+          asciiBtn.textContent = "ASCII Diagram to Excalidraw";
+          asciiBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openTtdDialog("text-to-diagram");
+          });
+
+          const mermaidItem = [...group.querySelectorAll("button.dropdown-menu-item")].find((el) =>
+            /mermaid/i.test(el.textContent ?? "")
+          );
+          if (mermaidItem) {
+            mermaidItem.insertAdjacentElement("afterend", asciiBtn);
+          } else {
+            group.appendChild(asciiBtn);
+          }
+        }
+      }
+    };
+
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        patch();
+      });
+    };
+
+    const mo = new MutationObserver(schedule);
+    mo.observe(document.body, { childList: true, subtree: true });
+    schedule();
+    return () => {
+      mo.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [ready, openTtdDialog]);
 
   // Two/three-finger gesture (iPad Sidecar + Apple Pencil)
   useEffect(() => {
@@ -677,6 +795,17 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
           requestAnimationFrame(runPersist);
         }
       }, debounceMs);
+
+      if (idleFlushTimerRef.current) clearTimeout(idleFlushTimerRef.current);
+      idleFlushTimerRef.current = setTimeout(() => {
+        idleFlushTimerRef.current = null;
+        const run = () => flushPersistRef.current();
+        if (typeof requestIdleCallback !== "undefined") {
+          requestIdleCallback(run, { timeout: 3000 });
+        } else {
+          requestAnimationFrame(run);
+        }
+      }, WHITEBOARD_IDLE_FLUSH_MS);
     },
     [persist, storedTexture]
   );
@@ -686,11 +815,35 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
+    if (idleFlushTimerRef.current) {
+      clearTimeout(idleFlushTimerRef.current);
+      idleFlushTimerRef.current = null;
+    }
     const api = excalidrawRef.current;
     const elements = api?.getSceneElements() ?? latestSceneRef.current.elements;
     const appState = api?.getAppState() ?? latestSceneRef.current.appState;
     persist(elements, appState as Record<string, unknown>, true); // skipStateUpdate; include empty canvas + cleared scene
   }, [persist]);
+
+  useEffect(() => {
+    flushPersistRef.current = flushPersist;
+  }, [flushPersist]);
+
+  /** Fixed-interval safety save (long sessions); skips tick while tab is hidden (visibility handler already flushes). */
+  useEffect(() => {
+    if (!ready) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const run = () => flushPersistRef.current();
+      if (typeof requestIdleCallback !== "undefined") {
+        requestIdleCallback(run, { timeout: 4000 });
+      } else {
+        requestAnimationFrame(run);
+      }
+    };
+    const id = window.setInterval(tick, WHITEBOARD_INTERVAL_FLUSH_MS);
+    return () => clearInterval(id);
+  }, [ready]);
 
   const switchProject = useCallback(
     (id: string) => {
@@ -1147,6 +1300,7 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       const proj: WhiteboardProject = {
         id: newId,
         name: projectNameFromOpenPath(result.path),
+        diskPath: result.path,
         data: data as WhiteboardProject["data"],
         updatedAt: Date.now(),
       };
@@ -1160,8 +1314,10 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     }
   }, [isElectron, electronAPI, flushPersist]);
 
-  const handleSaveToFile = useCallback(async () => {
-    if (isElectron && electronAPI?.saveFile && excalidrawRef.current) {
+  /** Electron: first save opens Save dialog; later saves overwrite `diskPath`. */
+  const handleSaveToFile = useCallback(
+    async () => {
+      if (!isElectron || !electronAPI?.saveFile || !excalidrawRef.current) return;
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
@@ -1212,7 +1368,6 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         appStateInJson.whiteboardTexture = texture;
         appStateInJson.viewBackgroundColor = "transparent";
       }
-      // Force files onto disk: serializeAsJSON can still omit entries vs. live scene.
       if (Object.keys(filesMerged).length > 0) {
         parsed.files = mergeFileMaps(parsed.files, filesMerged) as Record<string, unknown>;
       }
@@ -1224,14 +1379,48 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
       if (projData?.layerAssignments && Object.keys(projData.layerAssignments ?? {}).length > 0) parsed.layerAssignments = projData.layerAssignments;
       if (hiddenIds.length > 0) parsed.hiddenLayerIds = hiddenIds;
       const finalJson = JSON.stringify(parsed);
-      await electronAPI.saveFile(finalJson, `${project?.name ?? "drawing"}.excalidraw`, [
-        { name: "Excalidraw", extensions: ["excalidraw", "json"] },
-      ]);
-    }
-  }, [isElectron, electronAPI]);
+      const existingPath =
+        typeof project?.diskPath === "string" && project.diskPath.length > 0 ? project.diskPath : undefined;
+      const res = await electronAPI.saveFile(
+        finalJson,
+        `${project?.name ?? "drawing"}.excalidraw`,
+        [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }],
+        existingPath ?? null
+      );
+      if (res?.ok && res.path && res.path !== project?.diskPath) {
+        const next = projectsRef.current.map((p) => (p.id === aid ? { ...p, diskPath: res.path } : p));
+        projectsRef.current = next;
+        setProjects(next);
+        saveSettings(saveWhiteboardProjects(loadSettings(), next, aid));
+      }
+    },
+    [isElectron, electronAPI]
+  );
 
-  const handleExportImage = useCallback(async () => {
-    if (isElectron && electronAPI?.saveImage && excalidrawRef.current) {
+  /** Cmd/Ctrl+S: persist to app storage, then Electron file save (Save dialog only until `diskPath` is set). */
+  useEffect(() => {
+    if (!ready) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
+      const root = rootRef.current;
+      if (!root) return;
+      const t = e.target;
+      const active = document.activeElement;
+      const inBoard =
+        (t instanceof Node && root.contains(t)) || (active instanceof Node && root.contains(active));
+      if (!inBoard) return;
+      e.preventDefault();
+      flushPersist();
+      if (isElectron && electronAPI?.saveFile) void handleSaveToFile();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [ready, flushPersist, isElectron, electronAPI, handleSaveToFile]);
+
+  /** Raster export: Excalidraw `exportToBlob` supports PNG / JPEG / WebP (not PDF — that needs a separate pipeline). */
+  const handleExportRaster = useCallback(
+    async (mime: "image/png" | "image/jpeg" | "image/webp") => {
+      if (!isElectron || !electronAPI?.saveImage || !excalidrawRef.current) return;
       const project = projectsRef.current.find((p) => p.id === activeIdRef.current);
       const elements = excalidrawRef.current.getSceneElements();
       const rawAppState = excalidrawRef.current.getAppState();
@@ -1249,7 +1438,8 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         elements: elements as Parameters<typeof exportToBlob>[0]["elements"],
         appState: appState as Parameters<typeof exportToBlob>[0]["appState"],
         files: files as Parameters<typeof exportToBlob>[0]["files"],
-        mimeType: "image/png",
+        mimeType: mime,
+        ...(mime === "image/jpeg" || mime === "image/webp" ? { quality: 0.92 } : {}),
       });
       const base64 = await new Promise<string>((resolve, reject) => {
         const r = new FileReader();
@@ -1257,13 +1447,40 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
         r.onerror = reject;
         r.readAsDataURL(blob);
       });
-      await electronAPI.saveImage(base64, `${project?.name ?? "export"}.png`);
-    }
+      const ext = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : "webp";
+      await electronAPI.saveImage(base64, `${project?.name ?? "export"}.${ext}`);
+    },
+    [isElectron, electronAPI]
+  );
+
+  const handleExportSvg = useCallback(async () => {
+    if (!isElectron || !electronAPI?.saveFile || !excalidrawRef.current) return;
+    const project = projectsRef.current.find((p) => p.id === activeIdRef.current);
+    const elements = excalidrawRef.current.getSceneElements();
+    const rawAppState = excalidrawRef.current.getAppState();
+    const projData = project?.data as {
+      appState?: Record<string, unknown>;
+      files?: Record<string, unknown>;
+    } | undefined;
+    const texture =
+      (rawAppState as Record<string, unknown>).whiteboardTexture ??
+      projData?.appState?.whiteboardTexture;
+    const appState =
+      texture !== undefined ? { ...rawAppState, whiteboardTexture: texture } : rawAppState;
+    const files = mergeFileMaps(projData?.files, latestSceneRef.current.files, excalidrawRef.current.getFiles());
+    const svg = await exportToSvg({
+      elements: elements as Parameters<typeof exportToSvg>[0]["elements"],
+      appState: appState as Parameters<typeof exportToSvg>[0]["appState"],
+      files: files as Parameters<typeof exportToSvg>[0]["files"],
+    });
+    const str = new XMLSerializer().serializeToString(svg);
+    await electronAPI.saveFile(str, `${project?.name ?? "export"}.svg`, [{ name: "SVG", extensions: ["svg"] }]);
   }, [isElectron, electronAPI]);
 
   useEffect(() => {
     return () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      if (idleFlushTimerRef.current) clearTimeout(idleFlushTimerRef.current);
     };
   }, []);
 
@@ -1374,27 +1591,74 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
             <MainMenu.DefaultItems.LoadScene />
           )}
           {isElectron ? (
-            <MainMenu.Item onSelect={handleSaveToFile}>Save to...</MainMenu.Item>
+            <MainMenu.Item onSelect={() => void handleSaveToFile()}>Save to...</MainMenu.Item>
           ) : (
             <MainMenu.DefaultItems.SaveToActiveFile />
           )}
+          {!isElectron && <MainMenu.DefaultItems.Export />}
           {isElectron ? (
-            <MainMenu.Item onSelect={handleSaveToFile}>Export...</MainMenu.Item>
-          ) : (
-            <MainMenu.DefaultItems.Export />
-          )}
-          {isElectron ? (
-            <MainMenu.Item onSelect={handleExportImage}>Export image...</MainMenu.Item>
+            <>
+              <MainMenu.Item
+                aria-expanded={exportAsImageExpanded}
+                onSelect={(e) => {
+                  e.preventDefault();
+                  setExportAsImageExpanded((v) => !v);
+                }}
+              >
+                <span className="flex w-full min-w-0 items-center justify-between gap-2">
+                  <span>Export As</span>
+                  <span className="shrink-0 text-[0.65rem] opacity-60" aria-hidden>
+                    {exportAsImageExpanded ? "▾" : "▸"}
+                  </span>
+                </span>
+              </MainMenu.Item>
+              {exportAsImageExpanded ? (
+                <>
+                  <MainMenu.Item
+                    className="!pl-8"
+                    onSelect={() => {
+                      setExportAsImageExpanded(false);
+                      void handleExportRaster("image/png");
+                    }}
+                  >
+                    PNG
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    className="!pl-8"
+                    onSelect={() => {
+                      setExportAsImageExpanded(false);
+                      void handleExportRaster("image/jpeg");
+                    }}
+                  >
+                    JPEG
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    className="!pl-8"
+                    onSelect={() => {
+                      setExportAsImageExpanded(false);
+                      void handleExportRaster("image/webp");
+                    }}
+                  >
+                    WebP
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    className="!pl-8"
+                    onSelect={() => {
+                      setExportAsImageExpanded(false);
+                      void handleExportSvg();
+                    }}
+                  >
+                    SVG
+                  </MainMenu.Item>
+                </>
+              ) : null}
+            </>
           ) : (
             <MainMenu.DefaultItems.SaveAsImage />
           )}
           <MainMenu.Separator />
           <MainMenu.Item onSelect={triggerUndo}>Undo</MainMenu.Item>
           <MainMenu.Item onSelect={triggerRedo}>Redo</MainMenu.Item>
-          <MainMenu.DefaultItems.SearchMenu />
-          <MainMenu.DefaultItems.Help />
-          <MainMenu.DefaultItems.ClearCanvas />
-          <MainMenu.Item onSelect={resetCanvasInteraction}>Reset canvas interaction</MainMenu.Item>
           <MainMenu.Separator />
           <MainMenu.Group title="Project">
             {menuRows.map((p) => (
@@ -1424,6 +1688,11 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
             <MainMenu.Item onSelect={() => setTextureDialog(true)}>Choose texture...</MainMenu.Item>
           </MainMenu.Group>
           <MainMenu.Separator />
+          <MainMenu.DefaultItems.SearchMenu />
+          <MainMenu.DefaultItems.Help />
+          <MainMenu.DefaultItems.ClearCanvas />
+          <MainMenu.Item onSelect={resetCanvasInteraction}>Reset canvas interaction</MainMenu.Item>
+          <MainMenu.Separator />
           <MainMenu.DefaultItems.Socials />
           <MainMenu.DefaultItems.ToggleTheme />
           <MainMenu.DefaultItems.ChangeCanvasBackground />
@@ -1433,13 +1702,15 @@ export function ExcalidrawBoard({ onCanvasLayersChange, onWhiteboardTextureChang
     [
       menuSig,
       activeId,
+      exportAsImageExpanded,
       isElectron,
       triggerUndo,
       triggerRedo,
       resetCanvasInteraction,
       handleLoadScene,
       handleSaveToFile,
-      handleExportImage,
+      handleExportRaster,
+      handleExportSvg,
       switchProject,
       newProject,
       openSaveAsDialog,

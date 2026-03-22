@@ -36,6 +36,9 @@ interface SettingsPanelProps {
   onSystemVolumeChange: (v: number) => void;
   recordResolution?: RecordResolution;
   onRecordResolutionChange?: (v: RecordResolution) => void;
+  /** 80–100: Share window / whiteboard record area vs frame; higher = sharper, less margin. */
+  shareWindowFillPercent?: number;
+  onShareWindowFillPercentChange?: (v: number) => void;
   letterboxBackground?: LetterboxBackground;
   onLetterboxBackgroundChange?: (v: LetterboxBackground) => void;
   letterboxCustomImage?: string | null;
@@ -68,11 +71,13 @@ export function SettingsPanel({
   onSystemVolumeChange,
   recordResolution,
   onRecordResolutionChange,
+  shareWindowFillPercent,
+  onShareWindowFillPercentChange,
   letterboxBackground,
   onLetterboxBackgroundChange,
   letterboxCustomImage,
   onLetterboxCustomImageChange,
-  letterboxMode = "contain",
+  letterboxMode = "fit",
   onLetterboxModeChange,
   faceFilter = "none",
   onFaceFilterChange,
@@ -237,6 +242,27 @@ export function SettingsPanel({
             </Select>
           </div>
         )}
+        {shareWindowFillPercent != null && onShareWindowFillPercentChange && (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-3">
+              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`} title="Share area vs output frame">
+                Share
+              </span>
+              <Slider
+                value={[shareWindowFillPercent]}
+                onValueChange={([v]) => onShareWindowFillPercentChange(Math.round(v ?? 80))}
+                min={80}
+                max={100}
+                step={5}
+                className="flex-1 min-w-0"
+              />
+              <span className="w-11 shrink-0 text-sm tabular-nums text-slate-700">{shareWindowFillPercent}%</span>
+            </div>
+            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
+              Target vs base mat: uniform scale (same aspect as output). Larger = more screen, less surround. Preview + recording.
+            </p>
+          </div>
+        )}
         {letterboxBackground != null && onLetterboxBackgroundChange && (
           <div className="flex items-center gap-3">
             <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Bg</span>
@@ -255,20 +281,38 @@ export function SettingsPanel({
           </div>
         )}
         {onLetterboxModeChange != null && (
-          <div className="flex items-center gap-3">
-            <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Fit</span>
-            <Select
-              value={letterboxMode}
-              onValueChange={(v) => onLetterboxModeChange(v as LetterboxMode)}
-            >
-              <SelectTrigger className="min-w-[10rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
-                <SelectItem value="contain">Fit (may show bars)</SelectItem>
-                <SelectItem value="cover">Fill (crop edges)</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-3">
+              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>
+                Scale
+              </span>
+              <div className="flex flex-1 min-w-0 flex-wrap gap-2">
+                <GlassButton
+                  size="sm"
+                  variant={letterboxMode === "fill" ? "primary" : "secondary"}
+                  onClick={() => onLetterboxModeChange("fill")}
+                >
+                  Fill
+                </GlassButton>
+                <GlassButton
+                  size="sm"
+                  variant={letterboxMode === "fit" ? "primary" : "secondary"}
+                  onClick={() => onLetterboxModeChange("fit")}
+                >
+                  Fit
+                </GlassButton>
+                <GlassButton
+                  size="sm"
+                  variant={letterboxMode === "crop" ? "primary" : "secondary"}
+                  onClick={() => onLetterboxModeChange("crop")}
+                >
+                  Crop
+                </GlassButton>
+              </div>
+            </div>
+            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
+              Controls background image scaling.
+            </p>
           </div>
         )}
         {onLetterboxCustomImageChange && onLetterboxBackgroundChange && (

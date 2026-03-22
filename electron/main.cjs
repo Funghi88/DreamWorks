@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, screen, session, dialog, systemPreferences } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, session, dialog, systemPreferences, desktopCapturer } = require("electron");
+const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const embeddedSignaling = require("./embedded-signaling.cjs");
@@ -8,15 +9,80 @@ const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
 let mainWindow = null;
 const helperWindows = new Map();
 
+/** Pending `getDisplayMedia` callback + sources list until user picks in the renderer (macOS). */
+let displayMediaPending = null;
+
+function clearDisplayMediaPending(rejectWithEmpty) {
+  if (!displayMediaPending) return;
+  if (displayMediaPending.timeoutId) {
+    clearTimeout(displayMediaPending.timeoutId);
+  }
+  if (rejectWithEmpty && typeof displayMediaPending.callback === "function") {
+    try {
+      displayMediaPending.callback({});
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  displayMediaPending = null;
+}
+
 const APP_NAME = "DreamWorks";
 
 /**
- * macOS 15+ (and compatible): Apple’s system picker — user can choose Entire Screen / Window / apps.
- * Do NOT auto-pick desktopCapturer sources here; that bypassed the picker and removed “full display”.
- * If useSystemPicker is unavailable, Electron falls back to default Chromium behavior.
+ * macOS: `getDisplayMedia` needs a `desktopCapturer` handler. We defer `callback` until the user
+ * picks a screen/window in the renderer (see `display-media-picker` IPC).
  */
-function installNativeDisplayMediaHandler() {
-  session.defaultSession.setDisplayMediaRequestHandler(null, { useSystemPicker: true });
+function installDarwinDisplayMediaHandler() {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  try {
+    /* Larger 16:9 thumbs so previews look sharp in the picker (was 200², very blurry when scaled). */
+    const thumb = { width: 720, height: 405 };
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      clearDisplayMediaPending(true);
+      desktopCapturer
+        .getSources({ types: ["screen", "window"], thumbnailSize: thumb })
+        .then((sources) => {
+          if (!sources.length) {
+            console.warn("[DreamWorks] desktopCapturer: no sources (Screen Recording permission?)");
+            callback({});
+            return;
+          }
+          const wc = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+          if (!wc) {
+            callback({});
+            return;
+          }
+          const timeoutId = setTimeout(() => {
+            if (displayMediaPending && displayMediaPending.callback === callback) {
+              clearDisplayMediaPending(true);
+            }
+          }, 120000);
+          displayMediaPending = { callback, sources, timeoutId };
+          const payload = sources.map((s) => {
+            let thumbnailDataUrl;
+            if (s.thumbnail && !s.thumbnail.isEmpty()) {
+              try {
+                const jpeg = s.thumbnail.toJPEG(85);
+                thumbnailDataUrl = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+              } catch {
+                thumbnailDataUrl = s.thumbnail.toDataURL();
+              }
+            }
+            return { id: s.id, name: s.name, thumbnailDataUrl };
+          });
+          wc.send("display-media-picker", payload);
+        })
+        .catch((err) => {
+          console.error("[DreamWorks] desktopCapturer.getSources:", err);
+          callback({});
+        });
+    });
+  } catch (e) {
+    console.warn("[DreamWorks] setDisplayMediaRequestHandler:", e);
+  }
 }
 
 function createMainWindow() {
@@ -57,12 +123,18 @@ function createMainWindow() {
   // Show save dialog when whiteboard exports image
   mainWindow.webContents.session.on("will-download", (event, item) => {
     const name = item.getFilename();
-    if (!/\.(png|svg|webp)$/i.test(name)) return;
+    if (!/\.(png|svg|webp|jpe?g)$/i.test(name)) return;
     item.pause();
     dialog
       .showSaveDialog(mainWindow, {
         defaultPath: name,
-        filters: [{ name: "Image", extensions: ["png", "svg", "webp"] }],
+        filters: [
+          { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "svg"] },
+          { name: "PNG", extensions: ["png"] },
+          { name: "JPEG", extensions: ["jpg", "jpeg"] },
+          { name: "WebP", extensions: ["webp"] },
+          { name: "SVG", extensions: ["svg"] },
+        ],
       })
       .then(({ canceled, filePath }) => {
         if (canceled || !filePath) {
@@ -178,6 +250,15 @@ app.whenReady().then(() => {
   app.setName(APP_NAME);
   // Register IPC handlers (must be before createMainWindow so they exist when renderer loads)
   const SETTINGS_PATH = path.join(app.getPath("userData"), "settings.json");
+  ipcMain.handle("getHardwareModel", async () => {
+    if (process.platform !== "darwin") return null;
+    try {
+      return execSync("sysctl -n hw.model", { encoding: "utf8" }).trim() || null;
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle("getSettings", async () => {
     return loadSettingsWithMigration(SETTINGS_PATH);
   });
@@ -199,7 +280,32 @@ app.whenReady().then(() => {
     }
   });
 
-  installNativeDisplayMediaHandler();
+  ipcMain.handle("displayMediaPick", async (_, sourceId) => {
+    if (!displayMediaPending?.sources || typeof displayMediaPending.callback !== "function") {
+      return false;
+    }
+    const src = displayMediaPending.sources.find((s) => s.id === sourceId);
+    if (!src) {
+      clearDisplayMediaPending(true);
+      return false;
+    }
+    const cb = displayMediaPending.callback;
+    if (displayMediaPending.timeoutId) clearTimeout(displayMediaPending.timeoutId);
+    displayMediaPending = null;
+    try {
+      cb({ video: src });
+    } catch (e) {
+      console.error("[DreamWorks] displayMediaPick callback:", e);
+      return false;
+    }
+    return true;
+  });
+
+  ipcMain.handle("displayMediaCancel", async () => {
+    clearDisplayMediaPending(true);
+  });
+
+  installDarwinDisplayMediaHandler();
 
   createMainWindow();
   app.on("activate", () => {
@@ -310,28 +416,33 @@ ipcMain.handle("openFile", async (_, filters = [{ name: "Excalidraw", extensions
   }
 });
 
-// IPC: saveFile (for whiteboard Save/Export)
+// IPC: saveFile (for whiteboard Save/Export). If `existingPath` is set, write without dialog (overwrite).
 ipcMain.handle(
   "saveFile",
   async (
     _,
     content,
     defaultName = "drawing.excalidraw",
-    filters = [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }]
+    filters = [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }],
+    existingPath = null
   ) => {
     const win = BrowserWindow.getFocusedWindow() || mainWindow;
-    if (!win) return false;
-    const { canceled, filePath } = await dialog.showSaveDialog(win, {
-      defaultPath: defaultName,
-      filters,
-    });
-    if (canceled || !filePath) return false;
+    if (!win) return { ok: false };
+    let filePath = typeof existingPath === "string" && existingPath.length > 0 ? existingPath : null;
+    if (!filePath) {
+      const { canceled, filePath: picked } = await dialog.showSaveDialog(win, {
+        defaultPath: defaultName,
+        filters,
+      });
+      if (canceled || !picked) return { ok: false };
+      filePath = picked;
+    }
     try {
       fs.writeFileSync(filePath, content, "utf8");
-      return true;
+      return { ok: true, path: filePath };
     } catch (e) {
       console.error("saveFile:", e);
-      return false;
+      return { ok: false };
     }
   }
 );
@@ -342,7 +453,13 @@ ipcMain.handle("saveImage", async (_, base64, defaultName = "export.png") => {
   if (!win) return false;
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     defaultPath: defaultName,
-    filters: [{ name: "Image", extensions: ["png", "svg", "webp"] }],
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "svg"] },
+      { name: "PNG", extensions: ["png"] },
+      { name: "JPEG", extensions: ["jpg", "jpeg"] },
+      { name: "WebP", extensions: ["webp"] },
+      { name: "SVG", extensions: ["svg"] },
+    ],
   });
   if (canceled || !filePath) return false;
   try {

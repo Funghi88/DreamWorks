@@ -1,3 +1,13 @@
+/*
+ * While dragging the DreamWorks split handle, disable whiteboard hit-testing so the canvas
+ * doesn’t compete for pointer routing (feels “涩” / sticky). Cover the wrapper, not only .excalidraw.
+ */
+[data-dw-split-dragging] .dreamwork-whiteboard-touch,
+[data-dw-split-dragging] .excalidraw,
+[data-dw-split-dragging] .excalidraw-wrapper {
+  pointer-events: none !important;
+}
+
 /* Fill column height — avoid a blank band above the canvas when flex/absolute chains break. */
 .dreamwork-whiteboard-touch .excalidraw {
   height: 100% !important;
@@ -16,4 +26,73 @@
   overscroll-behavior: none;
   -webkit-user-select: none;
   user-select: none;
+}
+
+/*
+ * Main hamburger menu: Excalidraw adds .dropdown-menu--mobile in narrow layouts and sets width:100%,
+ * so the panel stretches to the full whiteboard width with empty space on the right. Hug content instead.
+ */
+.dreamwork-whiteboard-touch .excalidraw .dropdown-menu.dropdown-menu--mobile {
+  width: auto !important;
+  max-width: min(100%, 17rem);
+}
+
+.dreamwork-whiteboard-touch .excalidraw .dropdown-menu.dropdown-menu--mobile .dropdown-menu-container {
+  width: auto !important;
+  max-width: min(100%, 17rem);
+}
+
+/*
+ * Modals (TTD / Mermaid): default --zIndex-modal is 1000; DreamWorks header is z-index 999999 — lift host above header.
+ * Backdrop: match Capture / display-picker purple frosted glass (not flat gray #12121233).
+ */
+/* Portal target varies; class is Excalidraw-specific. Above #dreamwork-header-root (999999), below settings drawer (1000010). */
+.excalidraw-modal-container {
+  z-index: 1000000 !important;
+}
+
+.excalidraw-modal-container .Modal__background {
+  background-color: rgba(46, 16, 101, 0.16) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+}
+
+/* Text-to-diagram / Mermaid modal: slightly smaller, more top breathing room (TTD uses size 1200px + tall max-height). */
+.dreamwork-whiteboard-touch .excalidraw .Modal.Dialog.ttd-dialog {
+  padding-top: calc(var(--space-factor) * 10 + 12px) !important;
+  padding-bottom: calc(var(--space-factor) * 8) !important;
+  box-sizing: border-box;
+}
+
+.dreamwork-whiteboard-touch .excalidraw .Modal.Dialog.ttd-dialog .Modal__content {
+  --max-width: min(92vw, 880px) !important;
+  max-width: min(92vw, 880px) !important;
+}
+
+@media screen and (min-width: 861px) {
+  .dreamwork-whiteboard-touch .excalidraw .Modal.Dialog.ttd-dialog .Modal__content {
+    max-height: min(70vh, 620px) !important;
+  }
+}
+
+/* Injected close control — upstream only shows Dialog__close on mobile for this dialog. */
+.dreamwork-whiteboard-touch .excalidraw .Modal.Dialog.ttd-dialog .Modal__content .dreamwork-ttd-close {
+  position: absolute;
+  top: 0.65rem;
+  right: 0.65rem;
+  z-index: 6;
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: var(--border-radius-lg, 0.5rem);
+  background: transparent;
+  color: var(--icon-fill-color, #1b1b1f);
+  font: inherit;
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dreamwork-whiteboard-touch .excalidraw .Modal.Dialog.ttd-dialog .Modal__content .dreamwork-ttd-close:hover {
+  background-color: var(--button-gray-2, rgba(0, 0, 0, 0.06));
 }

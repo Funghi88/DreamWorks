@@ -10,6 +10,11 @@ function validNum(n: unknown, min: number, max: number): number | undefined {
   return typeof n === "number" && n >= min && n <= max ? n : undefined;
 }
 
+/** Saved values far above a plausible side strip were mistaken layout widths (debug 1b8595); normalize to default min. */
+function normalizeWhiteboardStripWidth(n: number): number {
+  return n > 500 ? 40 : n;
+}
+
 function validBeautySettings(s: unknown): StoredBeautySettings | undefined {
   if (!s || typeof s !== "object") return undefined;
   const p = s as Record<string, unknown>;
@@ -46,7 +51,8 @@ export interface StoredBeautySettings {
 export type RecordResolution = "1080p" | "2K" | "4K";
 
 export type LetterboxBackground = "black" | "custom";
-export type LetterboxMode = "contain" | "cover";
+/** Custom background (and non–screen-share composites): fit = contain, crop = cover, fill = stretch. */
+export type LetterboxMode = "fill" | "fit" | "crop";
 
 export type WhiteboardLayer = { id: string; name: string };
 
@@ -55,6 +61,8 @@ export interface StoredSettings {
   pipPos?: { x: number; y: number };
   fullPagePipPos?: { x: number; y: number };
   recordResolution?: RecordResolution;
+  /** Share window / whiteboard-only record: width & height scale vs output frame (80–100). Higher = sharper, less margin. */
+  shareWindowFillPercent?: number;
   letterboxBackground?: LetterboxBackground;
   letterboxCustomImage?: string;
   letterboxMode?: LetterboxMode;
@@ -81,6 +89,8 @@ export interface StoredSettings {
   whiteboardProjects?: Array<{
     id: string;
     name: string;
+    /** Electron: last .excalidraw path for this project (⌘S overwrites; unset → next save opens Save dialog). */
+    diskPath?: string;
     data: {
       elements: unknown[];
       appState: Record<string, unknown>;
@@ -176,7 +186,15 @@ function validProjects(v: unknown): StoredSettings["whiteboardProjects"] {
     const data = validWhiteboardData(p.data);
     if (!data) continue;
     const name = p.name === "未命名项目" ? "Untitled" : p.name;
-    out.push({ id: p.id, name, data, updatedAt: p.updatedAt });
+    const diskPath =
+      typeof p.diskPath === "string" && p.diskPath.length > 0 ? p.diskPath : undefined;
+    out.push({
+      id: p.id,
+      name,
+      data,
+      updatedAt: p.updatedAt,
+      ...(diskPath ? { diskPath } : {}),
+    });
   }
   return out.length ? out : undefined;
 }
@@ -207,6 +225,7 @@ function parseAndValidate(parsed: unknown): StoredSettings {
         ? (p.fullPagePipPos as { x: number; y: number })
         : undefined,
     recordResolution: p.recordResolution === "1080p" || p.recordResolution === "2K" || p.recordResolution === "4K" ? (p.recordResolution as RecordResolution) : undefined,
+    shareWindowFillPercent: validNum(p.shareWindowFillPercent, 80, 100),
     letterboxBackground:
       p.letterboxBackground && ["black", "custom"].includes(p.letterboxBackground as string)
         ? (p.letterboxBackground as LetterboxBackground)
@@ -216,10 +235,15 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       (p.letterboxCustomImage.startsWith("data:image/") || p.letterboxCustomImage.startsWith("blob:"))
         ? p.letterboxCustomImage
         : undefined,
-    letterboxMode:
-      p.letterboxMode && ["contain", "cover"].includes(p.letterboxMode as string)
-        ? (p.letterboxMode as LetterboxMode)
-        : undefined,
+    letterboxMode: (() => {
+      const m = p.letterboxMode;
+      if (m === "fill" || m === "fit" || m === "crop") return m as LetterboxMode;
+      // Backward compatibility with previous naming.
+      if (m === "stretch") return "fill";
+      if (m === "contain") return "fit";
+      if (m === "cover") return "crop";
+      return undefined;
+    })(),
     previewPosition:
       p.previewPosition &&
       ["top-left", "top-right", "bottom-left", "bottom-right"].includes(p.previewPosition as string)
@@ -244,10 +268,13 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       typeof p.previewWidth === "number" && p.previewWidth >= 80 && p.previewWidth <= 600
         ? p.previewWidth
         : undefined,
-    whiteboardPanelWidth:
-      typeof p.whiteboardPanelWidth === "number" && p.whiteboardPanelWidth >= 40 && p.whiteboardPanelWidth <= 800
-        ? p.whiteboardPanelWidth
-        : undefined,
+    whiteboardPanelWidth: (() => {
+      const raw =
+        typeof p.whiteboardPanelWidth === "number" && p.whiteboardPanelWidth >= 40 && p.whiteboardPanelWidth <= 800
+          ? p.whiteboardPanelWidth
+          : undefined;
+      return raw !== undefined ? normalizeWhiteboardStripWidth(raw) : undefined;
+    })(),
     capturePanelWidth:
       typeof p.capturePanelWidth === "number" && p.capturePanelWidth >= 60 && p.capturePanelWidth <= 600
         ? p.capturePanelWidth
