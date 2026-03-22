@@ -501,6 +501,9 @@ export function TeleprompterPanel({
   onFlushSave,
   onEditorScroll,
 }: TeleprompterPanelProps) {
+  const MIN_PANEL_HEIGHT = 320;
+  const MIN_EDITOR_HEIGHT = 96;
+  const PANEL_CHROME_RESERVED = 190;
   const [collapsed, setCollapsed] = useState(false);
   const [editingScriptName, setEditingScriptName] = useState(false);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
@@ -570,13 +573,28 @@ export function TeleprompterPanel({
   const panelLivePosRef = useRef<{ x: number; y: number } | null>(null);
   const [panelLivePos, setPanelLivePos] = useState<{ x: number; y: number } | null>(null);
   const [panelSize, setPanelSize] = useState({ w: panelWidth, h: panelHeight });
+  const [editorHeight, setEditorHeight] = useState(() => Math.max(140, panelHeight - PANEL_CHROME_RESERVED));
   const panelSizeRef = useRef(panelSize);
   panelSizeRef.current = panelSize;
+  const editorHeightRef = useRef(editorHeight);
+  editorHeightRef.current = editorHeight;
   const panelResizingRef = useRef(false);
+  const editorResizingRef = useRef(false);
 
   useEffect(() => {
     setPanelSize({ w: panelWidth, h: panelHeight });
   }, [panelWidth, panelHeight]);
+
+  useEffect(() => {
+    const maxEditorHeight = Math.max(MIN_EDITOR_HEIGHT, panelSize.h - PANEL_CHROME_RESERVED);
+    if (editorHeightRef.current > maxEditorHeight) {
+      setEditorHeight(maxEditorHeight);
+      return;
+    }
+    if (editorHeightRef.current < MIN_EDITOR_HEIGHT) {
+      setEditorHeight(MIN_EDITOR_HEIGHT);
+    }
+  }, [panelSize.h]);
 
   const expandedWidth = panelSize.w;
   const expandedHeight = panelSize.h;
@@ -685,6 +703,9 @@ export function TeleprompterPanel({
     e.preventDefault();
     e.stopPropagation();
     clearAutoMinimizeTimer();
+    const anchor = panelLivePosRef.current ?? position ?? { x: left, y: top };
+    panelLivePosRef.current = anchor;
+    setPanelLivePos(anchor);
     panelResizingRef.current = true;
     const startW = panelSizeRef.current.w;
     const startH = panelSizeRef.current.h;
@@ -702,12 +723,57 @@ export function TeleprompterPanel({
       const dx = ev.clientX - sx;
       const dy = ev.clientY - sy;
       lastW = Math.max(280, Math.min(maxW, startW + dx));
-      lastH = Math.max(320, Math.min(maxH, startH + dy));
+      lastH = Math.max(MIN_PANEL_HEIGHT, Math.min(maxH, startH + dy));
       setPanelSize({ w: lastW, h: lastH });
     };
     const onUp = () => {
       panelResizingRef.current = false;
       onPanelSizeChange(lastW, lastH);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
+  const onEditorResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (locked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearAutoMinimizeTimer();
+    const anchor = panelLivePosRef.current ?? position ?? { x: left, y: top };
+    panelLivePosRef.current = anchor;
+    setPanelLivePos(anchor);
+    editorResizingRef.current = true;
+    const startPanelH = panelSizeRef.current.h;
+    const startEditorH = editorHeightRef.current;
+    const sy = e.clientY;
+    let lastPanelH = startPanelH;
+    let lastEditorH = startEditorH;
+    const target = e.currentTarget as HTMLElement;
+    if (target.setPointerCapture && e.pointerId != null) target.setPointerCapture(e.pointerId);
+
+    const onMove = (ev: PointerEvent) => {
+      if (!editorResizingRef.current) return;
+      const vp = getViewportSize();
+      const maxPanelByViewport = Math.min(900, Math.max(MIN_PANEL_HEIGHT, vp.height - top - 8));
+      const dy = ev.clientY - sy;
+      const nextPanelH = Math.max(MIN_PANEL_HEIGHT, Math.min(maxPanelByViewport, startPanelH + dy));
+      const panelDelta = nextPanelH - startPanelH;
+      const nextEditorMax = Math.max(MIN_EDITOR_HEIGHT, nextPanelH - PANEL_CHROME_RESERVED);
+      const nextEditorH = Math.max(MIN_EDITOR_HEIGHT, Math.min(nextEditorMax, startEditorH + panelDelta));
+      lastPanelH = nextPanelH;
+      lastEditorH = nextEditorH;
+      setPanelSize((prev) => ({ ...prev, h: nextPanelH }));
+      setEditorHeight(nextEditorH);
+    };
+
+    const onUp = () => {
+      editorResizingRef.current = false;
+      setEditorHeight(lastEditorH);
+      onPanelSizeChange(panelSizeRef.current.w, lastPanelH);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
@@ -995,8 +1061,16 @@ export function TeleprompterPanel({
             }
           }}
           rows={6}
-          className="min-h-[6rem] w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
+          style={{ height: editorHeight }}
+          className="w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
           placeholder="Paste script here..."
+        />
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          className={`mt-1.5 h-2 shrink-0 rounded border border-white/15 bg-black/35 ${locked ? "cursor-not-allowed opacity-40" : "cursor-ns-resize hover:bg-white/10"}`}
+          onPointerDown={onEditorResizePointerDown}
+          title={locked ? "Unlock to resize editor" : "Drag down to enlarge editor panel"}
         />
 
         <div className="mt-2 flex shrink-0 flex-col gap-2 border-t border-white/15 pt-2">

@@ -181,6 +181,8 @@ type Props = {
 
 type ProjectRow = { id: string; name: string };
 
+type SaveNameDialogMode = "projectSaveAs" | "fileSaveTo";
+
 type ExcalidrawAPI = {
   updateScene: (s: { elements?: unknown[]; appState?: Record<string, unknown>; files?: Record<string, unknown> }) => void;
   /** Required to load image binaries — updateScene ignores `files` in Excalidraw 0.18. */
@@ -211,6 +213,7 @@ export function ExcalidrawBoard({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; projectId: string } | null>(null);
   const [renameDialog, setRenameDialog] = useState<{ projectId: string } | null>(null);
   const [saveAsDialog, setSaveAsDialog] = useState(false);
+  const [saveNameDialogMode, setSaveNameDialogMode] = useState<SaveNameDialogMode>("projectSaveAs");
   const [textureDialog, setTextureDialog] = useState(false);
   const [layersDialog, setLayersDialog] = useState(false);
   /** Electron main menu: expand/collapse image formats under "Export As". */
@@ -1159,7 +1162,14 @@ export function ExcalidrawBoard({
     [projects, activeId]
   );
 
-  const openSaveAsDialog = useCallback(() => setSaveAsDialog(true), []);
+  const openSaveAsDialog = useCallback(() => {
+    setSaveNameDialogMode("projectSaveAs");
+    setSaveAsDialog(true);
+  }, []);
+  const openSaveToDialog = useCallback(() => {
+    setSaveNameDialogMode("fileSaveTo");
+    setSaveAsDialog(true);
+  }, []);
 
   const confirmSaveAs = useCallback(
     (name: string) => {
@@ -1314,9 +1324,9 @@ export function ExcalidrawBoard({
     }
   }, [isElectron, electronAPI, flushPersist]);
 
-  /** Electron: first save opens Save dialog; later saves overwrite `diskPath`. */
+  /** Electron: first save opens Save dialog; later saves overwrite `diskPath` (unless `forceDialog`). */
   const handleSaveToFile = useCallback(
-    async () => {
+    async (opts?: { forceDialog?: boolean; filenameHint?: string }) => {
       if (!isElectron || !electronAPI?.saveFile || !excalidrawRef.current) return;
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
@@ -1379,11 +1389,19 @@ export function ExcalidrawBoard({
       if (projData?.layerAssignments && Object.keys(projData.layerAssignments ?? {}).length > 0) parsed.layerAssignments = projData.layerAssignments;
       if (hiddenIds.length > 0) parsed.hiddenLayerIds = hiddenIds;
       const finalJson = JSON.stringify(parsed);
+      const hintRaw = opts?.filenameHint?.trim();
+      const baseForName = hintRaw || project?.name || "drawing";
+      const defaultFilename =
+        /\.(excalidraw|json)$/i.test(baseForName) ? baseForName : `${baseForName}.excalidraw`;
       const existingPath =
-        typeof project?.diskPath === "string" && project.diskPath.length > 0 ? project.diskPath : undefined;
+        opts?.forceDialog === true
+          ? undefined
+          : typeof project?.diskPath === "string" && project.diskPath.length > 0
+            ? project.diskPath
+            : undefined;
       const res = await electronAPI.saveFile(
         finalJson,
-        `${project?.name ?? "drawing"}.excalidraw`,
+        defaultFilename,
         [{ name: "Excalidraw", extensions: ["excalidraw", "json"] }],
         existingPath ?? null
       );
@@ -1591,7 +1609,7 @@ export function ExcalidrawBoard({
             <MainMenu.DefaultItems.LoadScene />
           )}
           {isElectron ? (
-            <MainMenu.Item onSelect={() => void handleSaveToFile()}>Save to...</MainMenu.Item>
+            <MainMenu.Item onSelect={openSaveToDialog}>Save to...</MainMenu.Item>
           ) : (
             <MainMenu.DefaultItems.SaveToActiveFile />
           )}
@@ -1709,6 +1727,7 @@ export function ExcalidrawBoard({
       resetCanvasInteraction,
       handleLoadScene,
       handleSaveToFile,
+      openSaveToDialog,
       handleExportRaster,
       handleExportSvg,
       switchProject,
@@ -1748,7 +1767,7 @@ export function ExcalidrawBoard({
                 ref={renameInputRef}
                 type="text"
                 defaultValue={renameDialogProject.name}
-                className="mb-3 w-64 rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                className="mb-3 w-64 rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-[#E9E8FD] focus:outline-none"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     applyRename(renameDialog.projectId, (e.target as HTMLInputElement).value);
@@ -1767,7 +1786,7 @@ export function ExcalidrawBoard({
                 </button>
                 <button
                   type="button"
-                  className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-700"
+                  className="rounded border border-[#E9E8FD] bg-[#E9E8FD] px-3 py-1 text-sm text-[#2f3366] hover:bg-[#E9E8FD]"
                   onClick={() => {
                     const val = renameInputRef.current?.value ?? "";
                     applyRename(renameDialog.projectId, val);
@@ -1793,13 +1812,20 @@ export function ExcalidrawBoard({
             >
               <label className="mb-2 block text-sm font-medium text-gray-700">Project name</label>
               <input
+                key={saveNameDialogMode}
                 ref={saveAsInputRef}
                 type="text"
-                defaultValue="Untitled"
-                className="mb-3 w-64 rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                defaultValue={saveNameDialogMode === "fileSaveTo" ? (currentProject?.name ?? "Untitled") : "Untitled"}
+                className="mb-3 w-64 rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-[#E9E8FD] focus:outline-none"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    confirmSaveAs((e.target as HTMLInputElement).value);
+                    const val = (e.target as HTMLInputElement).value;
+                    if (saveNameDialogMode === "fileSaveTo") {
+                      setSaveAsDialog(false);
+                      void handleSaveToFile({ forceDialog: true, filenameHint: val });
+                    } else {
+                      confirmSaveAs(val);
+                    }
                   }
                   if (e.key === "Escape") setSaveAsDialog(false);
                 }}
@@ -1814,10 +1840,15 @@ export function ExcalidrawBoard({
                 </button>
                 <button
                   type="button"
-                  className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-700"
+                  className="rounded border border-[#E9E8FD] bg-[#E9E8FD] px-3 py-1 text-sm text-[#2f3366] hover:bg-[#E9E8FD]"
                   onClick={() => {
                     const val = saveAsInputRef.current?.value ?? "";
-                    confirmSaveAs(val);
+                    if (saveNameDialogMode === "fileSaveTo") {
+                      setSaveAsDialog(false);
+                      void handleSaveToFile({ forceDialog: true, filenameHint: val });
+                    } else {
+                      confirmSaveAs(val);
+                    }
                   }}
                 >
                   OK

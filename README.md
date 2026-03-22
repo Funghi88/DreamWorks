@@ -5,7 +5,7 @@
 
 DreamWorks 主界面
 
-![DreamWorks 主界面](docs/screenshots/main-interface.png)
+DreamWorks 主界面
 
 ---
 
@@ -69,7 +69,7 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 #### 图片与存储（不丢贴图 / 纹理）
 
 - **多项目**：白板以 `whiteboardProjects` 存盘；单项目内保留 `elements`、`appState`、可选的 `**files`**（嵌入图片等二进制映射）。
-- `**dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 `**whiteboardTexture`**（纸纹 id）与完整 `**files**`，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
+- `**dreamwork` 备份字段**：在 `data.dreamwork` 中冗余保存 `**whiteboardTexture`**（纸纹 id）与完整 `**files`**，防止 Excalidraw 序列化路径未带齐 sibling 键时落地丢图。
 - `**latestSceneRef**`：在 React 重渲染或 API 暂不可用时，仍能拿到最近一次场景的 **elements / appState / files**，供 **flush** 与导出使用。
 - **持久化节奏**：结构性改动较快落盘；纯视口类变化可 `**requestIdleCallback` + rAF** 延后写入。Web 上磁盘写入 `**setTimeout(0)` 微延迟**，减轻 `JSON.stringify` 与 storage 同步卡住下一帧平移；**flushPersist**（切项目、页签隐藏、`beforeunload`、卸载）仍 **同步队列**，保证退出前数据一致。
 - **Electron 与 Web 同一路径落盘**：自动保存统一为 `saveWhiteboardProjects(loadSettings(), …)` + `saveSettings` 同步合并，**不再**在 Electron 分支用 `loadSettingsAsync().then(...)` 拼盘，避免异步读盘与连续保存竞态把 `whiteboardProjects` 覆盖成旧快照（曾可能导致「白板内容消失」的观感）。
@@ -112,9 +112,11 @@ npm run dev
 
 ### 截图
 
-| 主界面 | Live Meeting | 录制与导出 |
-| --- | --- | --- |
-| ![主界面：录屏 + 画中画 + 白板](docs/screenshots/main-interface.png) | ![Live Meeting：视频会议（Local 模式）](docs/screenshots/live-meeting.png) | ![录制与导出：控制与导出](docs/screenshots/recording.png) |
+
+| 主界面               | Live Meeting                | 录制与导出       |
+| ----------------- | --------------------------- | ----------- |
+| 主界面：录屏 + 画中画 + 白板 | Live Meeting：视频会议（Local 模式） | 录制与导出：控制与导出 |
+
 
 ### 项目进展
 
@@ -188,8 +190,8 @@ This section summarizes how we integrate **Excalidraw**: keep the canvas respons
 
 #### Images & storage (no lost embeds / texture)
 
-- **Projects:** Boards are stored under `**whiteboardProjects`**; each project keeps `elements`, `appState`, and optional `**files**` (binary map for pasted images, etc.).
-- `**dreamwork` backup:** `data.dreamwork` redundantly stores `**whiteboardTexture`** (texture id) and the full `**files**` map when needed, so a slim serialization path doesn’t drop blobs.
+- **Projects:** Boards are stored under `**whiteboardProjects`**; each project keeps `elements`, `appState`, and optional `**files`** (binary map for pasted images, etc.).
+- `**dreamwork` backup:** `data.dreamwork` redundantly stores `**whiteboardTexture`** (texture id) and the full `**files`** map when needed, so a slim serialization path doesn’t drop blobs.
 - `**latestSceneRef`:** Holds the latest **elements / appState / files** even when React or the API is between states—used for **flush** paths and exports.
 - **Persistence pacing:** Structural edits flush sooner; view-only changes may use `**requestIdleCallback` + rAF**. On the web, disk writes are **deferred one macrotask** to keep the next pan smooth; `**flushPersist`** (project switch, tab hidden, `beforeunload`, unmount) still runs **synchronously** so data is consistent on exit.
 
@@ -231,9 +233,11 @@ The app opens in an Electron window.
 
 ### Screenshots
 
-| Main UI | Live Meeting | Recording & export |
-| --- | --- | --- |
-| ![Main UI: screen + PiP + whiteboard](docs/screenshots/main-interface.png) | ![Live Meeting: video call (Local mode)](docs/screenshots/live-meeting.png) | ![Recording: controls and export](docs/screenshots/recording.png) |
+
+| Main UI                            | Live Meeting                          | Recording & export             |
+| ---------------------------------- | ------------------------------------- | ------------------------------ |
+| Main UI: screen + PiP + whiteboard | Live Meeting: video call (Local mode) | Recording: controls and export |
+
 
 ### Project status
 
@@ -251,8 +255,8 @@ The app opens in an Electron window.
 
 1. **Screen Recording must be ON (blue)** for the exact app you’re running — **Electron** when using `npm run dev`, **DreamWorks** when using the built `.app`. If you see both **DreamWork** and **DreamWorks** in the list, enable the one that matches your build (or enable both while testing).
 2. After changing permission, **quit and reopen** the app (macOS often won’t refresh the picker until restart).
-3. **macOS + Electron:** The main process uses a **`desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
-4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused **`getDisplayMedia` → “Not supported”** in testing on this Electron + macOS combo, so the app uses **`desktopCapturer` + the in-app sheet** instead. Upgrading Electron later may allow revisiting the native path.
+3. **macOS + Electron:** The main process uses a `**desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
+4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused `**getDisplayMedia` → “Not supported”** in testing on this Electron + macOS combo, so the app uses `**desktopCapturer` + the in-app sheet** instead. Upgrading Electron later may allow revisiting the native path.
 
 **Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
 
