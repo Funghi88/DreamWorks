@@ -83,6 +83,10 @@ export interface StoredSettings {
   faceFilter?: "none" | "sunglasses" | "vampire" | "heart";
   micVolume?: number;
   systemVolume?: number;
+  /** When true, exported recording omits the in-app PiP (use macOS presenter / camera overlay in your meeting app instead). */
+  omitPipFromRecording?: boolean;
+  /** When true, starting a recording moves PiP to the whiteboard column (off the shared capture area when screen sharing). */
+  autoParkPipOnRecordStart?: boolean;
   /** @deprecated Migrated to whiteboardProjects */
   whiteboardData?: { elements: unknown[]; appState: Record<string, unknown>; files?: Record<string, unknown> };
   /** Whiteboard projects: one document per project */
@@ -316,6 +320,9 @@ function parseAndValidate(parsed: unknown): StoredSettings {
       p.systemVolume <= 100
         ? p.systemVolume
         : undefined,
+    omitPipFromRecording: typeof p.omitPipFromRecording === "boolean" ? p.omitPipFromRecording : undefined,
+    autoParkPipOnRecordStart:
+      typeof p.autoParkPipOnRecordStart === "boolean" ? p.autoParkPipOnRecordStart : undefined,
     whiteboardData: validWhiteboardData(p.whiteboardData),
     whiteboardProjects: validProjects(p.whiteboardProjects),
     activeProjectId: typeof p.activeProjectId === "string" ? p.activeProjectId : undefined,

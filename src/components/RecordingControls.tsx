@@ -30,6 +30,9 @@ interface RecordingControlsProps {
   whiteboardEmphasis?: boolean;
   showTeleprompter?: boolean;
   recordingTimeLabel?: string;
+  /** Full-page whiteboard layout: move PiP onto the whiteboard column (off shared capture while screen sharing). */
+  showParkPip?: boolean;
+  onParkPipOnWhiteboard?: () => void;
 }
 
 export function RecordingControls({
@@ -56,6 +59,8 @@ export function RecordingControls({
   whiteboardEmphasis,
   showTeleprompter = false,
   recordingTimeLabel = "00:00",
+  showParkPip = false,
+  onParkPipOnWhiteboard,
 }: RecordingControlsProps) {
   const [captureOpen, setCaptureOpen] = useState(false);
   const captureRef = useRef<HTMLDivElement>(null);
@@ -183,7 +188,7 @@ export function RecordingControls({
       )}
       {isRecording ? (
         <div className="flex flex-col items-center gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-2">
             <GlassButton
               variant="primary"
               size="sm"
@@ -193,6 +198,16 @@ export function RecordingControls({
             >
               Stop
             </GlassButton>
+            {showParkPip && hasCamera && onParkPipOnWhiteboard && (
+              <GlassButton
+                variant="secondary"
+                size="sm"
+                onClick={onParkPipOnWhiteboard}
+                title="Move camera to the lower-left of the whiteboard column (off the Capture Screen recording area)"
+              >
+                Park PiP
+              </GlassButton>
+            )}
             {onPauseRecording && onResumeRecording && (
               <GlassButton
                 variant="secondary"

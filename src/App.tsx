@@ -17,9 +17,10 @@ import { TeleprompterOverlay, TeleprompterPanel } from "@/components/Teleprompte
 import { useWindowSize, useWindowLiveResize } from "@/hooks/useWindowSize";
 import { CircularWebcam } from "@/components/CircularWebcam";
 import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
-import { exportToCanvas } from "@excalidraw/excalidraw";
+import { exportToCanvas, getSceneVersion } from "@excalidraw/excalidraw";
 import type { AvatarDecor, AvatarShape } from "@/components/SettingsPanel";
 import { beautySettingsToFilter, presets } from "@/lib/beautyEffects";
+import { drawStandaloneEditingTextOverlay } from "@/lib/excalidrawViewportTextOverlay";
 import {
   loadSettings,
   loadSettingsAsync,
@@ -218,14 +219,16 @@ function compositeExcalidrawViewportCanvases(
   const ctx = out.getContext("2d");
   if (!ctx) return null;
 
+  let drewAny = false;
   for (const c of sorted) {
     try {
       ctx.drawImage(c, 0, 0, c.width, c.height, 0, 0, pw, ph);
+      drewAny = true;
     } catch {
-      return null;
+      /* skip tainted layer; continue so text/other layers still export */
     }
   }
-  return out;
+  return drewAny ? out : null;
 }
 
 async function detectBlobFormat(blob: Blob): Promise<"webm" | "mp4"> {
@@ -583,8 +586,13 @@ export default function App() {
     fullPagePipPosRef.current = fullPagePipPos;
   }
   const wbOnlyUi = fullPageWhiteboard && !activeScreenStream;
+  /** Screen-share recording reads `fullPagePipPosRef` so parked / dragged PiP matches composite without waiting on state flush. */
   const fullPagePipForRender =
-    pipDragging || (isRecording && wbOnlyUi) ? fullPagePipPosRef.current : fullPagePipPos;
+    pipDragging ||
+    (isRecording && wbOnlyUi) ||
+    (isRecording && fullPageWhiteboard && activeScreenStream)
+      ? fullPagePipPosRef.current
+      : fullPagePipPos;
   const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [recordedClips, setRecordedClips] = useState<{ id: number; blob: Blob }[]>([]);
@@ -597,6 +605,12 @@ export default function App() {
     typeof window !== "undefined" &&
     !!(window as unknown as { electronAPI?: unknown }).electronAPI;
   const settingsLoadedRef = useRef(!isElectron);
+  const [omitPipFromRecording, setOmitPipFromRecording] = useState(
+    () => loadSettings().omitPipFromRecording ?? false
+  );
+  const [autoParkPipOnRecordStart, setAutoParkPipOnRecordStart] = useState(
+    () => loadSettings().autoParkPipOnRecordStart ?? false
+  );
 
   // Load persisted settings from Electron file storage on mount (localStorage used for web)
   useEffect(() => {
@@ -635,6 +649,8 @@ export default function App() {
       if (s.previewPosition != null) setPreviewPosition(s.previewPosition);
       if (s.previewLayoutMode != null) setPreviewLayoutMode(s.previewLayoutMode);
       if (s.fullPagePreviewPos != null) setFullPagePreviewPos(s.fullPagePreviewPos);
+      if (s.omitPipFromRecording != null) setOmitPipFromRecording(s.omitPipFromRecording);
+      if (s.autoParkPipOnRecordStart != null) setAutoParkPipOnRecordStart(s.autoParkPipOnRecordStart);
     });
   }, [isElectron]);
 
@@ -893,28 +909,40 @@ export default function App() {
     teleprompterPanelHeight,
   ]);
 
-  const flushTeleprompterSave = useCallback(() => {
+  const flushTeleprompterSave = useCallback((pendingScriptContent?: string) => {
     if (teleprompterSaveTimeoutRef.current) {
       clearTimeout(teleprompterSaveTimeoutRef.current);
       teleprompterSaveTimeoutRef.current = null;
     }
     const r = teleprompterSaveRef.current;
-    const base = saveTeleprompterScripts(loadSettings(), r.scripts, r.activeId);
-      saveSettings({
-        ...base,
-        teleprompterSpeed: r.speed,
-        teleprompterFontSize: r.fontSize,
-        teleprompterOpacity: r.opacity,
-        teleprompterWidth: r.width,
-        teleprompterHeight: r.height,
-        teleprompterPanelWidth: r.panelWidth,
-        teleprompterPanelHeight: r.panelHeight,
-      });
+    let scripts = r.scripts;
+    const activeId = r.activeId;
+    if (pendingScriptContent !== undefined) {
+      const now = Date.now();
+      scripts = scripts.map((s) =>
+        s.id === activeId ? { ...s, content: pendingScriptContent, updatedAt: now } : s
+      );
+      teleprompterSaveRef.current = { ...r, scripts };
+    }
+    const base = saveTeleprompterScripts(loadSettings(), scripts, activeId);
+    saveSettings({
+      ...base,
+      teleprompterSpeed: r.speed,
+      teleprompterFontSize: r.fontSize,
+      teleprompterOpacity: r.opacity,
+      teleprompterWidth: r.width,
+      teleprompterHeight: r.height,
+      teleprompterPanelWidth: r.panelWidth,
+      teleprompterPanelHeight: r.panelHeight,
+    });
   }, []);
 
   useEffect(() => {
-    window.addEventListener("beforeunload", flushTeleprompterSave);
-    return () => window.removeEventListener("beforeunload", flushTeleprompterSave);
+    const onBeforeUnload = () => {
+      flushTeleprompterSave();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [flushTeleprompterSave]);
 
   const handleSetTeleprompterScript = useCallback(
@@ -981,6 +1009,11 @@ export default function App() {
     },
     []
   );
+
+  const wbImmediateExportRef = useRef<(() => void) | null>(null);
+  const handleWhiteboardSceneChange = useCallback(() => {
+    wbImmediateExportRef.current?.();
+  }, []);
 
   const [whiteboardTextureId, setWhiteboardTextureId] = useState<string | null>(null);
   const handleWhiteboardTextureChange = useCallback((textureId: string | null) => {
@@ -1351,6 +1384,7 @@ export default function App() {
       // 录制采样：全屏白板时 cameraSourceVideoRef 被摆在屏外 + opacity 0，部分浏览器几乎不更新帧，
       // 就会出现「预览有脸、成片黑圈/卡死」。门户内 cameraVideoMain 可见，解码稳定 — 白板录制优先用它。
       const forRecording = forceRecordRes || isRecording;
+      const skipCameraOnRecord = omitPipFromRecording && forceRecordRes;
       const videoUsable = (v: typeof cameraVideoMain) =>
         v && v.readyState >= 2 && v.videoWidth > 0 ? v : null;
       const wbPreferPortalCam = fullPageWhiteboard && !activeScreenStream;
@@ -1594,24 +1628,26 @@ export default function App() {
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(whiteboardX, whiteboardY, whiteboardSurfaceW, whiteboardSurfaceH);
         }
+        const drawWbSrc = (src: HTMLCanvasElement) => {
+          const lw = src.width;
+          const lh = src.height;
+          if (lw <= 0 || lh <= 0) return false;
+          const lscale = Math.min(whiteboardSurfaceW / lw, whiteboardSurfaceH / lh);
+          const ldw = lw * lscale;
+          const ldh = lh * lscale;
+          const ldx = whiteboardX + (whiteboardSurfaceW - ldw) / 2;
+          const ldy = whiteboardY + (whiteboardSurfaceH - ldh) / 2;
+          try {
+            ctx.drawImage(src, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
+            return true;
+          } catch {
+            return false;
+          }
+        };
         if (exportedOk && whiteboardExported) {
-          const lw = whiteboardExported.width;
-          const lh = whiteboardExported.height;
-          const lscale = Math.min(whiteboardSurfaceW / lw, whiteboardSurfaceH / lh);
-          const ldw = lw * lscale;
-          const ldh = lh * lscale;
-          const ldx = whiteboardX + (whiteboardSurfaceW - ldw) / 2;
-          const ldy = whiteboardY + (whiteboardSurfaceH - ldh) / 2;
-          ctx.drawImage(whiteboardExported, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
+          if (!drawWbSrc(whiteboardExported) && mainLayer) drawWbSrc(mainLayer);
         } else if (mainLayer) {
-          const lw = mainLayer.width;
-          const lh = mainLayer.height;
-          const lscale = Math.min(whiteboardSurfaceW / lw, whiteboardSurfaceH / lh);
-          const ldw = lw * lscale;
-          const ldh = lh * lscale;
-          const ldx = whiteboardX + (whiteboardSurfaceW - ldw) / 2;
-          const ldy = whiteboardY + (whiteboardSurfaceH - ldh) / 2;
-          ctx.drawImage(mainLayer, 0, 0, lw, lh, ldx, ldy, ldw, ldh);
+          drawWbSrc(mainLayer);
         }
         ctx.restore();
         if (whiteboardOnlyRecord) {
@@ -1710,7 +1746,7 @@ export default function App() {
         !whiteboardRecording &&
         (draggingDuringScreenRecord || !useCamera);
       /** 先同步画门户 overlay，再读像素；否则 canvas 可能仍为 0×0，pipSource 会退化成 raw video（拖拽时闪 RAW、描边与内容不同步）。 */
-      if (useRecordRes && wbPreferPortalCam && showPip && !avatarImageSrc) {
+      if (useRecordRes && wbPreferPortalCam && showPip && !avatarImageSrc && !skipCameraOnRecord) {
         drawCameraOverlayRef.current?.();
       }
       /** 白板录制：无可用 overlay 时才采门户 video（与 wbRecordFromPortalOverlay 互斥，避免 RAW / 处理画面交替）。 */
@@ -1746,6 +1782,7 @@ export default function App() {
                   ? cachedCameraCanvas
                   : null;
       if (
+        !skipCameraOnRecord &&
         previewStable &&
         pipSource &&
         (useAvatarImage ||
@@ -1766,7 +1803,9 @@ export default function App() {
         // Match fullPagePipForRender: ref while dragging or wb-only recording; else state (screen share + recording used ref-only before — caused composite/portal desync).
         const wbOnlyRecUi = fullPageWhiteboard && !activeScreenStream;
         const fallbackPos = fullPageWhiteboard
-          ? pipDraggingRef.current || (forceRecordRes && wbOnlyRecUi)
+          ? pipDraggingRef.current ||
+              (forceRecordRes && wbOnlyRecUi) ||
+              (forceRecordRes && activeScreenStream)
             ? fullPagePipPosRef.current
             : fullPagePipPos
           : pipDraggingRef.current
@@ -1774,11 +1813,11 @@ export default function App() {
             : pipPos;
         const fallbackLeft =
           fullPageWhiteboard && activeScreenStream
-            ? fallbackPos.x
+            ? fallbackPos.x + CAMERA_OFFSET
             : prevRect.left + fallbackPos.x;
         const fallbackTop =
           fullPageWhiteboard && activeScreenStream
-            ? fallbackPos.y
+            ? fallbackPos.y + CAMERA_OFFSET
             : prevRect.top + fallbackPos.y;
         // Ref tracks drag + recording; getBoundingClientRect can lag direct style updates.
         const useFallbackForComposite =
@@ -1800,6 +1839,11 @@ export default function App() {
         // Same axis scales as x/y (do not use Math.min(scaleX,scaleY) here — that skews size vs position and inflates the circle vs preview)
         pw = Math.round(rect.width * scaleX);
         ph = Math.round(rect.height * scaleY);
+        // Recording: always match Settings size — portal DOM rect can lag behind slider changes → mis-scaled PiP + double-looking borders.
+        if (forceRecordRes) {
+          pw = Math.round(avatarWidthDisplay * scaleX);
+          ph = Math.round(avatarHeightDisplay * scaleY);
+        }
         const buf = 24;
         const pipWellInsidePreview =
           rect.left >= prevRect.left + buf &&
@@ -1815,9 +1859,18 @@ export default function App() {
             y = Math.max(0, Math.min(y, h - ph));
           }
         }
-        // When drawing to overlay (!forceRecordRes), skip camera so the portal shows it.
-        // This avoids the black wireframe ghost: overlay updates at 30fps while portal moves immediately.
-        const drawCameraToCanvas = forceRecordRes || !shouldCompositeCamera;
+        // Full-page WB + screen share: preview PiP is only the fixed portal (one bubble). Painting the
+        // camera into composite here as well doubles PiP and can blink (composite ~30fps vs portal).
+        // While recording: draw PiP on composite only when it overlaps the capture rect; if parked on the
+        // whiteboard column, skip composite and show the portal so the user still sees the bubble.
+        const wbScreenPortalOnlyPreview = fullPageWhiteboard && activeScreenStream;
+        let drawCameraToCanvas = wbScreenPortalOnlyPreview
+          ? !!forceRecordRes
+          : forceRecordRes || !shouldCompositeCamera;
+        if (wbScreenPortalOnlyPreview && forceRecordRes) {
+          const intersectsCanvas = x + pw > 0 && x < w && y + ph > 0 && y < h;
+          if (!intersectsCanvas) drawCameraToCanvas = false;
+        }
         if (shouldDraw && drawCameraToCanvas) {
         const isCircle = avatarShape === "circle";
 
@@ -1883,45 +1936,45 @@ export default function App() {
       }
       ctx.restore();
 
-      // Draw stroke: for simple/glow, draw white undercoat first to eliminate black edge from clip antialias.
-      // Skip undercoat for dashed - it obscures the dash pattern (gaps show solid white underneath).
-      {
-      ctx.save();
-      ctx.beginPath();
-      if (isCircle) {
-        const cx = x + pw / 2;
-        const cy = y + ph / 2;
-        const r = Math.min(pw, ph) / 2;
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      } else {
-        roundRectPath(ctx, x, y, pw, ph, Math.min(AVATAR_RECT_RADIUS * scaleX, Math.min(pw, ph) / 2));
-      }
-      const strokeScale = Math.min(scaleX, scaleY);
-      if (avatarDecor !== "none" && avatarDecor !== "dashed") {
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 5 * strokeScale;
-        ctx.setLineDash([]);
-        ctx.shadowColor = "transparent";
-        ctx.shadowBlur = 0;
+      // Portal overlay already includes decor stroke; drawing again here doubles borders (laggy / overlapping look).
+      if (!pipIsPortalOverlay) {
+        // Draw stroke: for simple/glow, draw white undercoat first to eliminate black edge from clip antialias.
+        // Skip undercoat for dashed - it obscures the dash pattern (gaps show solid white underneath).
+        ctx.save();
+        ctx.beginPath();
+        if (isCircle) {
+          const cx = x + pw / 2;
+          const cy = y + ph / 2;
+          const r = Math.min(pw, ph) / 2;
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        } else {
+          roundRectPath(ctx, x, y, pw, ph, Math.min(AVATAR_RECT_RADIUS * scaleX, Math.min(pw, ph) / 2));
+        }
+        const strokeScale = Math.min(scaleX, scaleY);
+        if (avatarDecor !== "none" && avatarDecor !== "dashed") {
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 5 * strokeScale;
+          ctx.setLineDash([]);
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+          ctx.stroke();
+        }
+        const strokePx = avatarDecor === "dashed" ? 2 : avatarDecor === "simple" ? 2 : avatarDecor === "none" ? 2 : 3;
+        ctx.strokeStyle = avatarDecor === "none" ? "#000" : "rgba(255,255,255,0.95)";
+        ctx.lineWidth = strokePx * strokeScale;
+        if (avatarDecor === "dashed") ctx.setLineDash([8 * strokeScale, 4 * strokeScale]);
+        else ctx.setLineDash([]);
+        const suppressGlowTrail =
+          pipDraggingRef.current && forceRecordRes && (activeScreenStream || fullPageWhiteboard);
+        if (avatarDecor === "glow" && !suppressGlowTrail) {
+          ctx.shadowColor = hexToRgba(glowColor, 0.85);
+          ctx.shadowBlur = 48;
+        } else {
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+        }
         ctx.stroke();
-      }
-      const strokePx = avatarDecor === "dashed" ? 2 : avatarDecor === "simple" ? 2 : avatarDecor === "none" ? 2 : 3;
-      ctx.strokeStyle = avatarDecor === "none" ? "#000" : "rgba(255,255,255,0.95)";
-      ctx.lineWidth = strokePx * strokeScale;
-      if (avatarDecor === "dashed") ctx.setLineDash([8 * strokeScale, 4 * strokeScale]);
-      else ctx.setLineDash([]);
-      // Large shadowBlur leaves a smear while PiP moves during recording — same idea as suppressHeavyShadow for portal.
-      const suppressGlowTrail =
-        pipDraggingRef.current && forceRecordRes && (activeScreenStream || fullPageWhiteboard);
-      if (avatarDecor === "glow" && !suppressGlowTrail) {
-        ctx.shadowColor = hexToRgba(glowColor, 0.85);
-        ctx.shadowBlur = 48;
-      } else {
-        ctx.shadowColor = "transparent";
-        ctx.shadowBlur = 0;
-      }
-      ctx.stroke();
-      ctx.restore();
+        ctx.restore();
       }
         }
     }
@@ -1962,6 +2015,7 @@ export default function App() {
       avatarHeightDisplay,
       whiteboardPanelWidth,
       shareWindowFillPercent,
+      omitPipFromRecording,
     ]
   );
 
@@ -1983,14 +2037,18 @@ export default function App() {
       : mainLayoutPortalRect
         ? { x: mainLayoutPortalRect.left + pipPos.x, y: mainLayoutPortalRect.top + pipPos.y }
         : pipPos;
+  const pipViewportLeft =
+    fullPageWhiteboard && activeScreenStream ? fullPagePipForRender.x + CAMERA_OFFSET : activePipPos.x;
+  const pipViewportTop =
+    fullPageWhiteboard && activeScreenStream ? fullPagePipForRender.y + CAMERA_OFFSET : activePipPos.y;
   const cameraOutsidePreviewRaw =
     fullPageWhiteboard &&
     activeScreenStream &&
     portalRect &&
-    (activePipPos.x + avatarWidthDisplay <= portalRect.left + OVERLAP_BUFFER ||
-      activePipPos.x >= portalRect.right - OVERLAP_BUFFER ||
-      activePipPos.y + avatarHeightDisplay <= portalRect.top + OVERLAP_BUFFER ||
-      activePipPos.y >= portalRect.bottom - OVERLAP_BUFFER);
+    (pipViewportLeft + avatarWidthDisplay <= portalRect.left + OVERLAP_BUFFER ||
+      pipViewportLeft >= portalRect.right - OVERLAP_BUFFER ||
+      pipViewportTop + avatarHeightDisplay <= portalRect.top + OVERLAP_BUFFER ||
+      pipViewportTop >= portalRect.bottom - OVERLAP_BUFFER);
   // During live window resize, this boundary can flap frame-to-frame and cause PiP overlay flicker.
   const cameraOutsidePreviewStableRef = useRef(Boolean(cameraOutsidePreviewRaw));
   if (!windowLiveResize) {
@@ -2634,9 +2692,61 @@ export default function App() {
     if (!cameraStream) setShowPip(false);
   };
 
+  /** Move PiP to bottom-left of the whiteboard column (viewport coords when sharing; portal-relative when wb-only). */
+  const computeParkedFullPagePipPos = (): { x: number; y: number } | null => {
+    if (!fullPageWhiteboard) return null;
+    const wb = fullPageContentRef.current;
+    const content = contentAreaRef.current;
+    if (!wb || !content) return null;
+    const aw = avatarWidthDisplay;
+    const ah = avatarHeightDisplay;
+    const m = 8;
+    const wbR = wb.getBoundingClientRect();
+    if (wbR.width < 48 || wbR.height < 48) return null;
+    if (activeScreenStream) {
+      const visualLeft = wbR.left + m;
+      const visualTop = wbR.bottom - ah - m;
+      return { x: visualLeft - CAMERA_OFFSET, y: visualTop - CAMERA_OFFSET };
+    }
+    const portalR = content.getBoundingClientRect();
+    const relX = Math.round(wbR.right - portalR.left - aw - m);
+    const relY = Math.round(wbR.bottom - portalR.top - ah - m);
+    const clampedX = Math.max(
+      Math.round(wbR.left - portalR.left + m),
+      Math.min(relX, Math.round(wbR.right - portalR.left - aw - m))
+    );
+    const clampedY = Math.max(
+      Math.round(wbR.top - portalR.top + m),
+      Math.min(relY, Math.round(wbR.bottom - portalR.top - ah - m))
+    );
+    return { x: clampedX, y: clampedY };
+  };
+
+  const parkPipOnWhiteboard = () => {
+    if (!fullPageWhiteboard || !showPip) return;
+    const next = computeParkedFullPagePipPos();
+    if (!next) return;
+    fullPagePipPosRef.current = next;
+    setFullPagePipPos(next);
+    if (isRecordingRef.current && recordingDrawAndDisplayRef.current) {
+      queueMicrotask(() => {
+        drawCameraOverlayRef.current?.();
+        recordingDrawAndDisplayRef.current?.();
+      });
+    }
+  };
+
   const startRecording = async () => {
+    let fpSnap = fullPagePipPos;
+    if (showPip && fullPageWhiteboard && autoParkPipOnRecordStart) {
+      const parked = computeParkedFullPagePipPos();
+      if (parked) fpSnap = parked;
+    }
     pipPosRef.current = pipPos;
-    fullPagePipPosRef.current = fullPagePipPos;
+    fullPagePipPosRef.current = fpSnap;
+    if (fpSnap.x !== fullPagePipPos.x || fpSnap.y !== fullPagePipPos.y) {
+      setFullPagePipPos(fpSnap);
+    }
     const hasContent = activeScreenStream || persistentScreenVideoRef.current?.srcObject || showPip;
     if (!hasContent) {
       return;
@@ -2687,7 +2797,11 @@ export default function App() {
 
     const doDrawAndDisplay = () => {
       recordLoopLastAtRef.current = performance.now();
-      drawCompositeRef.current?.(true);
+      try {
+        drawCompositeRef.current?.(true);
+      } catch {
+        /* tainted canvas / draw errors — keep frame loop + requestFrame alive */
+      }
       requestCanvasCaptureFrame(canvasCaptureTrackRef.current);
       if (!whiteboardOnly) {
         const rec = recordingCanvasRef.current;
@@ -2899,11 +3013,21 @@ export default function App() {
   };
 
   const stopRecording = () => {
-    const mr = mediaRecorderRef.current;
-    if (mr?.state === "recording" || mr?.state === "paused") {
-      mr.requestData();
-      mr.stop();
-    }
+    void (async () => {
+      const runWb = wbImmediateExportRef.current;
+      if (runWb) {
+        try {
+          await runWb();
+        } catch {
+          /* best-effort final whiteboard frame with in-edit text overlay */
+        }
+      }
+      const mr = mediaRecorderRef.current;
+      if (mr?.state === "recording" || mr?.state === "paused") {
+        mr.requestData();
+        mr.stop();
+      }
+    })();
   };
 
   const performStopScreenShare = () => {
@@ -3410,28 +3534,33 @@ export default function App() {
   }, [fullPageWhiteboard, isRecording, activeScreenStream, showPip, avatarImageSrc]);
 
   // Whiteboard-only recording: prefer stacking Excalidraw's on-screen canvases (follows zoom/pan).
-  // Fallback: exportToCanvas (full-scene fit, no viewport).
+  // Fallback: exportToCanvas when composite fails. Scene changes trigger immediate re-export via onSceneChange.
   useEffect(() => {
     if (!isRecording || activeScreenStream) return;
     const res = recordOutputDimensions;
-    const exportIntervalMs = showPip ? 280 : 200;
+    const exportIntervalMs = 100;
 
     let cancelled = false;
-    const run = async () => {
+    let lastSceneVersion = -1;
+    /** Drop stale completions when `exportToCanvas` / overlay outlast the next tick. */
+    let exportSeq = 0;
+
+    const doExport = async () => {
+      const mySeq = ++exportSeq;
       if (cancelled) return;
-      // Do not skip while "gesturing": skipping export caused empty/stale frames in recordings (PiP + pan).
       await new Promise((r) => requestAnimationFrame(r));
-      if (showPip) await new Promise((r) => requestAnimationFrame(r));
       if (cancelled) return;
+      const api = excalidrawAPIRef.current;
+      const ver = api ? (getSceneVersion(api.getSceneElements() as never) as unknown as number) : -1;
+      const sceneChanged = ver !== lastSceneVersion;
+
       const wbEl = fullPageContentRef.current;
       const wbW = Math.max(1, wbEl?.offsetWidth ?? res.w);
       const wbH = Math.max(1, wbEl?.offsetHeight ?? res.h);
 
       let canvas: HTMLCanvasElement | null = wbEl ? compositeExcalidrawViewportCanvases(wbEl, wbW, wbH) : null;
 
-      if (!canvas) {
-        const api = excalidrawAPIRef.current;
-        if (!api) return;
+      if (!canvas && api && sceneChanged) {
         try {
           const elements = api.getSceneElements();
           const appState = api.getAppState();
@@ -3447,16 +3576,31 @@ export default function App() {
           /* ignore */
         }
       }
-      if (!cancelled && canvas) whiteboardExportedRef.current = canvas;
+
+      if (!cancelled && canvas && api && wbEl) {
+        try {
+          await drawStandaloneEditingTextOverlay(canvas, wbEl, wbW, wbH, api);
+        } catch {
+          /* overlay is best-effort */
+        }
+      }
+
+      if (!cancelled && canvas && mySeq === exportSeq) {
+        whiteboardExportedRef.current = canvas;
+        lastSceneVersion = ver;
+      }
     };
-    run();
-    const id = window.setInterval(run, exportIntervalMs);
+
+    doExport();
+    wbImmediateExportRef.current = doExport;
+    const id = window.setInterval(doExport, exportIntervalMs);
     return () => {
       cancelled = true;
+      wbImmediateExportRef.current = null;
       clearInterval(id);
       whiteboardExportedRef.current = null;
     };
-  }, [isRecording, activeScreenStream, recordOutputDimensions, showPip]);
+  }, [isRecording, activeScreenStream, recordOutputDimensions]);
 
 
   // Draw loop for main layout when camera on (screen optional)
@@ -3562,6 +3706,8 @@ export default function App() {
       fullPagePreviewPos: fullPagePreviewPos ?? undefined,
       micVolume,
       systemVolume,
+      omitPipFromRecording,
+      autoParkPipOnRecordStart,
     });
   }, [
       glowColor,
@@ -3588,6 +3734,8 @@ export default function App() {
       fullPagePreviewPos,
       micVolume,
       systemVolume,
+      omitPipFromRecording,
+      autoParkPipOnRecordStart,
     ]);
 
   // Which camera to move: determined from click target so we anchor the top layer, not the one underneath.
@@ -3619,7 +3767,8 @@ export default function App() {
     e.stopPropagation();
     if (pipDraggingRef.current) return;
     const pip = pipRef.current;
-    const usePreviewPagePos = previewPageContextRef.current;
+    const usePreviewPagePos =
+      previewPageContextRef.current && !(fullPageWhiteboard && activeScreenStream);
     const useViewportCoords = !usePreviewPagePos && !!activeScreenStream;
     const container = usePreviewPagePos
       ? previewRef.current
@@ -3968,6 +4117,8 @@ export default function App() {
                 showWhiteboard={true}
                 showTeleprompter={showTeleprompter}
                 recordingTimeLabel={formatRecordingTime(recordingTime)}
+                showParkPip={fullPageWhiteboard && hasCamera}
+                onParkPipOnWhiteboard={parkPipOnWhiteboard}
               />
               </div>
               {!isCompact && (
@@ -4018,10 +4169,9 @@ export default function App() {
     ? stripAtMin ||
       (stripPxForGrid > SPLIT_STRIP_MIN_PX && stripPxForGrid < EXCALIDRAW_AFFORDANCE_STRIP_MAX)
     : whiteboardTrackW > 0 && whiteboardTrackW < 360;
+  /** No stream: always show capture CTA (button / hint). With stream: only when capture column is narrow (drag affordance). */
   const showScreenAffordance =
-    (hasScreen && captureColumnW > 0 && captureColumnW < 320) ||
-    (!hasScreen && stripAtMin) ||
-    (!hasScreen && stripLockPx < 320);
+    !hasScreen || (hasScreen && captureColumnW > 0 && captureColumnW < 320);
 
   const splitGridFallback = splitGridTemplate(stripPxForGrid, splitMainIsCapture);
 
@@ -4355,13 +4505,18 @@ export default function App() {
                   onLetterboxCustomImageChange={setLetterboxCustomImage}
                   letterboxMode={letterboxMode}
                   onLetterboxModeChange={setLetterboxMode}
+                  omitPipFromRecording={omitPipFromRecording}
+                  onOmitPipFromRecordingChange={setOmitPipFromRecording}
+                  autoParkPipOnRecordStart={autoParkPipOnRecordStart}
+                  onAutoParkPipOnRecordStartChange={setAutoParkPipOnRecordStart}
                 />
               </div>
               </div>
             </div>,
             document.body
           )}
-        <div ref={contentAreaRef} className="relative z-0 flex flex-1 min-h-0 min-w-0 gap-0 isolation-isolate overflow-hidden rounded-xl">
+        {/* overflow-visible so Excalidraw hamburger MainMenu is not clipped at the bottom (nested overflow:hidden was cutting the dropdown). */}
+        <div ref={contentAreaRef} className="relative z-0 flex flex-1 min-h-0 min-w-0 gap-0 isolation-isolate overflow-visible rounded-xl">
           {/* Composite overlay: always render when whiteboard-only so compositeRef exists for recording (avoids black screen) */}
           {!activeScreenStream && (
             <div
@@ -4404,7 +4559,7 @@ export default function App() {
             <div
               ref={fullPageContentRef}
               className={`relative z-10 flex h-full min-h-0 min-w-0 overflow-hidden sector-card bg-white ${
-                splitMainIsCapture ? "box-border min-w-0" : "overflow-visible pr-1"
+                splitMainIsCapture ? "box-border min-w-0" : "pr-1"
               } ${hasScreen && windowLiveResize ? "transition-none" : ""} ${
                 screenShareStopPhase === "restoring" && !activeScreenStream ? "dreamwork-whiteboard-restore-in" : ""
               }`}
@@ -4424,12 +4579,14 @@ export default function App() {
               }}
             >
               {/* Excalidraw must never unmount when the strip is minimized — scene + undo stack must survive. */}
-              <div className="absolute inset-0 z-[1] min-h-0 min-w-0 overflow-hidden rounded-xl">
+              {/* overflow-hidden + transform: 裁剪浮动工具栏/底栏，避免画进右侧 Capture；transform 让内部 position:fixed 相对本层，便于一起裁剪 */}
+              <div className="absolute inset-0 z-[1] min-h-0 min-w-0 isolate overflow-hidden rounded-xl [transform:translateZ(0)]">
                 <ExcalidrawBoard
                   settingsSyncEpoch={electronSettingsEpoch}
                   onCanvasLayersChange={handleWhiteboardLayersChange}
                   onWhiteboardTextureChange={handleWhiteboardTextureChange}
                   onExcalidrawReady={handleExcalidrawReady}
+                  onSceneChange={handleWhiteboardSceneChange}
                 />
               </div>
               <SplitAffordanceHint
@@ -4496,10 +4653,12 @@ export default function App() {
                 show={showScreenAffordance}
                 variant="screen"
                 minStrip={captureAtMin}
+                screenShareActive={hasScreen && !splitMainIsCapture}
                 screenLayout={splitMainIsCapture ? "main" : "strip"}
                 onCaptureScreen={() => void captureScreen()}
               />
-              {showPip && (
+              {/* PiP drag for non–full-page-WB screen layouts; full-page WB + screen uses body portal only */}
+              {showPip && !(fullPageWhiteboard && activeScreenStream) && (
                 <div
                   className="absolute z-10 cursor-grab touch-none"
                   style={{
@@ -4537,8 +4696,12 @@ export default function App() {
                   zIndex: showSettings ? Z_PIP_PORTAL_SETTINGS : Z_PIP_PORTAL,
                   borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
                   backgroundColor: "#000",
-                  boxShadow: activeScreenStream && !(isRecording && activeScreenStream) ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
-                  opacity: isRecording && activeScreenStream ? 0 : 1,
+                  boxShadow: activeScreenStream && !isRecording ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
+                  /* Recording: hide portal only while PiP overlaps capture (composite draws it). On whiteboard, show portal and skip composite so one bubble + visible handle. */
+                  opacity:
+                    fullPageWhiteboard && activeScreenStream && isRecording && !cameraOutsidePreview
+                      ? 0
+                      : 1,
                   pointerEvents: "auto",
                   outline: "none",
                   transform: "translateZ(0)",

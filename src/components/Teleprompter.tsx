@@ -73,7 +73,8 @@ interface TeleprompterPanelProps {
   onToggleLocked: () => void;
   onReset: () => void;
   onHide: () => void;
-  onFlushSave?: () => void;
+  /** Pass latest textarea text so disk save runs in the same tick as ⌘S (parent state may not have flushed yet). */
+  onFlushSave?: (latestScriptContent?: string) => void;
   onEditorScroll?: (ratio: number) => void;
 }
 
@@ -1027,7 +1028,7 @@ export function TeleprompterPanel({
               const v = textareaRef.current?.value ?? draftScript;
               setDraftScript(v);
               onSetScript(v);
-              onFlushSave?.();
+              onFlushSave?.(v);
             }
           }}
           onBlur={(e) => {
@@ -1038,7 +1039,7 @@ export function TeleprompterPanel({
             const v = e.target.value;
             setDraftScript(v);
             onSetScript(v);
-            onFlushSave?.();
+            onFlushSave?.(v);
           }}
           onFocus={() => {
             const el = textareaRef.current;

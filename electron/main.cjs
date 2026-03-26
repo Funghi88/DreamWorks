@@ -30,6 +30,98 @@ function clearDisplayMediaPending(rejectWithEmpty) {
 const APP_NAME = "DreamWorks";
 
 /**
+ * Remove this app’s main BrowserWindow from the picker so users pick another app or a full display.
+ */
+function filterOutMainWindowFromCaptureSources(sources) {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (!win || !sources.length) return sources;
+  let filtered = sources;
+  try {
+    if (typeof win.webContents.getMediaSourceId === "function") {
+      const selfId = win.webContents.getMediaSourceId();
+      if (selfId) {
+        const byId = sources.filter((s) => s.id !== selfId);
+        if (byId.length) filtered = byId;
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  if (filtered.length === sources.length) {
+    let title = APP_NAME;
+    try {
+      if (typeof win.getTitle === "function") title = win.getTitle() || APP_NAME;
+    } catch (_) {
+      /* ignore */
+    }
+    const norm = (s) => String(s || "").replace(/[\u200e\u200f]/g, "").trim();
+    const byName = sources.filter((s) => {
+      const n = norm(s.name);
+      return n !== norm(title) && n !== APP_NAME;
+    });
+    if (byName.length) filtered = byName;
+  }
+  return filtered.length ? filtered : sources;
+}
+
+/** JPEG/base64 data URL for picker tiles; returns undefined if image is empty or conversion fails. */
+function nativeImageToPickerDataUrl(img) {
+  if (!img || (typeof img.isEmpty === "function" && img.isEmpty())) return undefined;
+  try {
+    const jpeg = img.toJPEG(85);
+    if (jpeg && jpeg.length > 40) {
+      return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+    }
+  } catch (_) {
+    /* fall through to PNG data URL */
+  }
+  try {
+    const d = img.toDataURL();
+    if (d && d.length > 40) return d;
+  } catch (_) {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/** Prefer live thumbnail; if macOS withheld previews (Screen Recording off), use window app icon when available. */
+function pickerPreviewDataUrlForSource(s) {
+  const fromThumb = nativeImageToPickerDataUrl(s.thumbnail);
+  if (fromThumb) return fromThumb;
+  const icon = s.appIcon;
+  if (icon && typeof icon.isEmpty === "function" && !icon.isEmpty()) {
+    return nativeImageToPickerDataUrl(icon);
+  }
+  return undefined;
+}
+
+/**
+ * Thumbnails are blank when Screen Recording is denied; smaller size sometimes still helps after permission.
+ * `fetchWindowIcons` fills `appIcon` so window rows show at least the app icon as a fallback preview.
+ */
+async function getDisplaySourcesForPicker() {
+  const large = { width: 720, height: 405 };
+  const small = { width: 256, height: 144 };
+  const baseOpts = (thumbnailSize) => ({
+    types: ["screen", "window"],
+    thumbnailSize,
+    fetchWindowIcons: true,
+  });
+  let sources = await desktopCapturer.getSources(baseOpts(large));
+  const anyNonEmptyThumb = sources.some((src) => {
+    try {
+      return src.thumbnail && !src.thumbnail.isEmpty();
+    } catch {
+      return false;
+    }
+  });
+  if (!anyNonEmptyThumb && sources.length > 0) {
+    sources = await desktopCapturer.getSources(baseOpts(small));
+  }
+  return sources;
+}
+
+/**
  * macOS: `getDisplayMedia` needs a `desktopCapturer` handler. We defer `callback` until the user
  * picks a screen/window in the renderer (see `display-media-picker` IPC).
  */
@@ -38,12 +130,9 @@ function installDarwinDisplayMediaHandler() {
     return;
   }
   try {
-    /* Larger 16:9 thumbs so previews look sharp in the picker (was 200², very blurry when scaled). */
-    const thumb = { width: 720, height: 405 };
     session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
       clearDisplayMediaPending(true);
-      desktopCapturer
-        .getSources({ types: ["screen", "window"], thumbnailSize: thumb })
+      getDisplaySourcesForPicker()
         .then((sources) => {
           if (!sources.length) {
             console.warn("[DreamWorks] desktopCapturer: no sources (Screen Recording permission?)");
@@ -55,24 +144,35 @@ function installDarwinDisplayMediaHandler() {
             callback({});
             return;
           }
+          /** Don’t list the main DreamWorks window — choosing it captures the app UI and causes infinite mirror + whiteboard inside Capture Screen. */
+          const filteredSources = filterOutMainWindowFromCaptureSources(sources);
           const timeoutId = setTimeout(() => {
             if (displayMediaPending && displayMediaPending.callback === callback) {
               clearDisplayMediaPending(true);
             }
           }, 120000);
-          displayMediaPending = { callback, sources, timeoutId };
-          const payload = sources.map((s) => {
-            let thumbnailDataUrl;
-            if (s.thumbnail && !s.thumbnail.isEmpty()) {
-              try {
-                const jpeg = s.thumbnail.toJPEG(85);
-                thumbnailDataUrl = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
-              } catch {
-                thumbnailDataUrl = s.thumbnail.toDataURL();
+          displayMediaPending = { callback, sources: filteredSources, timeoutId };
+          const payload = filteredSources.map((s) => ({
+            id: s.id,
+            name: s.name,
+            thumbnailDataUrl: pickerPreviewDataUrlForSource(s),
+          }));
+          const anyPreview = payload.some((p) => p.thumbnailDataUrl);
+          if (!anyPreview && payload.length > 0) {
+            let status = "unknown";
+            try {
+              if (typeof systemPreferences.getMediaAccessStatus === "function") {
+                status = systemPreferences.getMediaAccessStatus("screen");
               }
+            } catch (_) {
+              /* ignore */
             }
-            return { id: s.id, name: s.name, thumbnailDataUrl };
-          });
+            console.warn(
+              "[DreamWorks] Picker has no image previews (thumbnails empty). Screen Recording status:",
+              status,
+              "— On macOS: System Settings → Privacy & Security → Screen Recording → enable DreamWorks (or Electron if you run from dev). Quit and reopen the app after changing."
+            );
+          }
           wc.send("display-media-picker", payload);
         })
         .catch((err) => {

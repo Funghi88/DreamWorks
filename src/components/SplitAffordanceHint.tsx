@@ -15,6 +15,12 @@ type Props = {
   /** Strip is at minimum (40px): edge-to-edge, no inset padding */
   minStrip?: boolean;
   /**
+   * `variant="screen"` + `screenLayout="strip"` only: a share is active and the capture column is narrow
+   * (under ~320px). Use vertical “Drag Screen” + solid cover — never the wide “Capture Screen” chip on
+   * top of a useless squeezed preview.
+   */
+  screenShareActive?: boolean;
+  /**
    * `variant="screen"` only: capture column is the wide `1fr` pane (Share Window, horizontal)
    * vs the narrow strip beside the main whiteboard (Drag Screen, vertical + arrow).
    */
@@ -39,6 +45,7 @@ export function SplitAffordanceHint({
   show,
   variant,
   minStrip = false,
+  screenShareActive = false,
   screenLayout = "strip",
   onCaptureScreen,
 }: Props) {
@@ -90,14 +97,22 @@ export function SplitAffordanceHint({
     );
   }
 
+  /**
+   * Narrow capture column beside main whiteboard. Min width (40px) or active share in a narrow column:
+   * vertical “Drag Screen ←” only — solid cover so the squished stream is not visible behind glass.
+   */
+  const isScreenStrip = variant === "screen" && screenLayout === "strip";
+  const verticalStripHint = isScreenStrip && (minStrip || screenShareActive);
+  const solidScreenCover = isScreenStrip && (minStrip || screenShareActive);
+
   return (
     <div
       role="presentation"
       aria-hidden={!visible}
       className={[
         "absolute z-[60] flex flex-col items-center justify-center pointer-events-none isolate",
-        minStrip ? "overflow-visible" : "overflow-hidden",
-        minStrip
+        minStrip || screenShareActive ? "overflow-visible" : "overflow-hidden",
+        minStrip || screenShareActive
           ? `inset-0 m-0 box-border h-full w-full gap-0 p-0 ${radiusClass}`
           : `inset-0 gap-0.5 m-1 p-1 ${radiusClass}`,
         reduceMotion
@@ -106,34 +121,52 @@ export function SplitAffordanceHint({
         visible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 translate-y-2 scale-[0.97]",
         isExcalidraw
           ? "bg-slate-50/88 backdrop-blur-[4px] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.045)]"
-          : "bg-slate-950/72 backdrop-blur-sm",
+          : solidScreenCover
+            ? "bg-slate-900 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
+            : "bg-slate-950/72 backdrop-blur-sm",
       ].join(" ")}
     >
-      <HintLine
-        visible={visible}
-        delayMs={reduceMotion ? 0 : 0}
-        reduceMotion={reduceMotion}
-        className={`${minStrip ? "" : "truncate "} ${minStrip ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-500" : "text-slate-400"}`}
-      >
-        {isExcalidraw ? "drag" : "Drag"}
-      </HintLine>
-      <HintLine
-        visible={visible}
-        delayMs={reduceMotion ? 0 : 70}
-        reduceMotion={reduceMotion}
-        className={`${minStrip ? "" : "truncate "}font-medium ${minStrip ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-700" : "text-slate-200"}`}
-      >
-        {isExcalidraw ? "Excalidraw" : "Screen"}
-      </HintLine>
-      <HintLine
-        visible={visible}
-        delayMs={reduceMotion ? 0 : 140}
-        reduceMotion={reduceMotion}
-        className={`${minStrip ? "text-[10px] leading-none" : "text-sm"} ${isExcalidraw ? "text-slate-500" : "text-slate-300"}`}
-        aria-hidden
-      >
-        {isExcalidraw ? "→" : "←"}
-      </HintLine>
+      {isScreenStrip && onCaptureScreen && !verticalStripHint ? (
+        <GlassButton
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="pointer-events-auto shrink-0 !border !border-white/35 !bg-black/50 !text-white shadow-md backdrop-blur-md transition-colors hover:!bg-black/65 hover:!border-white/45 font-medium"
+          disabled={!visible}
+          onClick={() => onCaptureScreen()}
+          aria-label="Capture screen — choose a window or display to share"
+        >
+          Capture Screen
+        </GlassButton>
+      ) : (
+        <>
+          <HintLine
+            visible={visible}
+            delayMs={reduceMotion ? 0 : 0}
+            reduceMotion={reduceMotion}
+            className={`${minStrip || screenShareActive ? "" : "truncate "} ${minStrip || screenShareActive ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-500" : "text-slate-400"}`}
+          >
+            {isExcalidraw ? "drag" : "Drag"}
+          </HintLine>
+          <HintLine
+            visible={visible}
+            delayMs={reduceMotion ? 0 : 70}
+            reduceMotion={reduceMotion}
+            className={`${minStrip || screenShareActive ? "" : "truncate "}font-medium ${minStrip || screenShareActive ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-700" : "text-slate-200"}`}
+          >
+            {isExcalidraw ? "Excalidraw" : "Screen"}
+          </HintLine>
+          <HintLine
+            visible={visible}
+            delayMs={reduceMotion ? 0 : 140}
+            reduceMotion={reduceMotion}
+            className={`${minStrip || screenShareActive ? "text-[10px] leading-none" : "text-sm"} ${isExcalidraw ? "text-slate-500" : "text-slate-300"}`}
+            aria-hidden
+          >
+            {isExcalidraw ? "→" : "←"}
+          </HintLine>
+        </>
+      )}
     </div>
   );
 }

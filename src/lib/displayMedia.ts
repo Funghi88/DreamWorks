@@ -9,6 +9,28 @@ function isElectronRuntime(): boolean {
 }
 
 /**
+ * Chromium: avoid offering the **current browser tab/window** in the share picker so users
+ * don’t capture DreamWork itself (infinite mirror + whiteboard inside “Capture Screen”).
+ * Older engines ignore unknown keys; we retry without hints if the call fails for other reasons.
+ */
+type DisplayMediaWithSurfaceHints = DisplayMediaStreamOptions & {
+  preferCurrentTab?: boolean;
+  selfBrowserSurface?: "include" | "exclude";
+};
+
+function displayMediaOpts(
+  wantAudio: boolean,
+  hints: boolean
+): DisplayMediaStreamOptions {
+  const base: DisplayMediaWithSurfaceHints = { video: true, audio: wantAudio };
+  if (hints) {
+    base.preferCurrentTab = false;
+    base.selfBrowserSurface = "exclude";
+  }
+  return base;
+}
+
+/**
  * Screen capture for DreamWorks.
  *
  * On **Electron**, request **video without display audio first**, then retry with `audio: true` if
@@ -20,22 +42,25 @@ function isElectronRuntime(): boolean {
 export async function getDisplayMediaForScreenCapture(wantAudio: boolean): Promise<MediaStream> {
   const gdm = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
 
+  const withHintsFallback = async (audio: boolean): Promise<MediaStream> => {
+    try {
+      return await gdm(displayMediaOpts(audio, true));
+    } catch (e) {
+      if (isDisplayMediaUserCancellation(e)) throw e;
+      return await gdm(displayMediaOpts(audio, false));
+    }
+  };
+
   if (!isElectronRuntime()) {
-    return gdm({ video: true, audio: wantAudio });
+    return withHintsFallback(wantAudio);
   }
 
   try {
-    const stream = await gdm({ video: true, audio: false });
-    return stream;
+    return await withHintsFallback(false);
   } catch (e) {
     if (isDisplayMediaUserCancellation(e)) throw e;
     if (!wantAudio) throw e;
   }
 
-  try {
-    const stream2 = await gdm({ video: true, audio: true });
-    return stream2;
-  } catch (e2) {
-    throw e2;
-  }
+  return withHintsFallback(true);
 }

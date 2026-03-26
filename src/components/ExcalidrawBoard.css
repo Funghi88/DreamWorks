@@ -9,9 +9,12 @@
 }
 
 /* Fill column height — avoid a blank band above the canvas when flex/absolute chains break. */
+/* overflow: visible so the hamburger MainMenu (position:absolute) isn’t clipped by Excalidraw’s root
+ * overflow:auto — otherwise the bottom (e.g. Canvas background swatches) is cut off with no way to scroll. */
 .dreamwork-whiteboard-touch .excalidraw {
   height: 100% !important;
   min-height: 0 !important;
+  overflow: visible !important;
 }
 
 /* When using a paper texture, Excalidraw must stay visually transparent so the canvas can show the layer behind. */
@@ -40,6 +43,32 @@
 .dreamwork-whiteboard-touch .excalidraw .dropdown-menu.dropdown-menu--mobile .dropdown-menu-container {
   width: auto !important;
   max-width: min(100%, 17rem);
+}
+
+/* Hamburger MainMenu: sit above SplitAffordanceHint (z-60) and stay scrollable within the viewport. */
+.dreamwork-whiteboard-touch .excalidraw .dropdown-menu {
+  z-index: 70 !important;
+}
+.dreamwork-whiteboard-touch .excalidraw .dropdown-menu .dropdown-menu-container {
+  /*
+   * Menu opens below the hamburger (below DreamWorks header + Excalidraw chrome). If max-height is too close to 100vh,
+   * the panel’s bottom sits off-screen — you scroll inside the panel but the viewport never shows the last rows.
+   * Cap with vh and subtract enough chrome; keep in sync with Excalidraw’s own calc(100vh - 150px) spirit.
+   */
+  max-height: min(65vh, calc(100vh - 168px)) !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  /* Parent .dreamwork-whiteboard-touch uses touch-action: none for the canvas; allow vertical pan inside the menu. */
+  touch-action: pan-y !important;
+  box-sizing: border-box !important;
+  /* Slight extra bottom inset so the last swatch row clears the rounded bottom when scrolled to the end. */
+  padding-bottom: calc(8px + 10px + env(safe-area-inset-bottom, 0px)) !important;
+}
+
+@supports (height: 100dvh) {
+  .dreamwork-whiteboard-touch .excalidraw .dropdown-menu .dropdown-menu-container {
+    max-height: min(65dvh, calc(100dvh - 168px)) !important;
+  }
 }
 
 /*

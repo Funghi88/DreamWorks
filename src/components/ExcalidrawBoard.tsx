@@ -175,6 +175,8 @@ type Props = {
   onCanvasLayersChange?: (layers: HTMLCanvasElement[]) => void;
   onWhiteboardTextureChange?: (textureId: string | null) => void;
   onExcalidrawReady?: (api: ExcalidrawAPI) => void;
+  /** Fired when scene elements change (not viewport-only). Recording re-exports the viewport immediately. */
+  onSceneChange?: () => void;
   /** Bump after Electron `loadSettingsAsync` so last session’s projects + `activeProjectId` reload from disk. */
   settingsSyncEpoch?: number;
 };
@@ -204,6 +206,7 @@ export function ExcalidrawBoard({
   onCanvasLayersChange,
   onWhiteboardTextureChange,
   onExcalidrawReady,
+  onSceneChange,
   settingsSyncEpoch = 0,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -809,8 +812,12 @@ export function ExcalidrawBoard({
           requestAnimationFrame(run);
         }
       }, WHITEBOARD_IDLE_FLUSH_MS);
+
+      if (!sceneDataUnchanged) {
+        onSceneChange?.();
+      }
     },
-    [persist, storedTexture]
+    [persist, storedTexture, onSceneChange]
   );
 
   const flushPersist = useCallback(() => {
@@ -1423,10 +1430,12 @@ export function ExcalidrawBoard({
       const root = rootRef.current;
       if (!root) return;
       const t = e.target;
-      const active = document.activeElement;
-      const inBoard =
-        (t instanceof Node && root.contains(t)) || (active instanceof Node && root.contains(active));
-      if (!inBoard) return;
+      // Don't steal ⌘S from inputs outside the whiteboard (e.g. Settings, teleprompter).
+      const isExternalInput =
+        (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement ||
+          (t instanceof HTMLElement && t.isContentEditable)) &&
+        !(t instanceof Node && root.contains(t));
+      if (isExternalInput) return;
       e.preventDefault();
       flushPersist();
       if (isElectron && electronAPI?.saveFile) void handleSaveToFile();

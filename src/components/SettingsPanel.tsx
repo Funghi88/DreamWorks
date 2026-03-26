@@ -47,6 +47,10 @@ interface SettingsPanelProps {
   onLetterboxModeChange?: (v: LetterboxMode) => void;
   faceFilter?: FaceFilterType;
   onFaceFilterChange?: (v: FaceFilterType) => void;
+  omitPipFromRecording?: boolean;
+  onOmitPipFromRecordingChange?: (v: boolean) => void;
+  autoParkPipOnRecordStart?: boolean;
+  onAutoParkPipOnRecordStartChange?: (v: boolean) => void;
 }
 
 export function SettingsPanel({
@@ -81,6 +85,10 @@ export function SettingsPanel({
   onLetterboxModeChange,
   faceFilter = "none",
   onFaceFilterChange,
+  omitPipFromRecording = false,
+  onOmitPipFromRecordingChange,
+  autoParkPipOnRecordStart = false,
+  onAutoParkPipOnRecordStartChange,
 }: SettingsPanelProps) {
   const labelWidth = "w-16";
   const sectionGap = "gap-5";
@@ -136,7 +144,7 @@ export function SettingsPanel({
             <SelectTrigger className="min-w-[7rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
+            <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
               <SelectItem value="none">Black border</SelectItem>
               <SelectItem value="simple">Simple</SelectItem>
               <SelectItem value="glow">Glow</SelectItem>
@@ -166,7 +174,7 @@ export function SettingsPanel({
               <SelectTrigger className="min-w-[7rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
+                <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
                   <SelectItem value="none">None</SelectItem>
                   <SelectItem value="sunglasses">Sunglasses</SelectItem>
                   <SelectItem value="vampire">🐞</SelectItem>
@@ -194,7 +202,7 @@ export function SettingsPanel({
                   <SelectTrigger className="min-w-[6rem] border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
+                  <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
                     <SelectItem value="natural">Natural</SelectItem>
                     <SelectItem value="professional">Pro</SelectItem>
                     <SelectItem value="glamour">Glamour</SelectItem>
@@ -234,7 +242,7 @@ export function SettingsPanel({
               <SelectTrigger className="min-w-[5rem] border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
+              <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
                 <SelectItem value="1080p">1080p</SelectItem>
                 <SelectItem value="2K">2K</SelectItem>
                 <SelectItem value="4K">4K</SelectItem>
@@ -263,6 +271,42 @@ export function SettingsPanel({
             </p>
           </div>
         )}
+        {onOmitPipFromRecordingChange != null && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-3">
+              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>PiP file</span>
+              <GlassButton
+                size="sm"
+                variant={omitPipFromRecording ? "primary" : "secondary"}
+                onClick={() => onOmitPipFromRecordingChange(!omitPipFromRecording)}
+                title="When on, the saved video has no in-app camera overlay—use macOS Presenter Overlay or your meeting app for your face."
+              >
+                {omitPipFromRecording ? "Omit PiP" : "Include PiP"}
+              </GlassButton>
+            </div>
+            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
+              Omit: screen or whiteboard only in the export. Include: DreamWorks composites the circular camera into the recording.
+            </p>
+          </div>
+        )}
+        {onAutoParkPipOnRecordStartChange != null && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-3">
+              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Park</span>
+              <GlassButton
+                size="sm"
+                variant={autoParkPipOnRecordStart ? "primary" : "secondary"}
+                onClick={() => onAutoParkPipOnRecordStartChange(!autoParkPipOnRecordStart)}
+                title="When you press Start Recording, move PiP to the whiteboard column. While sharing a window, it sits outside the captured preview so it is not drawn into the file."
+              >
+                {autoParkPipOnRecordStart ? "Auto-park on record" : "Manual PiP position"}
+              </GlassButton>
+            </div>
+            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
+              With screen share, parked PiP stays on the whiteboard strip (off the shared capture). While recording, use Park PiP next to Stop in the header.
+            </p>
+          </div>
+        )}
         {letterboxBackground != null && onLetterboxBackgroundChange && (
           <div className="flex items-center gap-3">
             <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Bg</span>
@@ -273,7 +317,7 @@ export function SettingsPanel({
               <SelectTrigger className="min-w-[10rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[1000001] border-slate-200 bg-white">
+              <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
                 <SelectItem value="black">Black</SelectItem>
                 <SelectItem value="custom">Upload image</SelectItem>
               </SelectContent>
