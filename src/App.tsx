@@ -59,7 +59,7 @@ import { isDisplayMediaUserCancellation } from "@/lib/userMediaError";
 import { getDisplayMediaForScreenCapture } from "@/lib/displayMedia";
 import { Settings } from "lucide-react";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import { setNormalMode } from "@/lib/windowUtils";
+import { setBackgroundThrottling, setNormalMode } from "@/lib/windowUtils";
 import { ResizeHandle } from "@/components/ResizeHandle";
 import { SplitAffordanceHint } from "@/components/SplitAffordanceHint";
 
@@ -76,6 +76,8 @@ const RECORD_BITRATES: Record<RecordResolution, number> = {
 
 /** Side strip (shared: left whiteboard / wb-only: right capture) — never narrower than this. */
 const SPLIT_STRIP_MIN_PX = 40;
+/** Capture / whiteboard column below this width: Drag-only affordance (see SplitAffordanceHint). */
+const SPLIT_COLUMN_MIN_USABLE_PX = 320;
 /** Default width of the narrow capture column after promoting whiteboard (no stream squeeze). */
 const WB_MAIN_DEFAULT_CAPTURE_STRIP_PX = 280;
 /** Strip shrink before swapping main column — slower ease-in-out feels more like a scroll / book opening. */
@@ -115,8 +117,26 @@ const AVATAR_RECT_RADIUS = 16;
 /** Share Window (= scaled screen share, targetW wide): border/corner in **output** px (1080p → 3px line, 12px radius) */
 const SHARE_WINDOW_BORDER_OUT_PX = 3;
 const SHARE_WINDOW_CORNER_RADIUS_OUT_PX = 12;
-/** Fixed size for camera source video - avoids resize delay when shape changes */
-const CAMERA_SOURCE_VIDEO_SIZE = { w: 320, h: 240 };
+/**
+ * Offscreen camera decode box: **square** + contain avoids a 4:3 CSS box stretching perception with
+ * widescreen / Presenter Overlay tracks; draw paths use intrinsic `videoWidth`/`videoHeight`.
+ */
+const CAMERA_SOURCE_VIDEO_BOX_PX = 480;
+/** Widescreen / Presenter-style frames: use `contain` in PiP so the speaker is not over-cropped vs `cover`. */
+const PIP_VIDEO_CONTAIN_MIN_ASPECT = 1.42;
+
+function pipScaleForVideo(pw: number, ph: number, vw: number, vh: number) {
+  const safeW = Math.max(1, vw);
+  const safeH = Math.max(1, vh);
+  const ar = safeW / safeH;
+  const useContain = ar >= PIP_VIDEO_CONTAIN_MIN_ASPECT;
+  const s = useContain ? Math.min(pw / safeW, ph / safeH) : Math.max(pw / safeW, ph / safeH);
+  const drawW = safeW * s;
+  const drawH = safeH * s;
+  const dx = (pw - drawW) / 2;
+  const dy = (ph - drawH) / 2;
+  return { drawW, drawH, dx, dy };
+}
 /** PiP portal vs Settings: backdrop < camera (sharp preview) < drawer */
 const Z_PIP_PORTAL = 99_999;
 const Z_PIP_PORTAL_SETTINGS = 1_000_000;
@@ -420,6 +440,10 @@ export default function App() {
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const compositeRef = useRef<HTMLCanvasElement>(null);
   const recordingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  /** PiP overlaps Capture column in viewport — recording may still miss canvas-space intersects; use as fallback to draw PiP into export. */
+  const capturePipInColumnRef = useRef(false);
+  /** When true, recording must composite PiP even if omitPipFromRecording was on (set at record start from showPip). */
+  const recordingSessionIncludePipRef = useRef(false);
   const pipRef = useRef<HTMLDivElement>(null);
   const portalCameraInnerRef = useRef<HTMLDivElement>(null);
   const avatarImgRef = useRef<HTMLImageElement>(null);
@@ -443,6 +467,16 @@ export default function App() {
   const whiteboardTextureImgRef = useRef<HTMLImageElement | null>(null);
   const lastCameraFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [portalRect, setPortalRect] = useState<DOMRect | null>(null);
+  /** Latest capture-column rect (always updated in layout observer); avoids stale state + reduces setState when unchanged. */
+  const portalRectLiveRef = useRef<DOMRect | null>(null);
+  const lastPortalRectKeyRef = useRef<string | null>(null);
+  /** Capture Screen + recording: hide body portal while PiP is painted on preview canvas — avoids double bubble (composite + portal). */
+  const [pipHiddenForScreenRecordDup, setPipHiddenForScreenRecordDup] = useState(false);
+  const pipHiddenForScreenRecordDupSentRef = useRef(false);
+  /** Schmitt: once PiP is composited into the record canvas, keep until clearly outside (reduces portal opacity blink at the edge). */
+  const screenRecPipCompositeStickyRef = useRef(false);
+  /** Capture Screen: hysteresis for “outside vs inside” so beauty overlay canvas doesn’t mount/unmount at the column edge (blink). */
+  const [pipPortalOverlayOutsideUi, setPipPortalOverlayOutsideUi] = useState(false);
   const [mainLayoutPortalRect, setMainLayoutPortalRect] = useState<DOMRect | null>(null);
 
   const [previewScreenStream, setPreviewScreenStream] = useState<MediaStream | null>(null);
@@ -513,6 +547,15 @@ export default function App() {
   }
   /** Measured from content area RO — avoids ref-read-during-render (0 width) so split affordance hints stay correct. */
   const [contentAreaSplitWidth, setContentAreaSplitWidth] = useState(0);
+  /**
+   * During split-drag (or strip animation), grid is updated via inline styles but React did not re-render;
+   * affordances used stale widths. One rAF-batched snapshot per frame keeps Drag vs Capture/WB CTAs in sync.
+   */
+  const [splitAffordanceLive, setSplitAffordanceLive] = useState<{ strip: number; content: number } | null>(
+    null
+  );
+  const splitAffordanceLiveRafRef = useRef<number | null>(null);
+  const splitAffordancePendingRef = useRef<{ strip: number; content: number } | null>(null);
   /** `exiting`: stream still on, capture panel fades; `restoring`: stream off, whiteboard plays settle animation. */
   const [screenShareStopPhase, setScreenShareStopPhase] = useState<"idle" | "exiting" | "restoring">("idle");
   const screenShareExitTimerRef = useRef<number | null>(null);
@@ -1360,6 +1403,8 @@ export default function App() {
   /** Set after `drawCameraOverlay` is defined — drawComposite calls this so overlay is painted before sampling (avoids RAW fallback + border desync while dragging). */
   const drawCameraOverlayRef = useRef<(() => void) | null>(null);
   const OVERLAP_BUFFER = 60;
+  /** Wider band while dragging PiP reduces portal vs composite handoff flicker near the whiteboard edge. */
+  const OVERLAP_BUFFER_PIP_DRAG_EXTRA = 56;
   const avatarSizeDisplayRaw = Math.max(32, Math.round(avatarSize));
   const avatarSizeDisplay = avatarSizeDisplayRaw;
   // Size = consistent across shapes: same area for circle, portrait, landscape
@@ -1383,22 +1428,30 @@ export default function App() {
       const cameraVideoSource = cameraSourceVideoRef.current;
       // 录制采样：全屏白板时 cameraSourceVideoRef 被摆在屏外 + opacity 0，部分浏览器几乎不更新帧，
       // 就会出现「预览有脸、成片黑圈/卡死」。门户内 cameraVideoMain 可见，解码稳定 — 白板录制优先用它。
+      // Capture Screen（分享窗口）时同理：离屏 source 在 Electron 上常不解码，成片无人像；录制时优先采门户内 video。
       const forRecording = forceRecordRes || isRecording;
-      const skipCameraOnRecord = omitPipFromRecording && forceRecordRes;
+      const skipCameraOnRecord =
+        omitPipFromRecording && forceRecordRes && !recordingSessionIncludePipRef.current;
       const videoUsable = (v: typeof cameraVideoMain) =>
         v && v.readyState >= 2 && v.videoWidth > 0 ? v : null;
       const wbPreferPortalCam = fullPageWhiteboard && !activeScreenStream;
+      const wbScreenShare = fullPageWhiteboard && activeScreenStream;
       const cameraVideo =
         forRecording && wbPreferPortalCam
           ? videoUsable(cameraVideoMain) ??
             videoUsable(cameraVideoSource) ??
             cameraVideoMain ??
             cameraVideoSource
-          : (forRecording && videoUsable(cameraVideoSource) ? cameraVideoSource : null) ??
-            videoUsable(cameraVideoMain) ??
-            videoUsable(cameraVideoSource) ??
-            cameraVideoMain ??
-            cameraVideoSource;
+          : forRecording && wbScreenShare
+            ? videoUsable(cameraVideoMain) ??
+              videoUsable(cameraVideoSource) ??
+              cameraVideoMain ??
+              cameraVideoSource
+            : (forRecording && videoUsable(cameraVideoSource) ? cameraVideoSource : null) ??
+              videoUsable(cameraVideoMain) ??
+              videoUsable(cameraVideoSource) ??
+              cameraVideoMain ??
+              cameraVideoSource;
       const pip = pipRef.current;
       const avatarImg = avatarImgRef.current;
       const preview =
@@ -1407,6 +1460,9 @@ export default function App() {
       const composite =
         (forceRecordRes && recordingCanvasRef.current) || compositeRef.current;
       if (!preview || !composite) return;
+      /** PiP x/y must use the **on-screen** capture canvas + its client size — never the off-DOM recording canvas (rect 0×0 → no PiP in export). */
+      const captureLayoutEl =
+        activeScreenStream && compositeRef.current ? compositeRef.current : preview;
       // Full-page whiteboard without screen: composite <canvas> stays invisible (PiP is a portal). Skip idle
       // repainting — was burning ~2× content-area pixels @ DPR per frame and starving Excalidraw + drag.
       if (!forceRecordRes && !isRecording && fullPageWhiteboard && !activeScreenStream) {
@@ -1422,9 +1478,9 @@ export default function App() {
       const wbSnap = recordWhiteboardPreviewSizeRef.current;
       const wbOnlyRecording = forceRecordRes && fullPageWhiteboard && !activeScreenStream;
       if (activeScreenStream) {
-        // Preview CW should be fully filled; no extra pillar/letter around base.
-        prevW = Math.max(1, Math.round(preview.clientWidth));
-        prevH = Math.max(1, Math.round(preview.clientHeight));
+        // Match the visible capture <canvas> box (parent `preview` can differ by padding/border → broke PiP scale vs rect).
+        prevW = Math.max(1, Math.round(captureLayoutEl.clientWidth));
+        prevH = Math.max(1, Math.round(captureLayoutEl.clientHeight));
       } else if (wbOnlyRecording) {
         // Match on-screen CSS box (Mac/non-16:9): frozen wbSnap can be smaller than real layout → PiP scales up in export.
         const pr = preview.getBoundingClientRect();
@@ -1451,11 +1507,12 @@ export default function App() {
         h = res.h;
       } else if (activeScreenStream) {
         w = Math.max(1, Math.round(prevW * dpr));
-        // Keep preview canvas bitmap ratio aligned to on-screen preview box during window resize.
-        h = Math.max(1, Math.round(prevH * dpr));
+        // One dimension from DPR, the other from aspect — independent rounding on w and h made scaleX ≠ scaleY
+        // during live window resize and skewed the PiP (oval) + composite sampling.
+        h = Math.max(1, Math.round((w * prevH) / prevW));
       } else {
-        w = Math.round(prevW * dpr);
-        h = Math.round(prevH * dpr);
+        w = Math.max(1, Math.round(prevW * dpr));
+        h = Math.max(1, Math.round((w * prevH) / prevW));
       }
       const scaleX = w / prevW;
       const scaleY = h / prevH;
@@ -1485,8 +1542,8 @@ export default function App() {
         drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current, letterboxMode);
         const sw0 = videoForDraw.videoWidth || w;
         const sh0 = videoForDraw.videoHeight || h;
-        /** Share Window: clip + 3px stroke (preview & record) when drawing screen share into composite. */
-        const screenOnlyRecord = activeScreenStream && (forceRecordRes || fullPageWhiteboard);
+        /** Share window: uniform scale (contain) inside the frame — split-view preview used to stretch to the cell and looked squashed while resizing; recording already used contain. */
+        const screenShareDrawContained = activeScreenStream;
         let trimmed: { sx: number; sy: number; sw: number; sh: number };
         if (activeScreenStream) {
           const key = `${sw0}x${sh0}`;
@@ -1539,7 +1596,7 @@ export default function App() {
           }
         }
         let screenContentRad = 0;
-        if (screenOnlyRecord) {
+        if (screenShareDrawContained) {
           screenContentRad = useRecordRes
             ? Math.min(SHARE_WINDOW_CORNER_RADIUS_OUT_PX, dw / 2, dh / 2)
             : Math.min(SHARE_WINDOW_CORNER_RADIUS_OUT_PX * scaleX, dw / 2, dh / 2);
@@ -1692,9 +1749,10 @@ export default function App() {
       /** 录制/导出单帧时 HAVE_CURRENT_DATA 即可尝试采样，避免首几帧 readyState 未到 2 导致 cache 永远空、成片无人像 */
       const camPickRecording = (v: typeof camMain) =>
         v?.srcObject && v.readyState >= 1 && v.videoWidth > 0 ? v : null;
+      const samplePortalFirst = wbPreferPortalCam || (wbScreenShare && forRecording);
       const camToSample =
         shouldCompositeCamera && showPip && !useAvatarImage
-          ? (wbPreferPortalCam
+          ? (samplePortalFirst
               ? camPick(camMain) ??
                 camPick(camSrc) ??
                 camPickRecording(camMain) ??
@@ -1768,7 +1826,7 @@ export default function App() {
         cameraVideo.readyState >= 1 &&
         cameraVideo.videoWidth > 0 &&
         !wbRecordFromPortalOverlay;
-      const pipSource = useAvatarImage
+      let pipSource: CanvasImageSource | null = useAvatarImage
         ? avatarImg
         : wbRecordFromPortalOverlay
           ? overlayPip
@@ -1781,6 +1839,22 @@ export default function App() {
                 : useCachedCamera
                   ? cachedCameraCanvas
                   : null;
+      /** Capture Screen 录制：wbRecordLiveVideo 只在无屏幕分享时为真，外层 if 曾把 useCamera 为 false 时整段丢弃 → 成片无人像。 */
+      if (
+        !pipSource &&
+        forceRecordRes &&
+        wbScreenShare &&
+        showPip &&
+        !skipCameraOnRecord &&
+        !useAvatarImage
+      ) {
+        const v =
+          videoUsable(cameraVideoMain) ??
+          videoUsable(cameraVideoSource) ??
+          (cameraVideoMain?.srcObject ? cameraVideoMain : null) ??
+          (cameraVideoSource?.srcObject ? cameraVideoSource : null);
+        if (v) pipSource = v;
+      }
       if (
         !skipCameraOnRecord &&
         previewStable &&
@@ -1789,12 +1863,10 @@ export default function App() {
           useCamera ||
           useCachedCamera ||
           wbRecordLiveVideo ||
-          wbRecordFromPortalOverlay)
+          wbRecordFromPortalOverlay ||
+          (forceRecordRes && wbScreenShare && !useAvatarImage))
       ) {
-        const prevRect =
-          activeScreenStream && compositeRef.current
-            ? compositeRef.current.getBoundingClientRect()
-            : preview.getBoundingClientRect();
+        const prevRect = captureLayoutEl.getBoundingClientRect();
         let x: number;
         let y: number;
         let pw: number;
@@ -1868,8 +1940,39 @@ export default function App() {
           ? !!forceRecordRes
           : forceRecordRes || !shouldCompositeCamera;
         if (wbScreenPortalOnlyPreview && forceRecordRes) {
-          const intersectsCanvas = x + pw > 0 && x < w && y + ph > 0 && y < h;
-          if (!intersectsCanvas) drawCameraToCanvas = false;
+          const overlapsCaptureViewport =
+            rect.right > prevRect.left &&
+            rect.left < prevRect.right &&
+            rect.bottom > prevRect.top &&
+            rect.top < prevRect.bottom;
+          let intersectsCanvas = x + pw > 0 && x < w && y + ph > 0 && y < h;
+          if (!intersectsCanvas && (capturePipInColumnRef.current || overlapsCaptureViewport)) {
+            intersectsCanvas = true;
+          }
+          const outPx = Math.max(12, Math.round(24 * Math.min(scaleX, scaleY)));
+          const fullyOutside =
+            x + pw < -outPx || x > w + outPx || y + ph < -outPx || y > h + outPx;
+          const sticky = screenRecPipCompositeStickyRef;
+          if (!sticky.current) {
+            if (!intersectsCanvas) drawCameraToCanvas = false;
+            else {
+              drawCameraToCanvas = true;
+              sticky.current = true;
+            }
+          } else if (fullyOutside) {
+            drawCameraToCanvas = false;
+            sticky.current = false;
+          } else {
+            drawCameraToCanvas = true;
+          }
+          if (drawCameraToCanvas) {
+            x = Math.min(Math.max(x, 0), Math.max(0, w - pw));
+            y = Math.min(Math.max(y, 0), Math.max(0, h - ph));
+          }
+          if (pipHiddenForScreenRecordDupSentRef.current !== drawCameraToCanvas) {
+            pipHiddenForScreenRecordDupSentRef.current = drawCameraToCanvas;
+            setPipHiddenForScreenRecordDup(drawCameraToCanvas);
+          }
         }
         if (shouldDraw && drawCameraToCanvas) {
         const isCircle = avatarShape === "circle";
@@ -1886,6 +1989,8 @@ export default function App() {
       }
       ctx.closePath();
       ctx.clip();
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(x, y, pw, ph);
       const pipIsPortalOverlay =
         pipSource instanceof HTMLCanvasElement && wbRecordFromPortalOverlay;
       if (beautyMode && !pipIsPortalOverlay) ctx.filter = beautySettingsToFilter(beautySettings);
@@ -1910,11 +2015,11 @@ export default function App() {
             : pipSource instanceof HTMLCanvasElement
               ? pipSource.height
               : (pipSource as HTMLImageElement).naturalHeight || ph;
-        const scale = Math.max(pw / vw, ph / vh);
-        const drawW = vw * scale;
-        const drawH = vh * scale;
-        const dx = x + (pw - drawW) / 2;
-        const dy = y + (ph - drawH) / 2;
+        const rel = pipScaleForVideo(pw, ph, vw, vh);
+        const drawW = rel.drawW;
+        const drawH = rel.drawH;
+        const dx = x + rel.dx;
+        const dy = y + rel.dy;
         if (pipSource instanceof HTMLVideoElement) {
           ctx.save();
           ctx.translate(dx + drawW, dy);
@@ -2026,6 +2131,16 @@ export default function App() {
     drawCompositeRef.current?.();
   }, [shareWindowFillPercent]);
 
+  useEffect(() => {
+    if (!isRecording) {
+      screenRecPipCompositeStickyRef.current = false;
+      if (pipHiddenForScreenRecordDupSentRef.current) {
+        pipHiddenForScreenRecordDupSentRef.current = false;
+        setPipHiddenForScreenRecordDup(false);
+      }
+    }
+  }, [isRecording]);
+
   const activePipPos = fullPageWhiteboard ? fullPagePipForRender : pipPos;
   const cameraViewportPos =
     fullPageWhiteboard
@@ -2041,14 +2156,23 @@ export default function App() {
     fullPageWhiteboard && activeScreenStream ? fullPagePipForRender.x + CAMERA_OFFSET : activePipPos.x;
   const pipViewportTop =
     fullPageWhiteboard && activeScreenStream ? fullPagePipForRender.y + CAMERA_OFFSET : activePipPos.y;
+  const overlapBufPip =
+    OVERLAP_BUFFER + (pipDragging ? OVERLAP_BUFFER_PIP_DRAG_EXTRA : 0);
+  const previewColumnRectForPip =
+    fullPageWhiteboard && activeScreenStream ? portalRectLiveRef.current ?? portalRect : portalRect;
   const cameraOutsidePreviewRaw =
     fullPageWhiteboard &&
     activeScreenStream &&
-    portalRect &&
-    (pipViewportLeft + avatarWidthDisplay <= portalRect.left + OVERLAP_BUFFER ||
-      pipViewportLeft >= portalRect.right - OVERLAP_BUFFER ||
-      pipViewportTop + avatarHeightDisplay <= portalRect.top + OVERLAP_BUFFER ||
-      pipViewportTop >= portalRect.bottom - OVERLAP_BUFFER);
+    previewColumnRectForPip &&
+    (pipViewportLeft + avatarWidthDisplay <= previewColumnRectForPip.left + overlapBufPip ||
+      pipViewportLeft >= previewColumnRectForPip.right - overlapBufPip ||
+      pipViewportTop + avatarHeightDisplay <= previewColumnRectForPip.top + overlapBufPip ||
+      pipViewportTop >= previewColumnRectForPip.bottom - overlapBufPip);
+  if (fullPageWhiteboard && activeScreenStream && previewColumnRectForPip) {
+    capturePipInColumnRef.current = !cameraOutsidePreviewRaw;
+  } else {
+    capturePipInColumnRef.current = false;
+  }
   // During live window resize, this boundary can flap frame-to-frame and cause PiP overlay flicker.
   const cameraOutsidePreviewStableRef = useRef(Boolean(cameraOutsidePreviewRaw));
   if (!windowLiveResize) {
@@ -2057,6 +2181,47 @@ export default function App() {
   const cameraOutsidePreview = windowLiveResize
     ? cameraOutsidePreviewStableRef.current
     : Boolean(cameraOutsidePreviewRaw);
+
+  useLayoutEffect(() => {
+    const col = portalRectLiveRef.current ?? portalRect;
+    if (!fullPageWhiteboard || !activeScreenStream || !col || !showPip) {
+      setPipPortalOverlayOutsideUi(false);
+      return;
+    }
+    const H = 32;
+    const pl = pipViewportLeft;
+    const pr = pl + avatarWidthDisplay;
+    const pt = pipViewportTop;
+    const pb = pt + avatarHeightDisplay;
+    const deepInside =
+      pl >= col.left + H &&
+      pr <= col.right - H &&
+      pt >= col.top + H &&
+      pb <= col.bottom - H;
+    const fullyOutside =
+      pr <= col.left - H ||
+      pl >= col.right + H ||
+      pb <= col.top - H ||
+      pt >= col.bottom + H;
+    setPipPortalOverlayOutsideUi((prev) => {
+      if (deepInside) return false;
+      if (fullyOutside) return true;
+      return prev;
+    });
+  }, [
+    fullPageWhiteboard,
+    activeScreenStream,
+    portalRect,
+    showPip,
+    pipViewportLeft,
+    pipViewportTop,
+    avatarWidthDisplay,
+    avatarHeightDisplay,
+  ]);
+
+  const outsideForPipOverlay =
+    fullPageWhiteboard && activeScreenStream ? pipPortalOverlayOutsideUi : cameraOutsidePreview;
+
   // Keep camera source video mounted whenever we have camera - so it decodes ahead of recording
   const showCameraSourceVideo = showPip && (!fullPageWhiteboard || isRecording || !!cameraStream);
   const drawCameraOverlay = useCallback(() => {
@@ -2099,6 +2264,8 @@ export default function App() {
     }
     ctx.closePath();
     ctx.clip();
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, pw, ph);
     if (beautyMode) ctx.filter = beautySettingsToFilter(beautySettings);
     if (useAvatarImage && img?.naturalWidth) {
       const s = Math.max(pw / img.naturalWidth, ph / img.naturalHeight);
@@ -2108,11 +2275,7 @@ export default function App() {
     } else if (pipSource && video) {
       const vw = video.videoWidth || pw;
       const vh = video.videoHeight || ph;
-      const s = Math.max(pw / vw, ph / vh);
-      const drawW = vw * s;
-      const drawH = vh * s;
-      const dx = (pw - drawW) / 2;
-      const dy = (ph - drawH) / 2;
+      const { drawW, drawH, dx, dy } = pipScaleForVideo(pw, ph, vw, vh);
       ctx.save();
       ctx.translate(dx + drawW, dy);
       ctx.scale(-1, 1);
@@ -2316,6 +2479,29 @@ export default function App() {
     contentAreaRef.current?.removeAttribute("data-dw-split-dragging");
   }, []);
 
+  const scheduleSplitAffordanceLive = useCallback((strip: number, content: number) => {
+    splitAffordancePendingRef.current = {
+      strip: Math.max(SPLIT_STRIP_MIN_PX, Math.round(strip)),
+      content: Math.max(0, Math.round(content)),
+    };
+    if (splitAffordanceLiveRafRef.current == null) {
+      splitAffordanceLiveRafRef.current = requestAnimationFrame(() => {
+        splitAffordanceLiveRafRef.current = null;
+        const p = splitAffordancePendingRef.current;
+        if (p) setSplitAffordanceLive(p);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (splitAffordanceLiveRafRef.current != null) {
+        cancelAnimationFrame(splitAffordanceLiveRafRef.current);
+        splitAffordanceLiveRafRef.current = null;
+      }
+    };
+  }, []);
+
   /** Drag changes narrow strip width only; which side is main (1fr) follows `splitMainIsCapture`, not drag. */
   const handleMainPanelResizeFromClientX = useCallback((clientX: number) => {
     splitPanelDragActiveRef.current = true;
@@ -2355,9 +2541,17 @@ export default function App() {
     } else {
       tri?.style.setProperty("grid-template-columns", splitGridTemplate(next, false));
     }
-  }, []);
+    const cw = contentAreaRef.current?.offsetWidth ?? 0;
+    scheduleSplitAffordanceLive(next, cw);
+  }, [scheduleSplitAffordanceLive]);
 
   const handleMainPanelResizeEnd = useCallback(() => {
+    if (splitAffordanceLiveRafRef.current != null) {
+      cancelAnimationFrame(splitAffordanceLiveRafRef.current);
+      splitAffordanceLiveRafRef.current = null;
+    }
+    splitAffordancePendingRef.current = null;
+    setSplitAffordanceLive(null);
     splitClientXDragRef.current = null;
     let w = Math.max(SPLIT_STRIP_MIN_PX, Math.round(whiteboardPanelWidthRef.current));
     const exitSqueeze =
@@ -2763,7 +2957,14 @@ export default function App() {
       return;
     }
 
+    recordingSessionIncludePipRef.current = showPip;
+    if (omitPipFromRecording && showPip) {
+      setOmitPipFromRecording(false);
+      saveSettings({ ...loadSettings(), omitPipFromRecording: false });
+    }
+
     setIsRecording(true);
+    if (isElectron) void setBackgroundThrottling(false);
     await new Promise((r) => requestAnimationFrame(r));
 
     const res = recordOutputDimensions;
@@ -2780,11 +2981,9 @@ export default function App() {
     recCanvas.width = res.w;
     recCanvas.height = res.h;
     recordingCanvasRef.current = recCanvas;
-    if (whiteboardOnly) {
-      // opacity:0 时部分 Chromium/Electron 路径几乎不向 MediaRecorder 提交 canvas 帧；保留极低 alpha + requestFrame
-      recCanvas.style.cssText = `position:fixed;left:-9999px;top:0;width:${res.w}px;height:${res.h}px;opacity:0.01;pointer-events:none;z-index:-1`;
-      document.body.appendChild(recCanvas);
-    }
+    // Detached canvas: captureStream() often emits blank/stuck frames in Chromium/Electron (PiP missing in export). Always attach off-screen like whiteboard-only.
+    recCanvas.style.cssText = `position:fixed;left:-9999px;top:0;width:${res.w}px;height:${res.h}px;opacity:0.01;pointer-events:none;z-index:-1`;
+    document.body.appendChild(recCanvas);
 
     const targetFps = 30;
     const frameMs = 1000 / targetFps;
@@ -2870,8 +3069,21 @@ export default function App() {
       doDrawAndDisplay();
     }
     lastDrawAt = performance.now();
-    recordingUsedRafRef.current = true;
-    drawLoopIdRef.current = requestAnimationFrame(loop) as unknown as number;
+    /* Electron: rAF is heavily throttled in background even with setBackgroundThrottling(false) on some macOS builds; use a timer-driven loop as well. */
+    if (isElectron) {
+      recordingUsedRafRef.current = false;
+      drawLoopIdRef.current = window.setInterval(() => {
+        const now = performance.now();
+        const dragging = pipDraggingRef.current;
+        if (dragging || now - lastDrawAt >= frameMs) {
+          lastDrawAt = now;
+          doDrawAndDisplay();
+        }
+      }, 16) as unknown as number;
+    } else {
+      recordingUsedRafRef.current = true;
+      drawLoopIdRef.current = requestAnimationFrame(loop) as unknown as number;
+    }
 
     const audioCtx = new (window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext })
@@ -2932,7 +3144,11 @@ export default function App() {
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
       if (drawLoopIdRef.current != null) {
-        (recordingUsedRafRef.current ? cancelAnimationFrame : clearTimeout)(drawLoopIdRef.current);
+        if (recordingUsedRafRef.current) {
+          cancelAnimationFrame(drawLoopIdRef.current);
+        } else {
+          clearInterval(drawLoopIdRef.current);
+        }
         drawLoopIdRef.current = null;
       }
       const recFail = recordingCanvasRef.current;
@@ -2941,6 +3157,8 @@ export default function App() {
       clearRecordingAudioGraphRefs();
       audioCtxRef.current?.close();
       audioCtxRef.current = null;
+      if (isElectron) void setBackgroundThrottling(true);
+      recordingSessionIncludePipRef.current = false;
       setIsRecording(false);
       setCaptureError(err instanceof Error ? err.message : "Failed to initialize recorder");
       return;
@@ -2952,11 +3170,16 @@ export default function App() {
       if (e.data.size) recordedChunksRef.current.push(e.data);
     };
     mediaRecorder.onstop = () => {
+      recordingSessionIncludePipRef.current = false;
       recordWhiteboardPreviewSizeRef.current = null;
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
       if (drawLoopIdRef.current != null) {
-        (recordingUsedRafRef.current ? cancelAnimationFrame : clearTimeout)(drawLoopIdRef.current);
+        if (recordingUsedRafRef.current) {
+          cancelAnimationFrame(drawLoopIdRef.current);
+        } else {
+          clearInterval(drawLoopIdRef.current);
+        }
         drawLoopIdRef.current = null;
       }
       const rec = recordingCanvasRef.current;
@@ -2968,6 +3191,7 @@ export default function App() {
       audioCtxRef.current = null;
       setIsRecording(false);
       setIsRecordingPaused(false);
+      if (isElectron) void setBackgroundThrottling(true);
       if (isElectron) void setNormalMode();
       const chunks = recordedChunksRef.current;
       const recordedMime = mediaRecorder.mimeType || "video/webm";
@@ -2989,7 +3213,11 @@ export default function App() {
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
       if (drawLoopIdRef.current != null) {
-        (recordingUsedRafRef.current ? cancelAnimationFrame : clearTimeout)(drawLoopIdRef.current);
+        if (recordingUsedRafRef.current) {
+          cancelAnimationFrame(drawLoopIdRef.current);
+        } else {
+          clearInterval(drawLoopIdRef.current);
+        }
         drawLoopIdRef.current = null;
       }
       const recStartFail = recordingCanvasRef.current;
@@ -2998,6 +3226,8 @@ export default function App() {
       clearRecordingAudioGraphRefs();
       audioCtxRef.current?.close();
       audioCtxRef.current = null;
+      if (isElectron) void setBackgroundThrottling(true);
+      recordingSessionIncludePipRef.current = false;
       setIsRecording(false);
       setCaptureError(err instanceof Error ? err.message : "Failed to start recorder");
       return;
@@ -3231,12 +3461,19 @@ export default function App() {
           const eased = easeInOutCubic(t);
           const w = startW + (SPLIT_STRIP_MIN_PX - startW) * eased;
           applyStripWhileWhiteboardMain(w);
+          scheduleSplitAffordanceLive(w, contentAreaRef.current?.offsetWidth ?? 0);
           if (t < 1) {
             requestAnimationFrame(step);
           } else {
             splitPanelDragActiveRef.current = false;
             whiteboardPanelWidthRef.current = SPLIT_STRIP_MIN_PX;
             setWhiteboardPanelWidth(SPLIT_STRIP_MIN_PX);
+            if (splitAffordanceLiveRafRef.current != null) {
+              cancelAnimationFrame(splitAffordanceLiveRafRef.current);
+              splitAffordanceLiveRafRef.current = null;
+            }
+            splitAffordancePendingRef.current = null;
+            setSplitAffordanceLive(null);
           }
         };
         requestAnimationFrame(step);
@@ -3277,17 +3514,24 @@ export default function App() {
       const eased = easeInOutCubic(t);
       const w = startW + (SPLIT_STRIP_MIN_PX - startW) * eased;
       applyStripWhileCaptureMain(w);
+      scheduleSplitAffordanceLive(w, contentAreaRef.current?.offsetWidth ?? 0);
       if (t < 1) {
         requestAnimationFrame(step);
       } else {
         splitPanelDragActiveRef.current = false;
         whiteboardPanelWidthRef.current = SPLIT_STRIP_MIN_PX;
         setWhiteboardPanelWidth(SPLIT_STRIP_MIN_PX);
+        if (splitAffordanceLiveRafRef.current != null) {
+          cancelAnimationFrame(splitAffordanceLiveRafRef.current);
+          splitAffordanceLiveRafRef.current = null;
+        }
+        splitAffordancePendingRef.current = null;
+        setSplitAffordanceLive(null);
         finishPromote();
       }
     };
     requestAnimationFrame(step);
-  }, [inLiveMeeting]);
+  }, [inLiveMeeting, scheduleSplitAffordanceLive]);
 
   const downloadRecording = (blob: Blob, ext: string) => {
     const url = URL.createObjectURL(blob);
@@ -3370,11 +3614,17 @@ export default function App() {
   // Track rect for full-page portal: preview box when activeScreenStream; content area (whiteboard+right panel) when whiteboard-only so camera can be in right panel
   useLayoutEffect(() => {
     if (!fullPageWhiteboard || !showPip) {
+      portalRectLiveRef.current = null;
+      lastPortalRectKeyRef.current = null;
       setPortalRect(null);
       return;
     }
     const el = activeScreenStream ? previewRef.current : contentAreaRef.current;
     if (!el) return;
+    const rInit = el.getBoundingClientRect();
+    portalRectLiveRef.current = rInit;
+    lastPortalRectKeyRef.current = `${Math.round(rInit.left)}|${Math.round(rInit.top)}|${Math.round(rInit.width)}|${Math.round(rInit.height)}`;
+    setPortalRect(rInit);
     let coalesceRaf = 0;
     const update = () => {
       if (coalesceRaf) return;
@@ -3383,6 +3633,7 @@ export default function App() {
         const target = activeScreenStream ? previewRef.current : contentAreaRef.current;
         if (!target) return;
         const r = target.getBoundingClientRect();
+        portalRectLiveRef.current = r;
         if (!activeScreenStream && contentAreaPrevRectRef.current) {
           const prev = contentAreaPrevRectRef.current;
           if (prev.w > 10 && prev.h > 10) {
@@ -3401,8 +3652,12 @@ export default function App() {
           }
         }
         contentAreaPrevRectRef.current = { w: r.width, h: r.height };
-        setPortalRect(r);
-        if (activeScreenStream) drawCompositeRef.current?.();
+        const rk = `${Math.round(r.left)}|${Math.round(r.top)}|${Math.round(r.width)}|${Math.round(r.height)}`;
+        if (lastPortalRectKeyRef.current !== rk) {
+          lastPortalRectKeyRef.current = rk;
+          setPortalRect(r);
+        }
+        // Preview loop already drives drawComposite; calling it here + setState caused ResizeObserver↔render feedback and PiP blink.
       });
     };
     update();
@@ -3469,17 +3724,23 @@ export default function App() {
     };
   }, [fullPageWhiteboard, showPip, activeScreenStream]);
 
-  // Preview loop: PiP overlay canvas + in-app composite. Keep overlay animating while recording when the portal is visible
-  // (recording + Capture Screen hides the portal — overlay work is skipped to save CPU).
+  // Preview loop: PiP overlay canvas + in-app composite. While recording + Capture Screen, still refresh the
+  // overlay when the portal is visible (PiP on whiteboard) so beauty/filter/wide-aspect paint does not stall.
   useEffect(() => {
     if (!showPip || avatarImageSrc) return;
     const shouldDrawCameraOverlayCanvas =
-      cameraOutsidePreview ||
+      (!(fullPageWhiteboard && activeScreenStream) && outsideForPipOverlay) ||
+      (fullPageWhiteboard && activeScreenStream && faceFilter !== "none" && !avatarImageSrc) ||
       (fullPageWhiteboard && !activeScreenStream && showPip) ||
       (showPip && !activeScreenStream && faceFilter !== "none" && !!mainLayoutPortalRect) ||
       (faceFilter !== "none" && showPip);
     const needsCompositePreview = !(fullPageWhiteboard && !activeScreenStream);
-    const drawOverlayWhileRecording = shouldDrawCameraOverlayCanvas && (!isRecording || !activeScreenStream);
+    const drawOverlayWhileRecording =
+      shouldDrawCameraOverlayCanvas &&
+      (!isRecording ||
+        !activeScreenStream ||
+        outsideForPipOverlay ||
+        (fullPageWhiteboard && activeScreenStream && faceFilter !== "none"));
     let id: number;
     const loop = () => {
       const now = performance.now();
@@ -3510,7 +3771,8 @@ export default function App() {
     activeScreenStream,
     faceFilter,
     mainLayoutPortalRect,
-    cameraOutsidePreview,
+    outsideForPipOverlay,
+    pipDragging,
   ]);
 
   // Full-page whiteboard composite only when PiP preview loop above is off (e.g. static image avatar instead of camera).
@@ -4144,34 +4406,39 @@ export default function App() {
     contentAreaSplitWidth > 0
       ? contentAreaSplitWidth
       : (contentAreaRef.current?.offsetWidth ?? contentAreaPrevRectRef.current?.w ?? 0);
-  const stripLockPx = Math.max(SPLIT_STRIP_MIN_PX, Math.round(whiteboardPanelWidthRef.current));
+  const contentWBase =
+    splitAffordanceLive?.content ??
+    (contentWForSplit > 0 ? contentWForSplit : (contentAreaRef.current?.offsetWidth ?? 0));
+  const stripBase = splitAffordanceLive
+    ? splitAffordanceLive.strip
+    : Math.max(SPLIT_STRIP_MIN_PX, Math.round(whiteboardPanelWidth));
   const stripPxForGrid =
     splitMainIsCapture && hasScreen
-      ? stripLockPx
+      ? stripBase
       : splitMainIsCapture && !hasScreen
         ? SPLIT_STRIP_MIN_PX
-        : stripLockPx;
+        : stripBase;
   const whiteboardTrackW = splitMainIsCapture
     ? stripPxForGrid
-    : Math.max(0, contentWForSplit - 14 - stripLockPx);
+    : Math.max(0, contentWBase - 14 - stripBase);
   /** Width of the Capture column (shows screen share): right strip when no stream, flex remainder when sharing. */
   const captureColumnW =
-    contentWForSplit > 0
+    contentWBase > 0
       ? splitMainIsCapture
-        ? Math.max(0, contentWForSplit - 14 - stripPxForGrid)
-        : stripLockPx
+        ? Math.max(0, contentWBase - 14 - stripPxForGrid)
+        : stripBase
       : 0;
   const stripAtMin =
-    (splitMainIsCapture ? stripPxForGrid : stripLockPx) <= SPLIT_STRIP_MIN_PX;
+    (splitMainIsCapture ? stripPxForGrid : stripBase) <= SPLIT_STRIP_MIN_PX;
   const captureAtMin = captureColumnW > 0 && captureColumnW <= SPLIT_STRIP_MIN_PX;
-  const EXCALIDRAW_AFFORDANCE_STRIP_MAX = 112;
-  const showExcalidrawAffordance = splitMainIsCapture
-    ? stripAtMin ||
-      (stripPxForGrid > SPLIT_STRIP_MIN_PX && stripPxForGrid < EXCALIDRAW_AFFORDANCE_STRIP_MAX)
-    : whiteboardTrackW > 0 && whiteboardTrackW < 360;
-  /** No stream: always show capture CTA (button / hint). With stream: only when capture column is narrow (drag affordance). */
+  const whiteboardColumnW = splitMainIsCapture ? stripPxForGrid : whiteboardTrackW;
+  const showExcalidrawAffordance =
+    whiteboardColumnW > 0 && whiteboardColumnW < SPLIT_COLUMN_MIN_USABLE_PX;
+  /** No stream: always show capture CTA (button or drag-only under min width). With stream: only when capture column is narrow (drag affordance). */
   const showScreenAffordance =
-    !hasScreen || (hasScreen && captureColumnW > 0 && captureColumnW < 320);
+    !hasScreen || (hasScreen && captureColumnW > 0 && captureColumnW < SPLIT_COLUMN_MIN_USABLE_PX);
+  const captureColumnTooNarrowForCaptureCta =
+    captureColumnW > 0 && captureColumnW < SPLIT_COLUMN_MIN_USABLE_PX;
 
   const splitGridFallback = splitGridTemplate(stripPxForGrid, splitMainIsCapture);
 
@@ -4290,7 +4557,7 @@ export default function App() {
         autoPlay
         muted
         playsInline
-        className="fixed pointer-events-none opacity-0"
+        className={`fixed pointer-events-none ${isRecording && activeScreenStream ? "opacity-[0.01]" : "opacity-0"}`}
         style={{ width: 2, height: 2, left: -9999, top: 0, zIndex: -50 }}
         aria-hidden
       />
@@ -4301,12 +4568,12 @@ export default function App() {
         autoPlay
         muted
         playsInline
-        className="fixed pointer-events-none overflow-hidden object-cover"
+        className="fixed pointer-events-none overflow-hidden object-contain bg-black"
         style={{
           left: fullPageWhiteboard ? -9999 : cameraViewportPos.x,
           top: fullPageWhiteboard ? -9999 : cameraViewportPos.y,
-          width: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_SIZE.w : avatarWidthDisplay,
-          height: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_SIZE.h : avatarHeightDisplay,
+          width: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_BOX_PX : avatarWidthDisplay,
+          height: fullPageWhiteboard ? CAMERA_SOURCE_VIDEO_BOX_PX : avatarHeightDisplay,
           zIndex: fullPageWhiteboard ? -1 : 99990,
           transform: "translate3d(0,0,0)",
           borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
@@ -4593,6 +4860,7 @@ export default function App() {
                 show={showExcalidrawAffordance}
                 variant="excalidraw"
                 minStrip={!!splitMainIsCapture && stripAtMin}
+                preferDragAffordance={showExcalidrawAffordance}
               />
             </div>
             <ResizeHandle
@@ -4641,7 +4909,7 @@ export default function App() {
                   )}
                   <video
                     ref={screenVideoRef}
-                    className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-contain opacity-0"
+                    className={`pointer-events-none absolute inset-0 z-[1] h-full w-full object-contain ${isRecording && activeScreenStream ? "opacity-[0.01]" : "opacity-0"}`}
                     autoPlay
                     muted
                     playsInline
@@ -4654,6 +4922,7 @@ export default function App() {
                 variant="screen"
                 minStrip={captureAtMin}
                 screenShareActive={hasScreen && !splitMainIsCapture}
+                preferDragAffordance={captureColumnTooNarrowForCaptureCta}
                 screenLayout={splitMainIsCapture ? "main" : "strip"}
                 onCaptureScreen={() => void captureScreen()}
               />
@@ -4697,19 +4966,19 @@ export default function App() {
                   borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
                   backgroundColor: "#000",
                   boxShadow: activeScreenStream && !isRecording ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
-                  /* Recording: hide portal only while PiP overlaps capture (composite draws it). On whiteboard, show portal and skip composite so one bubble + visible handle. */
+                  /* Recording + Capture: hide portal while PiP is on the preview canvas (same frame) so we don’t stack two bubbles; opacity 0 keeps video decoding. Pointer events stay on for drag. */
                   opacity:
-                    fullPageWhiteboard && activeScreenStream && isRecording && !cameraOutsidePreview
-                      ? 0
-                      : 1,
+                    isRecording && activeScreenStream && pipHiddenForScreenRecordDup ? 0 : 1,
                   pointerEvents: "auto",
                   outline: "none",
                   transform: "translateZ(0)",
                 }}
                 ref={pipRef}
               >
-                {/* Canvas overlay: beauty/filter when outside preview; above CircularWebcam (9999) so effects show */}
-                {(cameraOutsidePreview || (!activeScreenStream && !avatarImageSrc) || (faceFilter !== "none" && !avatarImageSrc)) && (
+                {/* Capture Screen: skip mount-by-outside overlay (beauty uses CircularWebcam CSS) — mounting here caused boundary blink. Face filter still needs canvas. */}
+                {((!(fullPageWhiteboard && activeScreenStream) && outsideForPipOverlay) ||
+                  (!activeScreenStream && !avatarImageSrc) ||
+                  (faceFilter !== "none" && !avatarImageSrc)) && (
                   <canvas
                     key={`overlay-${avatarShape}-${avatarDecor}-${avatarWidthDisplay}-${avatarHeightDisplay}`}
                     ref={cameraOverlayRef}

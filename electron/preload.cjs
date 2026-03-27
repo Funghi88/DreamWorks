@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setCompactMode: (position, width, height) =>
     ipcRenderer.invoke("setCompactMode", position, width, height),
   setNormalMode: () => ipcRenderer.invoke("setNormalMode"),
+  setBackgroundThrottling: (throttlingEnabled) =>
+    ipcRenderer.invoke("setBackgroundThrottling", throttlingEnabled),
   openHelperWindow: (kind) => ipcRenderer.invoke("openHelperWindow", kind),
   closeHelperByLabel: (label) => ipcRenderer.invoke("closeHelperByLabel", label),
   setWindowIcon: (buffer) => ipcRenderer.invoke("setWindowIcon", buffer),

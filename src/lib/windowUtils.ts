@@ -23,3 +23,15 @@ export async function setNormalMode() {
     /* Electron not available */
   }
 }
+
+/** `false` = do not throttle timers/rAF when the window is in the background (needed for recording while using the shared window). */
+export async function setBackgroundThrottling(throttlingEnabled: boolean) {
+  try {
+    const api = (window as unknown as {
+      electronAPI?: { setBackgroundThrottling?: (v: boolean) => Promise<void> };
+    }).electronAPI;
+    await api?.setBackgroundThrottling?.(throttlingEnabled);
+  } catch {
+    /* Electron not available */
+  }
+}

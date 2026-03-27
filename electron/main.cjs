@@ -467,6 +467,23 @@ ipcMain.handle("setNormalMode", async () => {
   win.setMinimumSize(800, 600);
 });
 
+/**
+ * Chromium throttles `requestAnimationFrame` and timers when the window is in the background.
+ * During screen recording we must keep compositing so the shared window keeps updating while the
+ * user operates it in the foreground (same as `webContents.setBackgroundThrottling` in Electron docs).
+ */
+ipcMain.handle("setBackgroundThrottling", async (_, throttlingEnabled) => {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (!win) return;
+  try {
+    if (typeof win.webContents.setBackgroundThrottling === "function") {
+      win.webContents.setBackgroundThrottling(Boolean(throttlingEnabled));
+    }
+  } catch (e) {
+    console.warn("[DreamWorks] setBackgroundThrottling:", e);
+  }
+});
+
 // IPC: openHelperWindow
 ipcMain.handle("openHelperWindow", async (_, kind) => {
   createHelperWindow(kind);

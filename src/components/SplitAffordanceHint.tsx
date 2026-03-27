@@ -15,11 +15,15 @@ type Props = {
   /** Strip is at minimum (40px): edge-to-edge, no inset padding */
   minStrip?: boolean;
   /**
-   * `variant="screen"` + `screenLayout="strip"` only: a share is active and the capture column is narrow
-   * (under ~320px). Use vertical “Drag Screen” + solid cover — never the wide “Capture Screen” chip on
-   * top of a useless squeezed preview.
+   * `variant="screen"` + `screenLayout="strip"`: true while sharing with whiteboard main — solid “Drag Screen”
+   * overlay when the affordance is shown (parent gates visibility with column width).
    */
   screenShareActive?: boolean;
+  /**
+   * Column under min usable width: Drag-only treatment — no Capture button (screen), or full edge-to-edge
+   * drag hint (excalidraw / whiteboard). Parent computes from measured column width.
+   */
+  preferDragAffordance?: boolean;
   /**
    * `variant="screen"` only: capture column is the wide `1fr` pane (Share Window, horizontal)
    * vs the narrow strip beside the main whiteboard (Drag Screen, vertical + arrow).
@@ -46,6 +50,7 @@ export function SplitAffordanceHint({
   variant,
   minStrip = false,
   screenShareActive = false,
+  preferDragAffordance = false,
   screenLayout = "strip",
   onCaptureScreen,
 }: Props) {
@@ -56,15 +61,38 @@ export function SplitAffordanceHint({
   /** Match parent strip: narrow columns are still full `rounded-*` boxes (see App.tsx sector-card / capture panel). */
   const radiusClass = isExcalidraw ? "rounded-xl" : "rounded-2xl";
 
+  const mainTransition = [
+    reduceMotion ? "transition-opacity duration-200" : "transition-[opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
+    visible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 translate-y-2 scale-[0.97]",
+  ].join(" ");
+
   if (isScreenMain) {
+    if (preferDragAffordance) {
+      return (
+        <div
+          role="region"
+          aria-label="Widen the capture area"
+          aria-hidden={!visible}
+          className={[
+            "absolute inset-0 z-[60] flex flex-col items-center justify-center pointer-events-none isolate overflow-hidden rounded-2xl bg-slate-900 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]",
+            mainTransition,
+          ].join(" ")}
+        >
+          <span className="sr-only">
+            Drag the divider or resize the window until this panel is wider, then use Capture Screen in the
+            header or here.
+          </span>
+          <ScreenDragVerticalHint visible={visible} reduceMotion={reduceMotion} compact />
+        </div>
+      );
+    }
     return (
       <div
         role="presentation"
         aria-hidden={!visible}
         className={[
           "absolute inset-0 z-[60] flex flex-row items-center justify-center pointer-events-none isolate overflow-hidden rounded-2xl",
-          reduceMotion ? "transition-opacity duration-200" : "transition-[opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-          visible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 translate-y-2 scale-[0.97]",
+          mainTransition,
         ].join(" ")}
       >
         {onCaptureScreen ? (
@@ -98,12 +126,13 @@ export function SplitAffordanceHint({
   }
 
   /**
-   * Narrow capture column beside main whiteboard. Min width (40px) or active share in a narrow column:
-   * vertical “Drag Screen ←” only — solid cover so the squished stream is not visible behind glass.
+   * Narrow capture column beside main whiteboard, or strip under min usable width: vertical “Drag Screen ←”
+   * only — solid cover so a squeezed stream / empty column does not show a misleading Capture chip.
    */
   const isScreenStrip = variant === "screen" && screenLayout === "strip";
-  const verticalStripHint = isScreenStrip && (minStrip || screenShareActive);
-  const solidScreenCover = isScreenStrip && (minStrip || screenShareActive);
+  const verticalStripHint = isScreenStrip && (minStrip || screenShareActive || preferDragAffordance);
+  const solidScreenCover = verticalStripHint;
+  const edgeToEdge = isExcalidraw ? minStrip || preferDragAffordance : verticalStripHint;
 
   return (
     <div
@@ -111,8 +140,8 @@ export function SplitAffordanceHint({
       aria-hidden={!visible}
       className={[
         "absolute z-[60] flex flex-col items-center justify-center pointer-events-none isolate",
-        minStrip || screenShareActive ? "overflow-visible" : "overflow-hidden",
-        minStrip || screenShareActive
+        edgeToEdge ? "overflow-visible" : "overflow-hidden",
+        edgeToEdge
           ? `inset-0 m-0 box-border h-full w-full gap-0 p-0 ${radiusClass}`
           : `inset-0 gap-0.5 m-1 p-1 ${radiusClass}`,
         reduceMotion
@@ -144,7 +173,7 @@ export function SplitAffordanceHint({
             visible={visible}
             delayMs={reduceMotion ? 0 : 0}
             reduceMotion={reduceMotion}
-            className={`${minStrip || screenShareActive ? "" : "truncate "} ${minStrip || screenShareActive ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-500" : "text-slate-400"}`}
+            className={`${edgeToEdge ? "" : "truncate "} ${edgeToEdge ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-500" : "text-slate-400"}`}
           >
             {isExcalidraw ? "drag" : "Drag"}
           </HintLine>
@@ -152,15 +181,15 @@ export function SplitAffordanceHint({
             visible={visible}
             delayMs={reduceMotion ? 0 : 70}
             reduceMotion={reduceMotion}
-            className={`${minStrip || screenShareActive ? "" : "truncate "}font-medium ${minStrip || screenShareActive ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-700" : "text-slate-200"}`}
+            className={`${edgeToEdge ? "" : "truncate "}font-medium ${edgeToEdge ? "text-[8px] leading-tight" : "text-[9px]"} ${isExcalidraw ? "text-slate-700" : "text-slate-200"}`}
           >
-            {isExcalidraw ? "Excalidraw" : "Screen"}
+            {isExcalidraw ? "Whiteboard" : "Screen"}
           </HintLine>
           <HintLine
             visible={visible}
             delayMs={reduceMotion ? 0 : 140}
             reduceMotion={reduceMotion}
-            className={`${minStrip || screenShareActive ? "text-[10px] leading-none" : "text-sm"} ${isExcalidraw ? "text-slate-500" : "text-slate-300"}`}
+            className={`${edgeToEdge ? "text-[10px] leading-none" : "text-sm"} ${isExcalidraw ? "text-slate-500" : "text-slate-300"}`}
             aria-hidden
           >
             {isExcalidraw ? "→" : "←"}
@@ -168,6 +197,47 @@ export function SplitAffordanceHint({
         </>
       )}
     </div>
+  );
+}
+
+function ScreenDragVerticalHint({
+  visible,
+  reduceMotion,
+  compact,
+}: {
+  visible: boolean;
+  reduceMotion: boolean;
+  compact: boolean;
+}) {
+  const c = compact;
+  return (
+    <>
+      <HintLine
+        visible={visible}
+        delayMs={reduceMotion ? 0 : 0}
+        reduceMotion={reduceMotion}
+        className={`${c ? "" : "truncate "} ${c ? "text-[8px] leading-tight" : "text-[9px]"} text-slate-400`}
+      >
+        Drag
+      </HintLine>
+      <HintLine
+        visible={visible}
+        delayMs={reduceMotion ? 0 : 70}
+        reduceMotion={reduceMotion}
+        className={`${c ? "" : "truncate "}font-medium ${c ? "text-[8px] leading-tight" : "text-[9px]"} text-slate-200`}
+      >
+        Screen
+      </HintLine>
+      <HintLine
+        visible={visible}
+        delayMs={reduceMotion ? 0 : 140}
+        reduceMotion={reduceMotion}
+        className={`${c ? "text-[10px] leading-none" : "text-sm"} text-slate-300`}
+        aria-hidden
+      >
+        ←
+      </HintLine>
+    </>
   );
 }
 

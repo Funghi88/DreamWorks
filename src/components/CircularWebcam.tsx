@@ -1,5 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AvatarShape, AvatarDecor } from "./SettingsPanel";
+
+/** Match App.tsx — widescreen / Presenter-style camera: letterbox in PiP instead of aggressive cover crop */
+const PIP_VIDEO_CONTAIN_MIN_ASPECT = 1.42;
+/** Hysteresis: avoid object-cover ↔ object-contain flipping when reported aspect hovers near threshold (Capture Screen PiP blink). */
+const PIP_WIDE_ASPECT_ON = 1.5;
+const PIP_WIDE_ASPECT_OFF = 1.34;
 
 /** Match App.tsx AVATAR_RECT_RADIUS - must stay in sync for corner alignment */
 const AVATAR_RECT_RADIUS = 16;
@@ -71,6 +77,7 @@ export function CircularWebcam({
   const imgRef = useRef<HTMLImageElement | null>(null);
   const imgAltRef = useRef<HTMLImageElement | null>(null);
   const showImgARef = useRef(true);
+  const [pipWideAspect, setPipWideAspect] = useState(false);
 
   useEffect(() => {
     const el = videoElRef.current;
@@ -78,10 +85,28 @@ export function CircularWebcam({
       el.setAttribute("playsinline", "");
       el.setAttribute("webkit-playsinline", "");
       el.srcObject = cameraStream;
-      el.onloadedmetadata = () => {
+      const onMeta = () => {
+        const vw = el.videoWidth;
+        const vh = el.videoHeight;
+        if (vw > 0 && vh > 0) {
+          const ar = vw / vh;
+          setPipWideAspect((prev) => {
+            if (ar >= PIP_WIDE_ASPECT_ON) return true;
+            if (ar <= PIP_WIDE_ASPECT_OFF) return false;
+            return prev;
+          });
+        } else {
+          setPipWideAspect(false);
+        }
         setTimeout(() => el.play().catch(() => {}), 50);
       };
-      if (el.readyState >= 1) el.play().catch(() => {});
+      el.onloadedmetadata = onMeta;
+      if (el.readyState >= 1) {
+        onMeta();
+        el.play().catch(() => {});
+      }
+    } else {
+      setPipWideAspect(false);
     }
   }, [cameraStream]);
 
@@ -112,7 +137,9 @@ export function CircularWebcam({
           ctx.clearRect(0, 0, cw, ch);
           const vw = video.videoWidth;
           const vh = video.videoHeight;
-          const s = Math.max(cw / vw, ch / vh);
+          const ar = vw / vh;
+          const useContain = ar >= PIP_VIDEO_CONTAIN_MIN_ASPECT;
+          const s = useContain ? Math.min(cw / vw, ch / vh) : Math.max(cw / vw, ch / vh);
           const sw = vw * s;
           const sh = vh * s;
           const dx = (cw - sw) / 2;
@@ -124,7 +151,7 @@ export function CircularWebcam({
             ctx.arc(cw / 2, ch / 2, r, 0, Math.PI * 2);
             ctx.closePath();
             ctx.clip();
-            ctx.fillStyle = "transparent";
+            ctx.fillStyle = "#000000";
             ctx.beginPath();
             ctx.arc(cw / 2, ch / 2, r, 0, Math.PI * 2);
             ctx.fill();
@@ -206,7 +233,10 @@ export function CircularWebcam({
       onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
     >
       {/* Inner: overflow-hidden clips video to shape; glow stays on outer (no clip) */}
-      <div className={`absolute inset-0 overflow-hidden ${shapeClass}`} style={avatarShape !== "circle" ? { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` } : undefined}>
+      <div
+        className={`absolute inset-0 overflow-hidden ${pipWideAspect ? "bg-black" : ""} ${shapeClass}`}
+        style={avatarShape !== "circle" ? { clipPath: `inset(0 round ${AVATAR_RECT_RADIUS}px)` } : undefined}
+      >
         {avatarImageSrc ? (
           <img
             ref={avatarImgRef}
@@ -285,7 +315,7 @@ export function CircularWebcam({
             autoPlay
             muted
             playsInline
-            className="pointer-events-none absolute inset-0 w-full h-full object-cover"
+            className={`pointer-events-none absolute inset-0 w-full h-full ${pipWideAspect ? "object-contain" : "object-cover"}`}
             style={{ transform: "scaleX(-1)", ...(beautyMode ? { filter: beautyFilter } : {}) }}
             draggable={false}
           />
