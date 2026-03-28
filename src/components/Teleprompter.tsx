@@ -1,6 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useRef, useState, memo } from "react";
 import { GlassButton } from "@/components/Glass";
+import { DREAMWORK_FLUSH_TELEPROMPTER_DRAFT } from "@/lib/storage";
 
 interface AnchorRect {
   left: number;
@@ -49,6 +50,8 @@ interface TeleprompterPanelProps {
   activeScriptId: string;
   onSwitchScript: (id: string) => void;
   onNewScript: () => void;
+  /** Add scripts from disk (.txt / .md); names derived from filenames. */
+  onImportScripts: (items: { name: string; content: string }[]) => void;
   onSaveAsScript: () => void;
   onRenameScript: (newName: string) => void;
   speed: number;
@@ -87,6 +90,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
 function getViewportSize() {
   if (typeof window === "undefined") return { width: 1280, height: 720 };
   return { width: window.innerWidth, height: window.innerHeight };
+}
+
+function teleprompterNameFromFilename(filename: string): string {
+  const base = filename.replace(/\\/g, "/").split("/").pop() ?? filename;
+  const stripped = base.replace(/\.(md|txt|markdown)$/i, "").trim();
+  return stripped.length > 0 ? stripped : "Imported";
 }
 
 function clampScroll(
@@ -476,6 +485,7 @@ export function TeleprompterPanel({
   activeScriptId,
   onSwitchScript,
   onNewScript,
+  onImportScripts,
   onSaveAsScript,
   onRenameScript,
   speed,
@@ -509,6 +519,7 @@ export function TeleprompterPanel({
   const [editingScriptName, setEditingScriptName] = useState(false);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const saveAsRef = useRef<HTMLDivElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollTopByScriptRef = useRef<Record<string, number>>({});
   const scriptPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -531,6 +542,22 @@ export function TeleprompterPanel({
       if (scriptPushTimerRef.current != null) clearTimeout(scriptPushTimerRef.current);
     };
   }, []);
+
+  /** Whiteboard ⌘S runs before React state catches textarea debounce — sync draft into settings snapshot first. */
+  useEffect(() => {
+    const onFlushDraft = () => {
+      if (scriptPushTimerRef.current != null) {
+        clearTimeout(scriptPushTimerRef.current);
+        scriptPushTimerRef.current = null;
+      }
+      const v = textareaRef.current?.value ?? draftScript;
+      setDraftScript(v);
+      onSetScript(v);
+      onFlushSave?.(v);
+    };
+    window.addEventListener(DREAMWORK_FLUSH_TELEPROMPTER_DRAFT, onFlushDraft);
+    return () => window.removeEventListener(DREAMWORK_FLUSH_TELEPROMPTER_DRAFT, onFlushDraft);
+  }, [draftScript, onSetScript, onFlushSave]);
 
   const downloadScript = useCallback(
     (ext: "md" | "txt") => {
@@ -790,7 +817,7 @@ export function TeleprompterPanel({
       <div
         ref={panelRef}
         data-dreamwork-no-intercept
-        className="!fixed z-[1000000] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md"
+        className="!fixed z-[1000000] flex h-11 w-[260px] items-center justify-between rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md [color-scheme:dark]"
         style={{ left, top }}
       >
         <div
@@ -804,14 +831,14 @@ export function TeleprompterPanel({
         <div className="flex gap-1">
           <button
             type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px]"
+            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
             onClick={() => onSetPlaying(!isPlaying)}
           >
             {isPlaying ? "Pause" : "Play"}
           </button>
           <button
             type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px]"
+            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
             onClick={() => {
               setCollapsed(false);
               clearAutoMinimizeTimer();
@@ -821,7 +848,7 @@ export function TeleprompterPanel({
           </button>
           <button
             type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px]"
+            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
             onClick={() => {
               flushDraftToParent();
               onHide();
@@ -836,15 +863,15 @@ export function TeleprompterPanel({
 
   /** Same height / radius / horizontal padding as GlassButton `sm` overrides (h-7, rounded-lg, px-2). */
   const tpActionClass =
-    "!h-7 min-h-0 shrink-0 !px-2 !py-0 !text-[10px] font-normal leading-tight";
+    "!h-7 min-h-0 shrink-0 !px-2 !py-0 !text-[10px] font-normal leading-tight !text-white";
   const tpSelectClass =
-    "box-border h-7 min-w-0 flex-1 rounded-lg border border-white/20 bg-black/45 px-2 py-0 text-[10px] font-normal leading-7 text-white outline-none";
+    "box-border h-7 min-w-0 flex-1 rounded-lg border border-white/20 bg-black/45 px-2 py-0 text-[10px] font-normal leading-7 text-white outline-none [color-scheme:dark]";
 
   return (
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
-      className="!fixed z-[1000000] box-border flex max-h-[calc(100vh-16px)] min-h-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/70 p-2.5 text-[11px] text-white shadow-2xl backdrop-blur-md"
+      className="!fixed z-[1000000] box-border flex max-h-[calc(100vh-16px)] min-h-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/70 p-2.5 text-[11px] text-white shadow-2xl backdrop-blur-md [color-scheme:dark]"
       style={{
         left,
         top,
@@ -868,7 +895,7 @@ export function TeleprompterPanel({
         <button
           type="button"
           onClick={onToggleLocked}
-          className="shrink-0 rounded border border-white/30 bg-black/45 px-1.5 py-0.5 text-[10px]"
+          className="shrink-0 rounded border border-white/30 bg-black/45 px-1.5 py-0.5 text-[10px] text-white"
           title={locked ? "Unlock teleprompter drag" : "Lock teleprompter position"}
         >
           {locked ? "Locked" : "Lock"}
@@ -950,6 +977,46 @@ export function TeleprompterPanel({
         >
           New
         </GlassButton>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".txt,.md,.markdown,text/plain"
+          multiple
+          className="sr-only h-px w-px overflow-hidden border-0 p-0 opacity-0"
+          tabIndex={-1}
+          aria-hidden
+          onChange={(e) => {
+            const inputEl = e.target;
+            const list = inputEl.files;
+            if (!list?.length) return;
+            flushDraftToParent();
+            void (async () => {
+              const items: { name: string; content: string }[] = [];
+              for (const f of Array.from(list)) {
+                try {
+                  items.push({ name: teleprompterNameFromFilename(f.name), content: await f.text() });
+                } catch {
+                  /* unreadable file — skip */
+                }
+              }
+              inputEl.value = "";
+              if (items.length) onImportScripts(items);
+            })();
+          }}
+        />
+        <GlassButton
+          type="button"
+          size="sm"
+          className={tpActionClass}
+          variant="secondary"
+          onClick={() => {
+            flushDraftToParent();
+            importInputRef.current?.click();
+          }}
+          title="Import .txt or .md from disk (multiple files allowed)"
+        >
+          Import
+        </GlassButton>
         <div ref={saveAsRef} className="relative shrink-0">
           <GlassButton
             size="sm"
@@ -967,7 +1034,7 @@ export function TeleprompterPanel({
             >
               <button
                 type="button"
-                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] text-white hover:bg-white/15"
                 onClick={() => {
                   setSaveAsOpen(false);
                   flushDraftToParent();
@@ -978,14 +1045,14 @@ export function TeleprompterPanel({
               </button>
               <button
                 type="button"
-                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] text-white hover:bg-white/15"
                 onClick={() => downloadScript("md")}
               >
                 Download as .md
               </button>
               <button
                 type="button"
-                className="block w-full px-2.5 py-1 text-left text-[10px] hover:bg-white/15"
+                className="block w-full px-2.5 py-1 text-left text-[10px] text-white hover:bg-white/15"
                 onClick={() => downloadScript("txt")}
               >
                 Download as .txt
@@ -1063,7 +1130,7 @@ export function TeleprompterPanel({
           }}
           rows={6}
           style={{ height: editorHeight }}
-          className="w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white outline-none"
+          className="w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white caret-white outline-none placeholder:text-white/45"
           placeholder="Paste script here..."
         />
         <div

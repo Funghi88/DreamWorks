@@ -27,6 +27,8 @@ import {
   saveSettings,
   getTeleprompterScripts,
   saveTeleprompterScripts,
+  hydratePersistedSettingsSnapshot,
+  getSettingsMergeBase,
   type RecordResolution,
   type LetterboxBackground,
   type LetterboxMode,
@@ -655,11 +657,23 @@ export default function App() {
     () => loadSettings().autoParkPipOnRecordStart ?? false
   );
 
-  // Load persisted settings from Electron file storage on mount (localStorage used for web)
+  // Electron: disk → React (single load). Web: hydrate merge snapshot so partial saves use one coherent blob.
   useEffect(() => {
-    if (!isElectron) return;
-    loadSettingsAsync().then((s) => {
+    if (!isElectron) {
+      hydratePersistedSettingsSnapshot(loadSettings());
+      return;
+    }
+    loadSettingsAsync().then((loaded) => {
       settingsLoadedRef.current = true;
+      const s = loaded;
+      if (s.whiteboardPanelWidth != null) {
+        const w = Math.max(SPLIT_STRIP_MIN_PX, Math.round(s.whiteboardPanelWidth));
+        whiteboardPanelWidthRef.current = w;
+        setWhiteboardPanelWidth(w);
+      } else {
+        whiteboardPanelWidthRef.current = SPLIT_STRIP_MIN_PX;
+        setWhiteboardPanelWidth(SPLIT_STRIP_MIN_PX);
+      }
       if (s.avatarImageSrc != null) setAvatarImageSrc(s.avatarImageSrc);
       if (s.avatarSize != null) setAvatarSize(s.avatarSize);
       if (s.avatarShape != null) setAvatarShape(s.avatarShape);
@@ -672,13 +686,6 @@ export default function App() {
       if (s.fullPagePipPos != null) setFullPagePipPos(s.fullPagePipPos);
       if (s.sidebarWidth != null) setSidebarWidth(s.sidebarWidth);
       if (s.previewWidth != null) setPreviewWidth(s.previewWidth);
-      if (s.whiteboardPanelWidth != null) {
-        const captureLive =
-          previewScreenStreamRef.current != null || whiteboardScreenStreamRef.current != null;
-        if (!captureLive) {
-          setWhiteboardPanelWidth(s.whiteboardPanelWidth);
-        }
-      }
       if (s.whiteboardHeight != null) setWhiteboardHeight(s.whiteboardHeight);
       if (s.micVolume != null) setMicVolume(s.micVolume);
       if (s.systemVolume != null) setSystemVolume(s.systemVolume);
@@ -694,6 +701,24 @@ export default function App() {
       if (s.fullPagePreviewPos != null) setFullPagePreviewPos(s.fullPagePreviewPos);
       if (s.omitPipFromRecording != null) setOmitPipFromRecording(s.omitPipFromRecording);
       if (s.autoParkPipOnRecordStart != null) setAutoParkPipOnRecordStart(s.autoParkPipOnRecordStart);
+
+      const list = getTeleprompterScripts(s);
+      const aid =
+        s.activeTeleprompterScriptId && list.some((x) => x.id === s.activeTeleprompterScriptId)
+          ? s.activeTeleprompterScriptId
+          : list[0]?.id ?? "default";
+      setTeleprompterScripts(list);
+      setActiveTeleprompterScriptId(aid);
+      if (s.teleprompterSpeed != null) setTeleprompterSpeed(s.teleprompterSpeed);
+      if (s.teleprompterFontSize != null) setTeleprompterFontSize(s.teleprompterFontSize);
+      if (s.teleprompterOpacity != null) setTeleprompterOpacity(s.teleprompterOpacity);
+      if (s.teleprompterWidth != null) setTeleprompterWidth(s.teleprompterWidth);
+      if (s.teleprompterHeight != null) setTeleprompterHeight(s.teleprompterHeight);
+      if (s.teleprompterPanelWidth != null) setTeleprompterPanelWidth(s.teleprompterPanelWidth);
+      if (s.teleprompterPanelHeight != null) setTeleprompterPanelHeight(s.teleprompterPanelHeight);
+
+      hydratePersistedSettingsSnapshot(s);
+      setElectronSettingsEpoch((e) => e + 1);
     });
   }, [isElectron]);
 
@@ -892,26 +917,6 @@ export default function App() {
   const teleprompterScript = currentTeleprompterScript?.content ?? defaultScript;
 
   const [electronSettingsEpoch, setElectronSettingsEpoch] = useState(0);
-  useEffect(() => {
-    if (isElectron) {
-      loadSettingsAsync().then((s) => {
-        const list = getTeleprompterScripts(s);
-        const aid = s.activeTeleprompterScriptId && list.some((x) => x.id === s.activeTeleprompterScriptId)
-          ? s.activeTeleprompterScriptId
-          : list[0]?.id ?? "default";
-        setTeleprompterScripts(list);
-        setActiveTeleprompterScriptId(aid);
-        if (s.teleprompterSpeed != null) setTeleprompterSpeed(s.teleprompterSpeed);
-        if (s.teleprompterFontSize != null) setTeleprompterFontSize(s.teleprompterFontSize);
-        if (s.teleprompterOpacity != null) setTeleprompterOpacity(s.teleprompterOpacity);
-        if (s.teleprompterWidth != null) setTeleprompterWidth(s.teleprompterWidth);
-        if (s.teleprompterHeight != null) setTeleprompterHeight(s.teleprompterHeight);
-        if (s.teleprompterPanelWidth != null) setTeleprompterPanelWidth(s.teleprompterPanelWidth);
-        if (s.teleprompterPanelHeight != null) setTeleprompterPanelHeight(s.teleprompterPanelHeight);
-        setElectronSettingsEpoch((e) => e + 1);
-      });
-    }
-  }, [isElectron]);
 
   useEffect(() => {
     if (teleprompterSaveTimeoutRef.current) clearTimeout(teleprompterSaveTimeoutRef.current);
@@ -919,7 +924,7 @@ export default function App() {
       teleprompterSaveTimeoutRef.current = null;
       const run = () => {
         const r = teleprompterSaveRef.current;
-        const base = saveTeleprompterScripts(loadSettings(), r.scripts, r.activeId);
+        const base = saveTeleprompterScripts(getSettingsMergeBase(), r.scripts, r.activeId);
         saveSettings({
           ...base,
           teleprompterSpeed: r.speed,
@@ -967,7 +972,7 @@ export default function App() {
       );
       teleprompterSaveRef.current = { ...r, scripts };
     }
-    const base = saveTeleprompterScripts(loadSettings(), scripts, activeId);
+    const base = saveTeleprompterScripts(getSettingsMergeBase(), scripts, activeId);
     saveSettings({
       ...base,
       teleprompterSpeed: r.speed,
@@ -1013,6 +1018,21 @@ export default function App() {
     const script: TeleprompterScript = { id, name: "Untitled", content: "", updatedAt: Date.now() };
     setTeleprompterScripts((prev) => [...prev, script]);
     setActiveTeleprompterScriptId(id);
+  }, []);
+
+  const handleImportTeleprompterScripts = useCallback((items: { name: string; content: string }[]) => {
+    if (!items.length) return;
+    const t = Date.now();
+    const newScripts: TeleprompterScript[] = items.map((item, i) => ({
+      id: `script-${t}-${i}`,
+      name: item.name,
+      content: item.content,
+      updatedAt: t,
+    }));
+    startTransition(() => {
+      setTeleprompterScripts((prev) => [...prev, ...newScripts]);
+      setActiveTeleprompterScriptId(newScripts[newScripts.length - 1]!.id);
+    });
   }, []);
 
   const handleSaveAsTeleprompterScript = useCallback(() => {
@@ -1118,6 +1138,7 @@ export default function App() {
 
   const hasScreen = !!activeScreenStream || !!persistentScreenVideoRef.current?.srcObject;
   hasScreenLayoutRef.current = hasScreen || captureMainNoStream;
+
   /** Which column gets `1fr`: capture preview vs whiteboard (see `splitGridTemplate`). */
   const splitMainIsCapture =
     (hasScreen || captureMainNoStream) && !(hasScreen && preferWhiteboardMain);
@@ -1478,9 +1499,11 @@ export default function App() {
       const wbSnap = recordWhiteboardPreviewSizeRef.current;
       const wbOnlyRecording = forceRecordRes && fullPageWhiteboard && !activeScreenStream;
       if (activeScreenStream) {
-        // Match the visible capture <canvas> box (parent `preview` can differ by padding/border → broke PiP scale vs rect).
-        prevW = Math.max(1, Math.round(captureLayoutEl.clientWidth));
-        prevH = Math.max(1, Math.round(captureLayoutEl.clientHeight));
+        // Size from the capture **pane** (`preview`), not `compositeRef`. We set canvas inline width/height each
+        // frame; reading composite.clientWidth created a feedback loop after window resize (stale size → black
+        // margins showing the pane's bg-slate-900). PiP math still uses `captureLayoutEl.getBoundingClientRect()`.
+        prevW = Math.max(1, Math.round(preview.clientWidth));
+        prevH = Math.max(1, Math.round(preview.clientHeight));
       } else if (wbOnlyRecording) {
         // Match on-screen CSS box (Mac/non-16:9): frozen wbSnap can be smaller than real layout → PiP scales up in export.
         const pr = preview.getBoundingClientRect();
@@ -2960,7 +2983,7 @@ export default function App() {
     recordingSessionIncludePipRef.current = showPip;
     if (omitPipFromRecording && showPip) {
       setOmitPipFromRecording(false);
-      saveSettings({ ...loadSettings(), omitPipFromRecording: false });
+      saveSettings({ ...getSettingsMergeBase(), omitPipFromRecording: false });
     }
 
     setIsRecording(true);
@@ -3780,6 +3803,9 @@ export default function App() {
     if (!fullPageWhiteboard || isRecording) return;
     if (!activeScreenStream && !showPip) return;
     if (showPip && !avatarImageSrc) return;
+    // After the checks above, any remaining path with **no** screen share implies drawComposite early-returns
+    // (idle whiteboard + no capture) — spinning rAF here only contended with Excalidraw for no visual gain.
+    if (!activeScreenStream) return;
     let id: number;
     const loop = () => {
       const now = performance.now();
@@ -4490,6 +4516,7 @@ export default function App() {
           activeScriptId={activeTeleprompterScriptId}
           onSwitchScript={handleSwitchTeleprompterScript}
           onNewScript={handleNewTeleprompterScript}
+          onImportScripts={handleImportTeleprompterScripts}
           onSaveAsScript={handleSaveAsTeleprompterScript}
           onRenameScript={handleRenameTeleprompterScript}
           speed={teleprompterSpeed}

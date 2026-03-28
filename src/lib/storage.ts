@@ -1,5 +1,19 @@
 const KEY = "dreamwork-settings";
 
+/** Latest full settings (last `saveSettings` or disk hydrate). Used instead of rereading LS mid-flight so e.g. Teleprompter save cannot wipe in-memory whiteboard data. */
+let persistedSettingsSnapshot: StoredSettings | null = null;
+
+export const DREAMWORK_FLUSH_TELEPROMPTER_DRAFT = "dreamwork-flush-teleprompter-draft";
+
+export function hydratePersistedSettingsSnapshot(s: StoredSettings): void {
+  persistedSettingsSnapshot = { ...s };
+}
+
+/** Merge base for partial saves — prefer last persisted blob over `loadSettings()` to avoid cross-feature clobber. */
+export function getSettingsMergeBase(): StoredSettings {
+  return persistedSettingsSnapshot ?? loadSettings();
+}
+
 function getElectronAPI(): { getSettings: () => Promise<unknown>; saveSettings: (s: unknown) => Promise<void> } | null {
   if (typeof window === "undefined") return null;
   const api = (window as unknown as { electronAPI?: { getSettings?: unknown; saveSettings?: unknown } }).electronAPI;
@@ -72,6 +86,11 @@ export interface StoredSettings {
   sidebarWidth?: number;
   previewWidth?: number;
   whiteboardPanelWidth?: number;
+  /**
+   * After first read, strip width follows user drags. Absent on legacy files → one-time migrate:
+   * keep saved `whiteboardPanelWidth` if present, else default 40px (first install).
+   */
+  splitStripWidthInitialized?: boolean;
   capturePanelWidth?: number;
   whiteboardHeight?: number;
   avatarSize?: number;
@@ -218,7 +237,8 @@ function validTeleprompterScripts(v: unknown): StoredSettings["teleprompterScrip
 function parseAndValidate(parsed: unknown): StoredSettings {
   if (!parsed || typeof parsed !== "object") return {};
   const p = parsed as Record<string, unknown>;
-  return {
+  const SPLIT_STRIP_DEFAULT_PX = 40;
+  const base: StoredSettings = {
     glowColor: typeof p.glowColor === "string" ? p.glowColor : undefined,
     pipPos:
       p.pipPos && typeof (p.pipPos as { x?: number; y?: number }).x === "number" && typeof (p.pipPos as { x?: number; y?: number }).y === "number"
@@ -337,6 +357,16 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterPanelWidth: validNum(p.teleprompterPanelWidth, 280, 920),
     teleprompterPanelHeight: validNum(p.teleprompterPanelHeight, 320, 900),
   };
+
+  if (p.splitStripWidthInitialized === true) {
+    return { ...base, splitStripWidthInitialized: true };
+  }
+  const migrated: StoredSettings = {
+    ...base,
+    splitStripWidthInitialized: true,
+    ...(base.whiteboardPanelWidth == null ? { whiteboardPanelWidth: SPLIT_STRIP_DEFAULT_PX } : {}),
+  };
+  return migrated;
 }
 
 /** Get teleprompter scripts with migration from legacy teleprompterScript. */
@@ -393,10 +423,10 @@ export function saveWhiteboardProjects(
 export function loadSettings(): StoredSettings {
   try {
     const s = localStorage.getItem(KEY);
-    if (!s) return {};
+    if (!s) return parseAndValidate({});
     return parseAndValidate(JSON.parse(s));
   } catch {
-    return {};
+    return parseAndValidate({});
   }
 }
 
@@ -406,6 +436,8 @@ export async function loadSettingsAsync(): Promise<StoredSettings> {
   if (!api) return loadSettings();
   try {
     const raw = await api.getSettings();
+    const hadSplitStripInit =
+      raw != null && typeof raw === "object" && (raw as Record<string, unknown>).splitStripWidthInitialized === true;
     let s = parseAndValidate(raw);
     // Migrate from localStorage if file was empty (first run after upgrade)
     if (Object.keys(s).length === 0) {
@@ -415,6 +447,9 @@ export async function loadSettingsAsync(): Promise<StoredSettings> {
         api.saveSettings(s).catch(() => {});
       }
     }
+    if (!hadSplitStripInit && s.splitStripWidthInitialized === true) {
+      api.saveSettings(s).catch(() => {});
+    }
     // Electron: disk is source of truth; mirror into localStorage so loadSettings() matches.
     // Otherwise App's UI auto-save used {} from LS and overwrote whiteboardProjects + images on disk.
     try {
@@ -422,13 +457,17 @@ export async function loadSettingsAsync(): Promise<StoredSettings> {
     } catch {
       /* quota */
     }
+    hydratePersistedSettingsSnapshot(s);
     return s;
   } catch {
-    return loadSettings();
+    const fallback = loadSettings();
+    hydratePersistedSettingsSnapshot(fallback);
+    return fallback;
   }
 }
 
 export function saveSettings(settings: StoredSettings) {
+  persistedSettingsSnapshot = settings;
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
   } catch {

@@ -18,6 +18,8 @@ import {
   saveSettings,
   getWhiteboardProjects,
   saveWhiteboardProjects,
+  getSettingsMergeBase,
+  DREAMWORK_FLUSH_TELEPROMPTER_DRAFT,
   type WhiteboardProject,
   type WhiteboardLayer,
 } from "@/lib/storage";
@@ -62,6 +64,11 @@ const WHITEBOARD_TEXTURES = [
 // Use relative path so textures load in packed Electron (file:// protocol)
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}whiteboard-textures/`;
 
+function flushTeleprompterDraftSync() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(DREAMWORK_FLUSH_TELEPROMPTER_DRAFT));
+}
+
 /** Normalize Excalidraw's files map (plain object or Map). */
 function normalizeFileMapInput(input: unknown): Record<string, unknown> | null {
   if (input == null) return null;
@@ -87,6 +94,17 @@ function mergeFileMaps(...sources: unknown[]): Record<string, unknown> {
     }
   }
   return out;
+}
+
+/** True only while WYSIWYG text or line-label editor is open — not `false`, not idle `null`/`undefined`. */
+function isInlineTextOrLineLabelEdit(app: Record<string, unknown>): boolean {
+  const t = app.editingTextElement;
+  if (t != null && t !== false) {
+    if (typeof t === "object") return true;
+    if (typeof t === "string" && t.length > 0) return true;
+  }
+  const lin = app.editingLinearElement;
+  return lin != null && lin !== false && typeof lin === "object";
 }
 
 /**
@@ -246,6 +264,16 @@ export function ExcalidrawBoard({
   /** Keeps latest `flushPersist` for idle/interval saves without widening `handleChange` deps. */
   const flushPersistRef = useRef<() => void>(() => {});
   const idleFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Coalesce `onSceneChange` to once per frame — Excalidraw can fire onChange every pointermove while dragging. */
+  const sceneChangeRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (sceneChangeRafRef.current != null) {
+        cancelAnimationFrame(sceneChangeRafRef.current);
+        sceneChangeRafRef.current = null;
+      }
+    };
+  }, []);
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
@@ -579,22 +607,42 @@ export function ExcalidrawBoard({
   useEffect(() => {
     onWhiteboardTextureChange?.(storedTexture ?? null);
   }, [storedTexture, onWhiteboardTextureChange]);
-  const hiddenLayerIds = projData?.hiddenLayerIds ?? [];
-  const layerAssignmentsForFilter = projData?.layerAssignments ?? {};
-  const visibleElements =
-    projData?.elements?.filter(
-      (el) => !hiddenLayerIds.includes((layerAssignmentsForFilter as Record<string, string>)[(el as { id?: string }).id ?? ""] ?? "base")
-    ) ?? projData?.elements ?? [];
-  const initialFiles = mergeFileMaps(projData?.dreamwork?.files, currentProject?.data?.files);
-  const initialData = currentProject?.data
-    ? {
-        elements: hiddenLayerIds.length > 0 ? visibleElements : (projData?.elements ?? []),
-        appState: sanitizeAppStateForInitialLoad(currentProject.data.appState as Record<string, unknown> | undefined, {
-          storedTexture,
-        }),
-        ...(Object.keys(initialFiles).length > 0 ? { files: initialFiles } : {}),
-      }
-    : undefined;
+
+  /** Stable reference unless project data / activeId changes — avoids new object every App re-render confusing Excalidraw. */
+  const initialData = useMemo(() => {
+    const cp = projects.find((p) => p.id === activeId);
+    if (!cp?.data) return undefined;
+    const pd = cp.data as {
+      elements?: unknown[];
+      appState?: Record<string, unknown>;
+      files?: Record<string, unknown>;
+      dreamwork?: DreamworkFilePayload;
+      layerAssignments?: Record<string, string>;
+      hiddenLayerIds?: string[];
+    };
+    const hiddenLayerIds = pd?.hiddenLayerIds ?? [];
+    const layerAssignmentsForFilter = pd?.layerAssignments ?? {};
+    const visibleElements =
+      pd?.elements?.filter(
+        (el) =>
+          !hiddenLayerIds.includes(
+            (layerAssignmentsForFilter as Record<string, string>)[(el as { id?: string }).id ?? ""] ?? "base"
+          )
+      ) ?? pd?.elements ?? [];
+    const st =
+      (typeof pd?.dreamwork?.whiteboardTexture === "string" && pd.dreamwork.whiteboardTexture
+        ? pd.dreamwork.whiteboardTexture
+        : undefined) ??
+      ((cp.data.appState as Record<string, unknown> | undefined)?.whiteboardTexture as string | undefined);
+    const initialFiles = mergeFileMaps(pd?.dreamwork?.files, cp.data.files);
+    return {
+      elements: hiddenLayerIds.length > 0 ? visibleElements : (pd?.elements ?? []),
+      appState: sanitizeAppStateForInitialLoad(cp.data.appState as Record<string, unknown> | undefined, {
+        storedTexture: st,
+      }),
+      ...(Object.keys(initialFiles).length > 0 ? { files: initialFiles } : {}),
+    };
+  }, [projects, activeId]);
 
   useEffect(() => {
     const api = (window as unknown as { electronAPI?: { setWindowTitle?: (t: string) => Promise<void> } }).electronAPI;
@@ -716,7 +764,7 @@ export function ExcalidrawBoard({
       }
       /** Merge into latest settings from localStorage (sync). Avoid Electron loadSettingsAsync() here — async disk read could race and drop a concurrent save. */
       const flushDisk = () => {
-        const next = saveWhiteboardProjects(loadSettings(), nextProjects, activeIdSnap);
+        const next = saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeIdSnap);
         saveSettings(next);
       };
       if (!skipStateUpdate) {
@@ -737,26 +785,36 @@ export function ExcalidrawBoard({
     (elements: readonly unknown[], appState: Record<string, unknown>, filesFromScene?: unknown) => {
       const { collaborators: _, ...rest } = appState;
       const prev = latestSceneRef.current;
+      const elArr = elements as unknown[];
+      const sceneVer = getSceneVersion(elements as never);
+      const prevSceneVer = getSceneVersion(prev.elements as never);
       const activeToolEarly = (rest as { activeTool?: { type?: string } }).activeTool?.type;
       const restUi = rest as { cursorButton?: string; selectedElementsAreBeingDragged?: boolean };
+      const restFlags = rest as Record<string, unknown>;
+      /** Only real WYSIWYG sessions — `editingTextElement != null` is wrong when the value is `false` (then `false != null` is true and everything felt sluggish). */
+      const editingInline = isInlineTextOrLineLabelEdit(restFlags);
       /** Pointer down / drag: Excalidraw bumps scene version every frame — skip sync getFiles (large maps) until release. */
       const interactionBusy =
         restUi.cursorButton === "down" || restUi.selectedElementsAreBeingDragged === true;
       /** Selection / viewport-only updates don’t change scene version — skip sync getFiles() (very costly with many images). */
-      const sceneDataUnchanged =
-        getSceneVersion(elements as never) === getSceneVersion(prev.elements as never);
+      const sceneDataUnchanged = sceneVer === prevSceneVer;
       const needsLiveFileMap =
         filesFromScene === undefined &&
         activeToolEarly !== "hand" &&
         !sceneDataUnchanged &&
-        !interactionBusy;
+        !interactionBusy &&
+        !editingInline;
       // Excalidraw calls onChange(elements, state, files). Avoid getFiles() on every hand-pan tick when the third arg is present.
       // Hand pan: images map does not change — getFiles() is costly; keep prev.files until a real edit supplies filesFromScene.
-      const files = mergeFileMaps(
-        prev.files,
-        filesFromScene,
-        needsLiveFileMap ? excalidrawRef.current?.getFiles() : undefined
-      );
+      // Skip mergeFileMaps allocation when the map cannot change (common during drag / pan).
+      const files =
+        !needsLiveFileMap && filesFromScene == null
+          ? prev.files ?? {}
+          : mergeFileMaps(
+              prev.files,
+              filesFromScene,
+              needsLiveFileMap ? excalidrawRef.current?.getFiles() : undefined
+            );
       // Paper texture: keep view background transparent. Excalidraw often flips it during scroll/pan — fix on a throttle only.
       const bgMismatch = !!storedTexture && rest.viewBackgroundColor !== "transparent";
       const restPatched =
@@ -764,7 +822,7 @@ export function ExcalidrawBoard({
           ? { ...rest, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture }
           : rest;
       // updateScene during hand-pan / drag fights Excalidraw's loop; patch local ref only, fix after tool change / idle.
-      if (bgMismatch && activeToolEarly !== "hand" && !interactionBusy) {
+      if (bgMismatch && activeToolEarly !== "hand" && !interactionBusy && !editingInline) {
         const now = performance.now();
         if (now - textureBgFixLastRef.current >= 280) {
           textureBgFixLastRef.current = now;
@@ -777,44 +835,68 @@ export function ExcalidrawBoard({
           });
         }
       }
-      const elArr = elements as unknown[];
-      const nextElements = prev.elements === elArr ? prev.elements : [...elements];
+      /** Keep Excalidraw’s array reference — avoid O(n) shallow copy every pointermove while dragging. */
       latestSceneRef.current = {
-        elements: nextElements,
+        elements: elArr,
         appState: restPatched,
         files: Object.keys(files).length > 0 ? files : prev.files,
       };
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-      const appStateForPersist = bgMismatch ? { ...appState, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture } : appState;
-      const elSameRef = prev.elements === elArr;
-      const structuralChange =
-        lastSavedSceneVerRef.current === null ||
-        (!elSameRef && getSceneVersion(elements as never) !== lastSavedSceneVerRef.current);
-      pendingViewOnlyPersistRef.current = !structuralChange;
-      const debounceMs = structuralChange ? 520 : 2500;
-      saveTimeoutRef.current = setTimeout(() => {
-        const viewOnly = pendingViewOnlyPersistRef.current;
-        const runPersist = () => persist(elements, appStateForPersist, viewOnly ? { skipReact: true } : undefined);
-        if (viewOnly && typeof requestIdleCallback !== "undefined") {
-          requestIdleCallback(() => requestAnimationFrame(runPersist), { timeout: 800 });
-        } else {
-          requestAnimationFrame(runPersist);
+      /**
+       * During pointer drag / resize, Excalidraw fires onChange every frame. Re-scheduling debounced save + idle
+       * flush every frame starves the main thread. While busy: only **cancel** pending timers (avoid persisting stale
+       * pre-drag elements); after release, schedule once from the latest handleChange.
+       */
+      if (interactionBusy) {
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
         }
-      }, debounceMs);
-
-      if (idleFlushTimerRef.current) clearTimeout(idleFlushTimerRef.current);
-      idleFlushTimerRef.current = setTimeout(() => {
-        idleFlushTimerRef.current = null;
-        const run = () => flushPersistRef.current();
-        if (typeof requestIdleCallback !== "undefined") {
-          requestIdleCallback(run, { timeout: 3000 });
-        } else {
-          requestAnimationFrame(run);
+        if (idleFlushTimerRef.current) {
+          clearTimeout(idleFlushTimerRef.current);
+          idleFlushTimerRef.current = null;
         }
-      }, WHITEBOARD_IDLE_FLUSH_MS);
+      } else {
+        if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+        const appStateForPersist = bgMismatch
+          ? { ...appState, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture }
+          : appState;
+        const elSameRef = prev.elements === elArr;
+        const structuralChange =
+          lastSavedSceneVerRef.current === null ||
+          (!elSameRef && sceneVer !== lastSavedSceneVerRef.current);
+        pendingViewOnlyPersistRef.current = !structuralChange;
+        const debounceMs = structuralChange ? (editingInline ? 1600 : 520) : 2500;
+        saveTimeoutRef.current = setTimeout(() => {
+          const viewOnly = pendingViewOnlyPersistRef.current;
+          const skipReactPersist = viewOnly || editingInline;
+          const runPersist = () =>
+            persist(elements, appStateForPersist, skipReactPersist ? { skipReact: true } : undefined);
+          if (viewOnly && typeof requestIdleCallback !== "undefined") {
+            requestIdleCallback(() => requestAnimationFrame(runPersist), { timeout: 800 });
+          } else {
+            requestAnimationFrame(runPersist);
+          }
+        }, debounceMs);
 
-      if (!sceneDataUnchanged) {
-        onSceneChange?.();
+        if (idleFlushTimerRef.current) clearTimeout(idleFlushTimerRef.current);
+        idleFlushTimerRef.current = setTimeout(() => {
+          idleFlushTimerRef.current = null;
+          const run = () => flushPersistRef.current();
+          if (typeof requestIdleCallback !== "undefined") {
+            requestIdleCallback(run, { timeout: 3000 });
+          } else {
+            requestAnimationFrame(run);
+          }
+        }, WHITEBOARD_IDLE_FLUSH_MS);
+      }
+
+      if (!sceneDataUnchanged && onSceneChange) {
+        if (sceneChangeRafRef.current == null) {
+          sceneChangeRafRef.current = requestAnimationFrame(() => {
+            sceneChangeRafRef.current = null;
+            onSceneChange();
+          });
+        }
       }
     },
     [persist, storedTexture, onSceneChange]
@@ -829,6 +911,7 @@ export function ExcalidrawBoard({
       clearTimeout(idleFlushTimerRef.current);
       idleFlushTimerRef.current = null;
     }
+    flushTeleprompterDraftSync();
     const api = excalidrawRef.current;
     const elements = api?.getSceneElements() ?? latestSceneRef.current.elements;
     const appState = api?.getAppState() ?? latestSceneRef.current.appState;
@@ -945,7 +1028,7 @@ export function ExcalidrawBoard({
     setProjects((prev) => {
       const next = [...prev, proj];
       projectsRef.current = next;
-      saveSettings(saveWhiteboardProjects(loadSettings(), next, id));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, id));
       return next;
     });
     setActiveId(id);
@@ -960,7 +1043,7 @@ export function ExcalidrawBoard({
       const newActiveId = activeId === id ? (next[0]?.id ?? "default") : activeId;
       setProjects(next);
       setActiveId(newActiveId);
-      saveSettings(saveWhiteboardProjects(loadSettings(), next, newActiveId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, newActiveId));
     },
     [projects, activeId, flushPersist]
   );
@@ -1008,7 +1091,7 @@ export function ExcalidrawBoard({
     projectsRef.current = nextProjects;
     setProjects(nextProjects);
     lastSavedSceneVerRef.current = getSceneVersion(elements as never);
-    saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, aid));
+    saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, aid));
   }, []);
 
   const deleteLayer = useCallback(
@@ -1066,7 +1149,7 @@ export function ExcalidrawBoard({
         p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
       setProjects(nextProjects);
-      saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, activeId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
     },
     [currentProject, projects, activeId]
   );
@@ -1105,7 +1188,7 @@ export function ExcalidrawBoard({
         p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
       setProjects(nextProjects);
-      saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, activeId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
     },
     [currentProject, projects, activeId]
   );
@@ -1134,7 +1217,7 @@ export function ExcalidrawBoard({
         p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
       setProjects(nextProjects);
-      saveSettings(saveWhiteboardProjects(loadSettings(), nextProjects, activeId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
     },
     [currentProject, projects, activeId]
   );
@@ -1164,7 +1247,7 @@ export function ExcalidrawBoard({
       if (trimmed === proj.name) return;
       const next = projects.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
       setProjects(next);
-      saveSettings(saveWhiteboardProjects(loadSettings(), next, activeId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, activeId));
     },
     [projects, activeId]
   );
@@ -1239,7 +1322,7 @@ export function ExcalidrawBoard({
       setProjects(next);
       setActiveId(id);
       activeIdRef.current = id;
-      saveSettings(saveWhiteboardProjects(loadSettings(), next, id));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, id));
       setSaveAsDialog(false);
     },
     []
@@ -1327,7 +1410,7 @@ export function ExcalidrawBoard({
       setActiveId(newId);
       activeIdRef.current = newId;
       lastSavedSceneVerRef.current = getSceneVersion(scene.elements as never);
-      saveSettings(saveWhiteboardProjects(loadSettings(), next, newId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, newId));
     }
   }, [isElectron, electronAPI, flushPersist]);
 
@@ -1416,7 +1499,7 @@ export function ExcalidrawBoard({
         const next = projectsRef.current.map((p) => (p.id === aid ? { ...p, diskPath: res.path } : p));
         projectsRef.current = next;
         setProjects(next);
-        saveSettings(saveWhiteboardProjects(loadSettings(), next, aid));
+        saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), next, aid));
       }
     },
     [isElectron, electronAPI]
@@ -1437,6 +1520,7 @@ export function ExcalidrawBoard({
         !(t instanceof Node && root.contains(t));
       if (isExternalInput) return;
       e.preventDefault();
+      flushTeleprompterDraftSync();
       flushPersist();
       if (isElectron && electronAPI?.saveFile) void handleSaveToFile();
     };
