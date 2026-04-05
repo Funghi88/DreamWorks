@@ -348,6 +348,7 @@ function loadSettingsWithMigration(settingsPath) {
 
 app.whenReady().then(() => {
   app.setName(APP_NAME);
+
   // Register IPC handlers (must be before createMainWindow so they exist when renderer loads)
   const SETTINGS_PATH = path.join(app.getPath("userData"), "settings.json");
   ipcMain.handle("getHardwareModel", async () => {
@@ -563,6 +564,15 @@ ipcMain.handle(
     }
   }
 );
+
+// IPC: getDefaultSavePath — returns ~/Documents/DreamWork/, creating it if needed.
+ipcMain.handle("getDefaultSavePath", () => {
+  const dir = path.join(app.getPath("documents"), "DreamWork");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch { /* ignore */ }
+  return dir;
+});
 
 // IPC: saveImage (for Export image in Electron)
 ipcMain.handle("saveImage", async (_, base64, defaultName = "export.png") => {

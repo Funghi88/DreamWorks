@@ -161,6 +161,67 @@ async function exportTextPatchCanvas(
 }
 
 /**
+ * Synchronous per-frame text overlay: reads the live Excalidraw <textarea> and paints its
+ * content with ctx.fillText. Much cheaper than exportToCanvas — designed to run every frame.
+ */
+export function drawEditingTextOverlaySync(
+  ctx: CanvasRenderingContext2D,
+  container: HTMLElement,
+  cssW: number,
+  cssH: number,
+  pw: number,
+  ph: number,
+): void {
+  const ta = findVisibleExcalidrawTextarea(container);
+  if (!ta) return;
+  const text = ta.value;
+  if (!text) return;
+
+  const cs = getComputedStyle(ta);
+  const cssRect = textareaDestRectCss(container, ta);
+  const { dx, dy, dw, dh } = cssRectToCanvasPixels(cssRect, cssW, cssH, pw, ph);
+  if (dw < 2 || dh < 2) return;
+
+  const scaleX = pw / Math.max(1, cssW);
+  const scaleY = ph / Math.max(1, cssH);
+  const fontSizePx = parseFloat(cs.fontSize) || 16;
+  const scaledFontSize = fontSizePx * scaleY;
+  const lineHeight = parseFloat(cs.lineHeight) || fontSizePx * 1.35;
+  const scaledLineHeight = lineHeight * scaleY;
+  const color = cs.color || "#000";
+  const fontFamily = cs.fontFamily || "sans-serif";
+  const fontWeight = cs.fontWeight || "normal";
+  const fontStyle = cs.fontStyle || "normal";
+  const textAlign = (cs.textAlign || "left") as CanvasTextAlign;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(dx, dy, dw, dh);
+  ctx.clip();
+
+  ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${fontFamily}`;
+  ctx.fillStyle = color;
+  ctx.textBaseline = "top";
+  ctx.textAlign = textAlign;
+
+  const padLeft = parseFloat(cs.paddingLeft) || 0;
+  const padTop = parseFloat(cs.paddingTop) || 0;
+  const textX = textAlign === "center" ? dx + dw / 2
+    : textAlign === "right" ? dx + dw - padLeft * scaleX
+    : dx + padLeft * scaleX;
+  let textY = dy + padTop * scaleY;
+
+  const lines = text.split("\n");
+  for (const line of lines) {
+    if (textY > dy + dh) break;
+    ctx.fillText(line, textX, textY, dw);
+    textY += scaledLineHeight;
+  }
+
+  ctx.restore();
+}
+
+/**
  * After viewport canvas stack (or full export), paint in-progress text via exportToCanvas,
  * positioned with the live textarea rect when possible. Covers standalone and container-bound text.
  */

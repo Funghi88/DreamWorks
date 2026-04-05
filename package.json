@@ -17,7 +17,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron": "electron .",
-    "pack": "npm run create-icns && rm -rf dist && npm run build && electron-builder --dir",
+    "pack": "npm run create-icns && rm -rf dist release && npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "signaling": "npx tsx server/signaling-server.ts",
     "create-app-icon": "node scripts/create-app-icon.js",
@@ -91,6 +91,11 @@
           "**/*"
         ]
       }
+    ],
+    "files": [
+      "**/*",
+      "!**/.cursor/**",
+      "!**/.vscode/**"
     ]
   }
 }

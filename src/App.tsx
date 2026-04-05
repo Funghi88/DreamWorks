@@ -20,7 +20,7 @@ import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
 import { exportToCanvas, getSceneVersion } from "@excalidraw/excalidraw";
 import type { AvatarDecor, AvatarShape } from "@/components/SettingsPanel";
 import { beautySettingsToFilter, presets } from "@/lib/beautyEffects";
-import { drawStandaloneEditingTextOverlay } from "@/lib/excalidrawViewportTextOverlay";
+import { drawEditingTextOverlaySync, drawStandaloneEditingTextOverlay } from "@/lib/excalidrawViewportTextOverlay";
 import {
   loadSettings,
   loadSettingsAsync,
@@ -207,7 +207,8 @@ function roundRectPath(
 function compositeExcalidrawViewportCanvases(
   container: HTMLElement,
   cssWidth: number,
-  cssHeight: number
+  cssHeight: number,
+  reuseCanvas?: HTMLCanvasElement | null
 ): HTMLCanvasElement | null {
   const root =
     (container.querySelector(".excalidraw") as HTMLElement | null) ??
@@ -235,11 +236,12 @@ function compositeExcalidrawViewportCanvases(
   const dpr = Math.min(2, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
   const pw = Math.max(1, Math.round(cssWidth * dpr));
   const ph = Math.max(1, Math.round(cssHeight * dpr));
-  const out = document.createElement("canvas");
-  out.width = pw;
-  out.height = ph;
+  const out = reuseCanvas ?? document.createElement("canvas");
+  if (out.width !== pw) out.width = pw;
+  if (out.height !== ph) out.height = ph;
   const ctx = out.getContext("2d");
   if (!ctx) return null;
+  if (reuseCanvas) ctx.clearRect(0, 0, pw, ph);
 
   let drewAny = false;
   for (const c of sorted) {
@@ -460,6 +462,8 @@ export default function App() {
   const contentAreaPrevRectRef = useRef<{ w: number; h: number } | null>(null);
   const whiteboardCanvasLayersRef = useRef<HTMLCanvasElement[]>([]);
   const whiteboardExportedRef = useRef<HTMLCanvasElement | null>(null);
+  const wbViewportReuseCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wbLiveCompositeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const excalidrawAPIRef = useRef<{
     getSceneElements: () => readonly unknown[];
     getAppState: () => Record<string, unknown>;
@@ -472,9 +476,7 @@ export default function App() {
   /** Latest capture-column rect (always updated in layout observer); avoids stale state + reduces setState when unchanged. */
   const portalRectLiveRef = useRef<DOMRect | null>(null);
   const lastPortalRectKeyRef = useRef<string | null>(null);
-  /** Capture Screen + recording: hide body portal while PiP is painted on preview canvas — avoids double bubble (composite + portal). */
-  const [pipHiddenForScreenRecordDup, setPipHiddenForScreenRecordDup] = useState(false);
-  const pipHiddenForScreenRecordDupSentRef = useRef(false);
+  /** Capture Screen + recording: PiP visibility toggled via pipRef.style (no setState — avoids React re-renders every frame). */
   /** Schmitt: once PiP is composited into the record canvas, keep until clearly outside (reduces portal opacity blink at the edge). */
   const screenRecPipCompositeStickyRef = useRef(false);
   /** Capture Screen: hysteresis for “outside vs inside” so beauty overlay canvas doesn’t mount/unmount at the column edge (blink). */
@@ -867,6 +869,8 @@ export default function App() {
   const [teleprompterPosition, setTeleprompterPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterPanelPosition, setTeleprompterPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterLocked, setTeleprompterLocked] = useState(false);
+  const [teleprompterFollowMode, setTeleprompterFollowMode] = useState(false);
+  const [teleprompterSlimMode, setTeleprompterSlimMode] = useState(false);
   const [teleprompterResetSeq, setTeleprompterResetSeq] = useState(0);
   const [teleprompterEditorScrollRatio, setTeleprompterEditorScrollRatio] = useState<number | null>(null);
   const [teleprompterAnchorRect, setTeleprompterAnchorRect] = useState<{
@@ -1026,7 +1030,7 @@ export default function App() {
     const newScripts: TeleprompterScript[] = items.map((item, i) => ({
       id: `script-${t}-${i}`,
       name: item.name,
-      content: item.content,
+      content: item.content.replace(/\n{3,}/g, "\n\n").replace(/\n\n/g, "\n"),
       updatedAt: t,
     }));
     startTransition(() => {
@@ -1061,6 +1065,8 @@ export default function App() {
   });
   const helperOpenRef = useRef<(kind: "teleprompter" | "monitor") => void>(() => undefined);
   const recordLoopLastAtRef = useRef(0);
+  /** Throttle camera mirror cache while recording screen share (PiP is small; saves a full drawImage per frame). */
+  const screenRecCamCacheTickRef = useRef(0);
   const letterboxCustomImgRef = useRef<HTMLImageElement | null>(null);
   const handleWhiteboardLayersChange = useCallback((layers: HTMLCanvasElement[]) => {
     whiteboardCanvasLayersRef.current = layers;
@@ -1135,6 +1141,7 @@ export default function App() {
   const recordWhiteboardPreviewSizeRef = useRef<{ w: number; h: number } | null>(null);
   /** captureStream 的视频轨；每帧合成后 requestFrame，否则离屏/低可见 canvas 在部分环境下不把人像送进编码器 */
   const canvasCaptureTrackRef = useRef<MediaStreamTrack | null>(null);
+  const stopDrawLoopRef = useRef<(() => void) | null>(null);
 
   const hasScreen = !!activeScreenStream || !!persistentScreenVideoRef.current?.srcObject;
   hasScreenLayoutRef.current = hasScreen || captureMainNoStream;
@@ -1420,6 +1427,15 @@ export default function App() {
     setTeleprompterLocked((prev) => !prev);
   };
 
+  // Auto-enable follow mode on recording — disabled until speech model supports CJK
+  // const prevRecordingRef = useRef(false);
+  // useEffect(() => {
+  //   if (isRecording && !prevRecordingRef.current && showTeleprompter && teleprompterScript.trim()) {
+  //     setTeleprompterFollowMode(true);
+  //   }
+  //   prevRecordingRef.current = isRecording;
+  // }, [isRecording, showTeleprompter, teleprompterScript]);
+
   const cameraOverlayRef = useRef<HTMLCanvasElement>(null);
   /** Set after `drawCameraOverlay` is defined — drawComposite calls this so overlay is painted before sampling (avoids RAW fallback + border desync while dragging). */
   const drawCameraOverlayRef = useRef<(() => void) | null>(null);
@@ -1548,7 +1564,9 @@ export default function App() {
       const ctx = composite.getContext("2d", { alpha: false });
       if (!ctx) return;
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = useRecordRes ? "high" : "medium";
+      // Screen-share frames are already sharp at source; "high" scales cost GPU time and can add jank with 4K capture + PiP.
+      ctx.imageSmoothingQuality =
+        useRecordRes && activeScreenStream ? "medium" : useRecordRes ? "high" : "medium";
       ctx.clearRect(0, 0, w, h);
       const screenPersistent = persistentScreenVideoRef.current;
       const screenVisible = screenVideoRef.current;
@@ -1655,6 +1673,18 @@ export default function App() {
         const whiteboardOnlyRecord = forceRecordRes && !activeScreenStream;
         const handleZonePx = 14;
         const miniW = Math.round(w * (40 / contentW));
+        const wbEl = fullPageContentRef.current;
+        const wbCssW = Math.max(1, wbEl?.offsetWidth ?? prevW);
+        const wbCssH = Math.max(1, wbEl?.offsetHeight ?? prevH);
+        let liveComposite: HTMLCanvasElement | null = null;
+        if (forRecording && wbEl) {
+          if (!wbLiveCompositeCanvasRef.current) wbLiveCompositeCanvasRef.current = document.createElement("canvas");
+          liveComposite = compositeExcalidrawViewportCanvases(wbEl, wbCssW, wbCssH, wbLiveCompositeCanvasRef.current);
+          if (liveComposite) {
+            const lctx = liveComposite.getContext("2d");
+            if (lctx) drawEditingTextOverlaySync(lctx, wbEl, wbCssW, wbCssH, liveComposite.width, liveComposite.height);
+          }
+        }
         const whiteboardExported = whiteboardExportedRef.current;
         const whiteboardLayers = whiteboardCanvasLayersRef.current.filter((layer) => layer.width > 0 && layer.height > 0);
         const mainLayer = whiteboardLayers.length > 0
@@ -1662,10 +1692,14 @@ export default function App() {
           : null;
         const exportedOk =
           !!whiteboardExported && whiteboardExported.width > 0 && whiteboardExported.height > 0;
+        const liveOk = !!liveComposite && liveComposite.width > 0 && liveComposite.height > 0;
         /** Intrinsic board size for record layout (same fill as screen capture). */
         let iw = Math.max(1, wbSnap?.w ?? prevW);
         let ih = Math.max(1, wbSnap?.h ?? prevH);
-        if (exportedOk && whiteboardExported) {
+        if (liveOk && liveComposite) {
+          iw = liveComposite.width;
+          ih = liveComposite.height;
+        } else if (exportedOk && whiteboardExported) {
           iw = whiteboardExported.width;
           ih = whiteboardExported.height;
         } else if (mainLayer) {
@@ -1724,7 +1758,9 @@ export default function App() {
             return false;
           }
         };
-        if (exportedOk && whiteboardExported) {
+        if (liveOk && liveComposite) {
+          if (!drawWbSrc(liveComposite) && exportedOk && whiteboardExported) drawWbSrc(whiteboardExported);
+        } else if (exportedOk && whiteboardExported) {
           if (!drawWbSrc(whiteboardExported) && mainLayer) drawWbSrc(mainLayer);
         } else if (mainLayer) {
           drawWbSrc(mainLayer);
@@ -1795,23 +1831,34 @@ export default function App() {
         camToSample.videoWidth > 0 &&
         camToSample.videoHeight > 0
       ) {
-        let cache = lastCameraFrameCanvasRef.current;
-        if (!cache) {
-          cache = document.createElement("canvas");
-          lastCameraFrameCanvasRef.current = cache;
-        }
-        if (cache.width !== camToSample.videoWidth || cache.height !== camToSample.videoHeight) {
-          cache.width = camToSample.videoWidth;
-          cache.height = camToSample.videoHeight;
-        }
-        const cacheCtx = cache.getContext("2d");
-        if (cacheCtx) {
-          cacheCtx.save();
-          cacheCtx.translate(cache.width, 0);
-          cacheCtx.scale(-1, 1);
-          cacheCtx.translate(-cache.width, 0);
-          cacheCtx.drawImage(camToSample, 0, 0, cache.width, cache.height);
-          cacheCtx.restore();
+        const existingCache = lastCameraFrameCanvasRef.current;
+        const throttleCamCache =
+          !!forceRecordRes &&
+          !!activeScreenStream &&
+          !!existingCache &&
+          existingCache.width === camToSample.videoWidth &&
+          existingCache.height === camToSample.videoHeight;
+        screenRecCamCacheTickRef.current += 1;
+        const skipCamCacheFill = throttleCamCache && screenRecCamCacheTickRef.current % 2 === 0;
+        if (!skipCamCacheFill) {
+          let cache = existingCache;
+          if (!cache) {
+            cache = document.createElement("canvas");
+            lastCameraFrameCanvasRef.current = cache;
+          }
+          if (cache.width !== camToSample.videoWidth || cache.height !== camToSample.videoHeight) {
+            cache.width = camToSample.videoWidth;
+            cache.height = camToSample.videoHeight;
+          }
+          const cacheCtx = cache.getContext("2d");
+          if (cacheCtx) {
+            cacheCtx.save();
+            cacheCtx.translate(cache.width, 0);
+            cacheCtx.scale(-1, 1);
+            cacheCtx.translate(-cache.width, 0);
+            cacheCtx.drawImage(camToSample, 0, 0, cache.width, cache.height);
+            cacheCtx.restore();
+          }
         }
       }
       const cachedCameraCanvas = lastCameraFrameCanvasRef.current;
@@ -1992,9 +2039,10 @@ export default function App() {
             x = Math.min(Math.max(x, 0), Math.max(0, w - pw));
             y = Math.min(Math.max(y, 0), Math.max(0, h - ph));
           }
-          if (pipHiddenForScreenRecordDupSentRef.current !== drawCameraToCanvas) {
-            pipHiddenForScreenRecordDupSentRef.current = drawCameraToCanvas;
-            setPipHiddenForScreenRecordDup(drawCameraToCanvas);
+          const pipEl = pipRef.current;
+          if (pipEl) {
+            const op = drawCameraToCanvas ? "0" : "1";
+            if (pipEl.style.opacity !== op) pipEl.style.opacity = op;
           }
         }
         if (shouldDraw && drawCameraToCanvas) {
@@ -2157,10 +2205,8 @@ export default function App() {
   useEffect(() => {
     if (!isRecording) {
       screenRecPipCompositeStickyRef.current = false;
-      if (pipHiddenForScreenRecordDupSentRef.current) {
-        pipHiddenForScreenRecordDupSentRef.current = false;
-        setPipHiddenForScreenRecordDup(false);
-      }
+      screenRecCamCacheTickRef.current = 0;
+      pipRef.current?.style.removeProperty("opacity");
     }
   }, [isRecording]);
 
@@ -3012,13 +3058,14 @@ export default function App() {
     const frameMs = 1000 / targetFps;
     const ctxPrime = recCanvas.getContext("2d");
     if (ctxPrime) ctxPrime.getImageData(0, 0, 1, 1);
-    const canvasStream = recCanvas.captureStream(targetFps);
+    const canvasStream = recCanvas.captureStream(0);
     canvasCaptureTrackRef.current = canvasStream.getVideoTracks()[0] ?? null;
     drawCompositeRef.current?.(true);
     requestCanvasCaptureFrame(canvasCaptureTrackRef.current);
 
     const doDrawAndDisplay = () => {
-      recordLoopLastAtRef.current = performance.now();
+      const tFrameStart = performance.now();
+      recordLoopLastAtRef.current = tFrameStart;
       try {
         drawCompositeRef.current?.(true);
       } catch {
@@ -3073,18 +3120,34 @@ export default function App() {
           drawCompositeRef.current?.(false);
         }
       }
+      if (
+        typeof localStorage !== "undefined" &&
+        localStorage.getItem("dreamwork_record_profile") === "1"
+      ) {
+        const dt = performance.now() - tFrameStart;
+        if (dt > 34) {
+          console.warn("[DreamWork record] slow frame", Math.round(dt), "ms (composite + preview copy)");
+        }
+      }
     };
     recordingDrawAndDisplayRef.current = doDrawAndDisplay;
     let lastDrawAt = 0;
-    const loop = () => {
+
+    const drawTick = () => {
       const now = performance.now();
       const dragging = pipDraggingRef.current;
       if (dragging || now - lastDrawAt >= frameMs) {
+        const elapsed = now - lastDrawAt;
         lastDrawAt = now;
         doDrawAndDisplay();
+        if (!dragging && elapsed > frameMs * 1.6) {
+          const missed = Math.min(Math.floor(elapsed / frameMs) - 1, 4);
+          const track = canvasCaptureTrackRef.current;
+          for (let i = 0; i < missed; i++) requestCanvasCaptureFrame(track);
+        }
       }
-      drawLoopIdRef.current = requestAnimationFrame(loop) as unknown as number;
     };
+
     const sched = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
     if (whiteboardOnly && sched?.yield) {
       sched.yield().then(doDrawAndDisplay).catch(doDrawAndDisplay);
@@ -3092,20 +3155,83 @@ export default function App() {
       doDrawAndDisplay();
     }
     lastDrawAt = performance.now();
-    /* Electron: rAF is heavily throttled in background even with setBackgroundThrottling(false) on some macOS builds; use a timer-driven loop as well. */
-    if (isElectron) {
+    /* Foreground: rAF aligns with display refresh and reduces jank vs MessageChannel while Excalidraw + screen capture load the main thread.
+       Background: rAF can drop to ~1fps in Electron — keep MessageChannel there so long recordings stay time-accurate. */
+    let mcStop: (() => void) | null = null;
+    const startMcLoop = () => {
       recordingUsedRafRef.current = false;
-      drawLoopIdRef.current = window.setInterval(() => {
+      const ch = new MessageChannel();
+      let mcStopped = false;
+      ch.port2.onmessage = () => {
+        if (mcStopped) return;
+        drawTick();
+        mcScheduleNext();
+      };
+      const mcScheduleNext = () => {
+        if (mcStopped) return;
         const now = performance.now();
-        const dragging = pipDraggingRef.current;
-        if (dragging || now - lastDrawAt >= frameMs) {
-          lastDrawAt = now;
-          doDrawAndDisplay();
+        const wait = Math.max(0, frameMs - (now - lastDrawAt) - 1);
+        if (wait < 4) {
+          ch.port1.postMessage(null);
+        } else {
+          setTimeout(() => ch.port1.postMessage(null), wait);
         }
-      }, 16) as unknown as number;
+      };
+      mcScheduleNext();
+      mcStop = () => {
+        mcStopped = true;
+        ch.port1.close();
+        ch.port2.close();
+        mcStop = null;
+      };
+    };
+    const startRafLoop = () => {
+      recordingUsedRafRef.current = true;
+      const rafLoop = () => {
+        if (!isRecordingRef.current) return;
+        drawTick();
+        drawLoopIdRef.current = requestAnimationFrame(rafLoop) as unknown as number;
+      };
+      drawLoopIdRef.current = requestAnimationFrame(rafLoop) as unknown as number;
+    };
+    const pickRecordingTicker = () => {
+      if (drawLoopIdRef.current != null) {
+        cancelAnimationFrame(drawLoopIdRef.current);
+        drawLoopIdRef.current = null;
+      }
+      mcStop?.();
+      mcStop = null;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        startMcLoop();
+      } else {
+        startRafLoop();
+      }
+    };
+
+    if (isElectron) {
+      pickRecordingTicker();
+      const onVis = () => {
+        if (isRecordingRef.current) pickRecordingTicker();
+      };
+      document.addEventListener("visibilitychange", onVis);
+      stopDrawLoopRef.current = () => {
+        document.removeEventListener("visibilitychange", onVis);
+        if (drawLoopIdRef.current != null) {
+          cancelAnimationFrame(drawLoopIdRef.current);
+          drawLoopIdRef.current = null;
+        }
+        mcStop?.();
+        mcStop = null;
+        stopDrawLoopRef.current = null;
+      };
     } else {
       recordingUsedRafRef.current = true;
-      drawLoopIdRef.current = requestAnimationFrame(loop) as unknown as number;
+      const rafLoop = () => {
+        drawTick();
+        drawLoopIdRef.current = requestAnimationFrame(rafLoop) as unknown as number;
+      };
+      drawLoopIdRef.current = requestAnimationFrame(rafLoop) as unknown as number;
+      stopDrawLoopRef.current = null;
     }
 
     const audioCtx = new (window.AudioContext ||
@@ -3166,6 +3292,7 @@ export default function App() {
       recordWhiteboardPreviewSizeRef.current = null;
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
+      stopDrawLoopRef.current?.(); stopDrawLoopRef.current = null;
       if (drawLoopIdRef.current != null) {
         if (recordingUsedRafRef.current) {
           cancelAnimationFrame(drawLoopIdRef.current);
@@ -3197,6 +3324,7 @@ export default function App() {
       recordWhiteboardPreviewSizeRef.current = null;
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
+      stopDrawLoopRef.current?.(); stopDrawLoopRef.current = null;
       if (drawLoopIdRef.current != null) {
         if (recordingUsedRafRef.current) {
           cancelAnimationFrame(drawLoopIdRef.current);
@@ -3235,6 +3363,7 @@ export default function App() {
       recordWhiteboardPreviewSizeRef.current = null;
       canvasCaptureTrackRef.current = null;
       recordingDrawAndDisplayRef.current = null;
+      stopDrawLoopRef.current?.(); stopDrawLoopRef.current = null;
       if (drawLoopIdRef.current != null) {
         if (recordingUsedRafRef.current) {
           cancelAnimationFrame(drawLoopIdRef.current);
@@ -3353,30 +3482,49 @@ export default function App() {
 
   const pauseRecording = () => {
     const mr = mediaRecorderRef.current;
-    if (mr?.state === "recording") {
+    if (mr?.state !== "recording") return;
+    try {
       mr.pause();
-      if (timerIdRef.current) {
-        clearInterval(timerIdRef.current);
-        timerIdRef.current = null;
-      }
-      setRecordingTime(recordingTimeElapsedRef.current);
-      setIsRecordingPaused(true);
+    } catch {
+      return;
     }
+    // Some MIME/codec paths (e.g. certain MP4 recorders) may leave state as "recording" — do not flip UI to Resume
+    // or clear the timer, or Resume becomes a no-op while the clock looks frozen.
+    const stateAfterPause = mediaRecorderRef.current?.state;
+    if (stateAfterPause !== "paused") return;
+    if (timerIdRef.current) {
+      clearInterval(timerIdRef.current);
+      timerIdRef.current = null;
+    }
+    setRecordingTime(recordingTimeElapsedRef.current);
+    setIsRecordingPaused(true);
   };
 
   const resumeRecording = () => {
+    if (!isRecordingPaused) return;
     const mr = mediaRecorderRef.current;
-    if (mr?.state === "paused") {
-      mr.resume();
-      const elapsed = recordingTime;
-      recordingStartRef.current = Date.now() - elapsed * 1000;
-      timerIdRef.current = window.setInterval(() => {
-        const e = Math.floor((Date.now() - recordingStartRef.current) / 1000);
-        recordingTimeElapsedRef.current = e;
-        setRecordingTime(e);
-      }, 1000);
-      setIsRecordingPaused(false);
+    if (!mr || mr.state === "inactive") return;
+    if (mr.state === "paused") {
+      try {
+        mr.resume();
+      } catch {
+        return;
+      }
     }
+    // After resume(), or if pause() never took effect but UI showed paused, we only restart the clock when encoding again.
+    if (mr.state !== "recording") return;
+    const elapsed = recordingTimeElapsedRef.current;
+    recordingStartRef.current = Date.now() - elapsed * 1000;
+    if (timerIdRef.current) {
+      clearInterval(timerIdRef.current);
+      timerIdRef.current = null;
+    }
+    timerIdRef.current = window.setInterval(() => {
+      const e = Math.floor((Date.now() - recordingStartRef.current) / 1000);
+      recordingTimeElapsedRef.current = e;
+      setRecordingTime(e);
+    }, 1000);
+    setIsRecordingPaused(false);
   };
 
   const toggleRecord = () => {
@@ -3576,6 +3724,7 @@ export default function App() {
         if (!composite) return;
         drawCompositeRef.current?.(true, captureResolutionOverride);
         drawCompositeRef.current?.(true, captureResolutionOverride);
+        await new Promise((r) => requestAnimationFrame(r));
         let blob: Blob;
         let downloadName: string;
         if (presetId === "preview") {
@@ -3585,6 +3734,21 @@ export default function App() {
         } else {
           blob = await captureFrame(composite, presetId as CapturePresetId);
           downloadName = getCaptureFilename(presetId as CapturePresetId);
+        }
+        if (isElectron) {
+          const api = (
+            window as unknown as { electronAPI?: { saveImage?: (b: string, n?: string) => Promise<boolean> } }
+          ).electronAPI;
+          if (api?.saveImage) {
+            const base64 = await new Promise<string>((resolve, reject) => {
+              const fr = new FileReader();
+              fr.onload = () => resolve((fr.result as string).split(",")[1] ?? "");
+              fr.onerror = () => reject(fr.error ?? new Error("Capture read failed"));
+              fr.readAsDataURL(blob);
+            });
+            await api.saveImage(base64, downloadName);
+            return;
+          }
         }
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -3597,7 +3761,7 @@ export default function App() {
         console.error("Capture failed:", err);
       }
     },
-    [captureResolutionOverride]
+    [captureResolutionOverride, isElectron]
   );
 
   const copyRecording = async (blob: Blob) => {
@@ -3826,56 +3990,66 @@ export default function App() {
   useEffect(() => {
     if (!isRecording || activeScreenStream) return;
     const res = recordOutputDimensions;
-    const exportIntervalMs = 100;
+    const exportIntervalMs = 500;
 
     let cancelled = false;
     let lastSceneVersion = -1;
-    /** Drop stale completions when `exportToCanvas` / overlay outlast the next tick. */
     let exportSeq = 0;
+    let exportBusy = false;
 
     const doExport = async () => {
+      if (exportBusy || cancelled) return;
+      exportBusy = true;
       const mySeq = ++exportSeq;
-      if (cancelled) return;
-      await new Promise((r) => requestAnimationFrame(r));
-      if (cancelled) return;
-      const api = excalidrawAPIRef.current;
-      const ver = api ? (getSceneVersion(api.getSceneElements() as never) as unknown as number) : -1;
-      const sceneChanged = ver !== lastSceneVersion;
+      try {
+        await new Promise((r) => requestAnimationFrame(r));
+        if (cancelled) return;
+        const api = excalidrawAPIRef.current;
+        const ver = api ? (getSceneVersion(api.getSceneElements() as never) as unknown as number) : -1;
+        const sceneChanged = ver !== lastSceneVersion;
 
-      const wbEl = fullPageContentRef.current;
-      const wbW = Math.max(1, wbEl?.offsetWidth ?? res.w);
-      const wbH = Math.max(1, wbEl?.offsetHeight ?? res.h);
+        const wbEl = fullPageContentRef.current;
+        const wbW = Math.max(1, wbEl?.offsetWidth ?? res.w);
+        const wbH = Math.max(1, wbEl?.offsetHeight ?? res.h);
 
-      let canvas: HTMLCanvasElement | null = wbEl ? compositeExcalidrawViewportCanvases(wbEl, wbW, wbH) : null;
+        if (!wbViewportReuseCanvasRef.current) wbViewportReuseCanvasRef.current = document.createElement("canvas");
+        let canvas: HTMLCanvasElement | null = wbEl ? compositeExcalidrawViewportCanvases(wbEl, wbW, wbH, wbViewportReuseCanvasRef.current) : null;
 
-      if (!canvas && api && sceneChanged) {
-        try {
-          const elements = api.getSceneElements();
-          const appState = api.getAppState();
-          const files = api.getFiles();
-          canvas = await exportToCanvas({
-            elements: elements as Parameters<typeof exportToCanvas>[0]["elements"],
-            appState: { ...(appState as object), exportWithDarkMode: false } as Parameters<typeof exportToCanvas>[0]["appState"],
-            files: files as Parameters<typeof exportToCanvas>[0]["files"],
-            maxWidthOrHeight: Math.max(wbW, wbH),
-            exportPadding: 0,
-          });
-        } catch {
-          /* ignore */
+        if (canvas) {
+          // Viewport composite succeeded — skip heavy exportToCanvas entirely.
+        } else if (api && sceneChanged) {
+          try {
+            const elements = api.getSceneElements();
+            const appState = api.getAppState();
+            const files = api.getFiles();
+            canvas = await exportToCanvas({
+              elements: elements as Parameters<typeof exportToCanvas>[0]["elements"],
+              appState: { ...(appState as object), exportWithDarkMode: false } as Parameters<typeof exportToCanvas>[0]["appState"],
+              files: files as Parameters<typeof exportToCanvas>[0]["files"],
+              maxWidthOrHeight: Math.max(wbW, wbH),
+              exportPadding: 0,
+            });
+          } catch {
+            /* ignore */
+          }
+        } else if (!sceneChanged && whiteboardExportedRef.current) {
+          return;
         }
-      }
 
-      if (!cancelled && canvas && api && wbEl) {
-        try {
-          await drawStandaloneEditingTextOverlay(canvas, wbEl, wbW, wbH, api);
-        } catch {
-          /* overlay is best-effort */
+        if (!cancelled && canvas && api && wbEl) {
+          try {
+            await drawStandaloneEditingTextOverlay(canvas, wbEl, wbW, wbH, api);
+          } catch {
+            /* overlay is best-effort */
+          }
         }
-      }
 
-      if (!cancelled && canvas && mySeq === exportSeq) {
-        whiteboardExportedRef.current = canvas;
-        lastSceneVersion = ver;
+        if (!cancelled && canvas && mySeq === exportSeq) {
+          whiteboardExportedRef.current = canvas;
+          lastSceneVersion = ver;
+        }
+      } finally {
+        exportBusy = false;
       }
     };
 
@@ -3887,6 +4061,7 @@ export default function App() {
       wbImmediateExportRef.current = null;
       clearInterval(id);
       whiteboardExportedRef.current = null;
+      wbViewportReuseCanvasRef.current = null;
     };
   }, [isRecording, activeScreenStream, recordOutputDimensions]);
 
@@ -4493,6 +4668,10 @@ export default function App() {
           locked={teleprompterLocked}
           resetSignal={teleprompterResetSeq}
           editorScrollRatio={teleprompterEditorScrollRatio}
+          followMode={teleprompterFollowMode}
+          onSetFollowMode={setTeleprompterFollowMode}
+          slimMode={teleprompterSlimMode}
+          onSetSlimMode={setTeleprompterSlimMode}
           onSetPlaying={setTeleprompterPlaying}
           onPositionChange={setTeleprompterPosition}
           onOverlaySizeChange={(w, h) => {
@@ -4551,6 +4730,8 @@ export default function App() {
             setTeleprompterPlaying(false);
           }}
           onFlushSave={flushTeleprompterSave}
+          followMode={teleprompterFollowMode}
+          onSetFollowMode={setTeleprompterFollowMode}
         />
       </TeleprompterErrorBoundary>
       {showLiveMeetingModal && (
@@ -4993,9 +5174,8 @@ export default function App() {
                   borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
                   backgroundColor: "#000",
                   boxShadow: activeScreenStream && !isRecording ? "0 4px 16px rgba(0,0,0,0.2)" : "none",
-                  /* Recording + Capture: hide portal while PiP is on the preview canvas (same frame) so we don’t stack two bubbles; opacity 0 keeps video decoding. Pointer events stay on for drag. */
-                  opacity:
-                    isRecording && activeScreenStream && pipHiddenForScreenRecordDup ? 0 : 1,
+                  /* Recording + Capture: opacity driven by drawComposite via pipRef (no React state). */
+                  ...(isRecording && activeScreenStream ? {} : { opacity: 1 }),
                   pointerEvents: "auto",
                   outline: "none",
                   transform: "translateZ(0)",

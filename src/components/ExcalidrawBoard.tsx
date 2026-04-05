@@ -35,7 +35,6 @@ const WHITEBOARD_INTERVAL_FLUSH_MS = 15 * 60 * 1000;
 
 const BASE_LAYER: WhiteboardLayer = { id: "base", name: "Base" };
 const isAnnotationLayer = (id: string) => id.startsWith("ann-") || id === "annotations";
-
 const WHITEBOARD_TEXTURES = [
   { id: "", name: "None" },
   // Paper textures
@@ -257,6 +256,12 @@ export function ExcalidrawBoard({
   const twoFingerRef = useRef<{ startTime: number; startX: number; startY: number } | null>(null);
   const [gestureBarVisible, setGestureBarVisible] = useState(false);
   const prevElementIdsRef = useRef<Set<string>>(new Set());
+  /** Tombstone: when a layer is deleted, stash its assignments + metadata so undo can restore them. */
+  const deletedLayerTombstoneRef = useRef<{
+    layerId: string;
+    layer: WhiteboardLayer;
+    assignments: Record<string, string>;
+  } | null>(null);
   const projectsRef = useRef(projects);
   const activeIdRef = useRef(activeId);
   const menuSigRef = useRef("");
@@ -685,10 +690,20 @@ export function ExcalidrawBoard({
       const existingTexture =
         projData?.appState?.whiteboardTexture ?? projData?.dreamwork?.whiteboardTexture;
       const existingActiveLayer = projData?.appState?.activeLayerId as string | undefined;
+      const liveActiveLayer = latestSceneRef.current.appState?.activeLayerId as string | undefined;
+      const restActiveLayer = rest.activeLayerId as string | undefined;
+      const mergedActiveLayer =
+        restActiveLayer !== undefined && restActiveLayer !== null
+          ? restActiveLayer
+          : liveActiveLayer !== undefined && liveActiveLayer !== null
+            ? liveActiveLayer
+            : existingActiveLayer;
       const appStateToSave = {
         ...rest,
         ...(existingTexture && rest.whiteboardTexture === undefined ? { whiteboardTexture: existingTexture } : {}),
-        ...(existingActiveLayer !== undefined && rest.activeLayerId === undefined ? { activeLayerId: existingActiveLayer } : {}),
+        ...(mergedActiveLayer !== undefined && mergedActiveLayer !== null && rest.activeLayerId === undefined
+          ? { activeLayerId: mergedActiveLayer }
+          : {}),
       };
       const textureIdPersist =
         (typeof appStateToSave.whiteboardTexture === "string" && appStateToSave.whiteboardTexture.length > 0
@@ -702,11 +717,22 @@ export function ExcalidrawBoard({
       let layers: WhiteboardLayer[] = projData?.layers ?? [BASE_LAYER];
       let layerAssignments: Record<string, string> = { ...(projData?.layerAssignments ?? {}) };
       const activeLayerId = (appStateFinal.activeLayerId as string) ?? "base";
+      const tombstone = deletedLayerTombstoneRef.current;
+      let tombstoneUsed = false;
       const elemArr = elements as { id: string }[];
       for (const el of elemArr) {
         if (layerAssignments[el.id] === undefined) {
-          layerAssignments[el.id] = prevElementIdsRef.current.has(el.id) ? "base" : activeLayerId;
+          if (tombstone && tombstone.assignments[el.id]) {
+            layerAssignments[el.id] = tombstone.assignments[el.id];
+            tombstoneUsed = true;
+          } else {
+            layerAssignments[el.id] = prevElementIdsRef.current.has(el.id) ? "base" : activeLayerId;
+          }
         }
+      }
+      if (tombstoneUsed && tombstone && !layers.some((l) => l.id === tombstone.layerId)) {
+        layers = [...layers, tombstone.layer];
+        deletedLayerTombstoneRef.current = null;
       }
       prevElementIdsRef.current = new Set(elemArr.map((e) => e.id));
       const hiddenIds = projData?.hiddenLayerIds ?? [];
@@ -767,8 +793,8 @@ export function ExcalidrawBoard({
         const next = saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeIdSnap);
         saveSettings(next);
       };
+      projectsRef.current = nextProjects;
       if (!skipStateUpdate) {
-        projectsRef.current = nextProjects;
         if (!skipReact) {
           startTransition(() => setProjects(nextProjects));
         }
@@ -785,6 +811,7 @@ export function ExcalidrawBoard({
     (elements: readonly unknown[], appState: Record<string, unknown>, filesFromScene?: unknown) => {
       const { collaborators: _, ...rest } = appState;
       const prev = latestSceneRef.current;
+      const prevActiveLayerId = prev.appState?.activeLayerId as string | undefined;
       const elArr = elements as unknown[];
       const sceneVer = getSceneVersion(elements as never);
       const prevSceneVer = getSceneVersion(prev.elements as never);
@@ -835,10 +862,16 @@ export function ExcalidrawBoard({
           });
         }
       }
+      const appStateMerged =
+        prevActiveLayerId !== undefined &&
+        prevActiveLayerId !== null &&
+        (restPatched as Record<string, unknown>).activeLayerId === undefined
+          ? { ...restPatched, activeLayerId: prevActiveLayerId }
+          : restPatched;
       /** Keep Excalidraw’s array reference — avoid O(n) shallow copy every pointermove while dragging. */
       latestSceneRef.current = {
         elements: elArr,
-        appState: restPatched,
+        appState: appStateMerged,
         files: Object.keys(files).length > 0 ? files : prev.files,
       };
       /**
@@ -857,9 +890,15 @@ export function ExcalidrawBoard({
         }
       } else {
         if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-        const appStateForPersist = bgMismatch
+        const appStateForPersistRaw = bgMismatch
           ? { ...appState, viewBackgroundColor: "transparent", whiteboardTexture: storedTexture }
           : appState;
+        const appStateForPersist =
+          prevActiveLayerId !== undefined &&
+          prevActiveLayerId !== null &&
+          (appStateForPersistRaw as Record<string, unknown>).activeLayerId === undefined
+            ? { ...appStateForPersistRaw, activeLayerId: prevActiveLayerId }
+            : appStateForPersistRaw;
         const elSameRef = prev.elements === elArr;
         const structuralChange =
           lastSavedSceneVerRef.current === null ||
@@ -914,8 +953,12 @@ export function ExcalidrawBoard({
     flushTeleprompterDraftSync();
     const api = excalidrawRef.current;
     const elements = api?.getSceneElements() ?? latestSceneRef.current.elements;
-    const appState = api?.getAppState() ?? latestSceneRef.current.appState;
-    persist(elements, appState as Record<string, unknown>, true); // skipStateUpdate; include empty canvas + cleared scene
+    let appState = (api?.getAppState() ?? latestSceneRef.current.appState) as Record<string, unknown>;
+    const liveLayer = latestSceneRef.current.appState?.activeLayerId;
+    if (liveLayer !== undefined && liveLayer !== null && appState.activeLayerId === undefined) {
+      appState = { ...appState, activeLayerId: liveLayer };
+    }
+    persist(elements, appState, true); // skipStateUpdate; include empty canvas + cleared scene
   }, [persist]);
 
   useEffect(() => {
@@ -943,6 +986,7 @@ export function ExcalidrawBoard({
       const proj = projectsRef.current.find((p) => p.id === id);
       if (!proj || id === activeIdRef.current) return;
       flushPersist();
+      setProjects(projectsRef.current);
       prevElementIdsRef.current = new Set();
       setActiveId(id);
     },
@@ -1100,7 +1144,11 @@ export function ExcalidrawBoard({
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
       }
-      const projData = currentProject?.data as
+      flushPersist();
+      const aid = activeIdRef.current;
+      const cp = projectsRef.current.find((p) => p.id === aid);
+      if (!cp) return;
+      const projData = cp.data as
         | { layers?: WhiteboardLayer[]; layerAssignments?: Record<string, string>; elements?: unknown[]; appState?: Record<string, unknown>; hiddenLayerIds?: string[] }
         | undefined;
       const layerAssignments = projData?.layerAssignments ?? {};
@@ -1112,10 +1160,18 @@ export function ExcalidrawBoard({
       );
       const allElements = [...hiddenElements.filter((el) => !visibleIds.has(el.id)), ...excalElements];
       const kept = allElements.filter((el) => layerAssignments[el.id] !== layerId) as unknown[];
+      const tombstoneAssignments: Record<string, string> = {};
       const newAssignments = { ...layerAssignments };
       for (const el of allElements) {
-        if (layerAssignments[el.id] === layerId) delete newAssignments[el.id];
+        if (layerAssignments[el.id] === layerId) {
+          tombstoneAssignments[el.id] = layerId;
+          delete newAssignments[el.id];
+        }
       }
+      const deletedLayerMeta = (projData?.layers ?? [BASE_LAYER]).find((l) => l.id === layerId);
+      deletedLayerTombstoneRef.current = deletedLayerMeta
+        ? { layerId, layer: deletedLayerMeta, assignments: tombstoneAssignments }
+        : null;
       const layers = (projData?.layers ?? [BASE_LAYER]).filter((l) => l.id !== layerId);
       if (layers.length === 0) layers.push(BASE_LAYER);
       const appState = excalidrawRef.current?.getAppState() ?? {};
@@ -1134,7 +1190,7 @@ export function ExcalidrawBoard({
       const newHiddenIds = (projData?.hiddenLayerIds ?? []).filter((id) => id !== layerId);
       const files = excalidrawRef.current?.getFiles();
       const data = {
-        ...currentProject?.data,
+        ...cp.data,
         elements: kept,
         appState: nextAppState,
         layers,
@@ -1145,13 +1201,14 @@ export function ExcalidrawBoard({
       if (newHiddenIds.length === 0 && (data as { hiddenLayerIds?: string[] }).hiddenLayerIds) {
         delete (data as { hiddenLayerIds?: string[] }).hiddenLayerIds;
       }
-      const nextProjects = projects.map((p) =>
-        p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
+      const nextProjects = projectsRef.current.map((p) =>
+        p.id === aid ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
+      projectsRef.current = nextProjects;
       setProjects(nextProjects);
-      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
+      saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, aid));
     },
-    [currentProject, projects, activeId]
+    [flushPersist]
   );
 
   const toggleLayerVisibility = useCallback(
@@ -1187,6 +1244,7 @@ export function ExcalidrawBoard({
       const nextProjects = projects.map((p) =>
         p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
+      projectsRef.current = nextProjects;
       setProjects(nextProjects);
       saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
     },
@@ -1216,6 +1274,7 @@ export function ExcalidrawBoard({
       const nextProjects = projects.map((p) =>
         p.id === activeId ? { ...p, data: data as WhiteboardProject["data"], updatedAt: Date.now() } : p
       );
+      projectsRef.current = nextProjects;
       setProjects(nextProjects);
       saveSettings(saveWhiteboardProjects(getSettingsMergeBase(), nextProjects, activeId));
     },
@@ -1483,12 +1542,18 @@ export function ExcalidrawBoard({
       const baseForName = hintRaw || project?.name || "drawing";
       const defaultFilename =
         /\.(excalidraw|json)$/i.test(baseForName) ? baseForName : `${baseForName}.excalidraw`;
-      const existingPath =
+      let existingPath: string | undefined =
         opts?.forceDialog === true
           ? undefined
           : typeof project?.diskPath === "string" && project.diskPath.length > 0
             ? project.diskPath
             : undefined;
+      if (!existingPath && !opts?.forceDialog && (electronAPI as { getDefaultSavePath?: () => Promise<string> }).getDefaultSavePath) {
+        try {
+          const dir = await (electronAPI as { getDefaultSavePath: () => Promise<string> }).getDefaultSavePath();
+          if (dir) existingPath = `${dir}/${defaultFilename}`;
+        } catch { /* fall through to dialog */ }
+      }
       const res = await electronAPI.saveFile(
         finalJson,
         defaultFilename,
