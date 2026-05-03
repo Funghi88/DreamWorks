@@ -47,6 +47,8 @@ interface CircularWebcamProps {
   avatarImgRef: React.RefObject<HTMLImageElement | null>;
   /** 拖动时关掉外层大发光，减轻合成拖影 */
   suppressHeavyShadow?: boolean;
+  /** After PiP static image loads, parent can repaint overlay canvas (same frame as img.complete). */
+  onAvatarImageLoad?: () => void;
 }
 
 export function CircularWebcam({
@@ -71,6 +73,7 @@ export function CircularWebcam({
   cameraVideoRef,
   avatarImgRef,
   suppressHeavyShadow = false,
+  onAvatarImageLoad,
 }: CircularWebcamProps) {
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -245,6 +248,7 @@ export function CircularWebcam({
             className="pointer-events-none absolute inset-0 w-full h-full object-cover"
             style={beautyMode ? { filter: beautyFilter } : undefined}
             draggable={false}
+            onLoad={() => onAvatarImageLoad?.()}
           />
         ) : useCanvasForDisplay ? (
           <>

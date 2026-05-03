@@ -7,10 +7,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { RecordResolution, LetterboxBackground, LetterboxMode } from "@/lib/storage";
+import type {
+  RecordResolution,
+  LetterboxBackground,
+  LetterboxMode,
+} from "@/lib/storage";
 import type { BeautySettings } from "@/lib/beautyEffects";
 import { presets, closestPresetName } from "@/lib/beautyEffects";
 import type { FaceFilterType } from "@/lib/faceFilters";
+import type { PipEffectBackend } from "@/config/featureFlags";
+
+const EFFECT_OPTION_LABEL: Record<string, string> = {
+  none: "None",
+  sunglasses: "Sunglasses",
+  firefly: "Fireflies",
+  heart: "Heart",
+  moustache: "Moustache",
+  brows: "Brows",
+  rolleyes: "Rolling eyes",
+  snap: "Snap Camera Kit",
+};
+
 export type AvatarShape = "circle" | "rect" | "portrait";
 export type AvatarDecor = "none" | "simple" | "glow" | "dashed";
 
@@ -47,6 +64,9 @@ interface SettingsPanelProps {
   onLetterboxModeChange?: (v: LetterboxMode) => void;
   faceFilter?: FaceFilterType;
   onFaceFilterChange?: (v: FaceFilterType) => void;
+  pipEffectBackend?: PipEffectBackend;
+  onPipEffectBackendChange?: (v: PipEffectBackend) => void;
+  snapCameraKitOptionAvailable?: boolean;
   omitPipFromRecording?: boolean;
   onOmitPipFromRecordingChange?: (v: boolean) => void;
   autoParkPipOnRecordStart?: boolean;
@@ -85,6 +105,9 @@ export function SettingsPanel({
   onLetterboxModeChange,
   faceFilter = "none",
   onFaceFilterChange,
+  pipEffectBackend = "mediapipe",
+  onPipEffectBackendChange,
+  snapCameraKitOptionAvailable = false,
   omitPipFromRecording = false,
   onOmitPipFromRecordingChange,
   autoParkPipOnRecordStart = false,
@@ -92,6 +115,8 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const labelWidth = "w-16";
   const sectionGap = "gap-5";
+  const effectSelectValue =
+    pipEffectBackend === "snap" && snapCameraKitOptionAvailable ? "snap" : faceFilter;
   return (
     <div className={`flex flex-col ${sectionGap} text-slate-900`}>
       <div className="flex flex-col gap-4">
@@ -164,22 +189,45 @@ export function SettingsPanel({
             </div>
           )}
         </div>
-        {onFaceFilterChange != null && (
+        {onFaceFilterChange != null && onPipEffectBackendChange != null && (
           <div className="flex items-center gap-3">
-            <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Effect</span>
+            <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>
+              Effect
+            </span>
             <Select
-              value={faceFilter}
-              onValueChange={(v) => onFaceFilterChange(v as FaceFilterType)}
+              value={effectSelectValue}
+              onValueChange={(v) => {
+                if (v === "snap") {
+                  onPipEffectBackendChange("snap");
+                  onFaceFilterChange("none");
+                } else {
+                  onPipEffectBackendChange("mediapipe");
+                  onFaceFilterChange(v as FaceFilterType);
+                }
+              }}
             >
               <SelectTrigger className="min-w-[7rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="sunglasses">Sunglasses</SelectItem>
-                  <SelectItem value="vampire">🐞</SelectItem>
-                  <SelectItem value="heart">🩷</SelectItem>
-                </SelectContent>
+                <SelectValue placeholder="None">
+                  {EFFECT_OPTION_LABEL[effectSelectValue] ?? "None"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent
+                position="popper"
+                side="top"
+                sideOffset={6}
+                className="z-[1000020] border-slate-200 bg-white"
+              >
+                <SelectItem value="none">None</SelectItem>
+                <SelectItem value="sunglasses">Sunglasses</SelectItem>
+                <SelectItem value="firefly">Fireflies</SelectItem>
+                  <SelectItem value="heart">Heart</SelectItem>
+                  <SelectItem value="moustache">Moustache</SelectItem>
+                  <SelectItem value="brows">Brows</SelectItem>
+                  <SelectItem value="rolleyes">Rolling eyes</SelectItem>
+                  {snapCameraKitOptionAvailable ? (
+                  <SelectItem value="snap">Snap Camera Kit</SelectItem>
+                ) : null}
+              </SelectContent>
             </Select>
           </div>
         )}
@@ -266,9 +314,6 @@ export function SettingsPanel({
               />
               <span className="w-11 shrink-0 text-sm tabular-nums text-slate-700">{shareWindowFillPercent}%</span>
             </div>
-            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
-              Target vs base mat: uniform scale (same aspect as output). Larger = more screen, less surround. Preview + recording.
-            </p>
           </div>
         )}
         {onOmitPipFromRecordingChange != null && (
@@ -284,9 +329,6 @@ export function SettingsPanel({
                 {omitPipFromRecording ? "Omit PiP" : "Include PiP"}
               </GlassButton>
             </div>
-            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
-              Omit: screen or whiteboard only in the export. Include: DreamWorks composites the circular camera into the recording.
-            </p>
           </div>
         )}
         {onAutoParkPipOnRecordStartChange != null && (
@@ -302,26 +344,29 @@ export function SettingsPanel({
                 {autoParkPipOnRecordStart ? "Auto-park on record" : "Manual PiP position"}
               </GlassButton>
             </div>
-            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
-              With screen share, parked PiP stays on the whiteboard strip (off the shared capture). While recording, use Park PiP next to Stop in the header.
-            </p>
           </div>
         )}
-        {letterboxBackground != null && onLetterboxBackgroundChange && (
-          <div className="flex items-center gap-3">
-            <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Bg</span>
-            <Select
-              value={letterboxBackground}
-              onValueChange={(v) => onLetterboxBackgroundChange(v as LetterboxBackground)}
-            >
-              <SelectTrigger className="min-w-[10rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
-                <SelectItem value="black">Black</SelectItem>
-                <SelectItem value="custom">Upload image</SelectItem>
-              </SelectContent>
-            </Select>
+        {onLetterboxBackgroundChange != null && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-3">
+              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Bg</span>
+              <Select
+                value={
+                  letterboxBackground === "black" || letterboxBackground === "custom"
+                    ? letterboxBackground
+                    : "black"
+                }
+                onValueChange={(v) => onLetterboxBackgroundChange(v as LetterboxBackground)}
+              >
+                <SelectTrigger className="min-w-[10rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
+                  <SelectValue placeholder="Background" />
+                </SelectTrigger>
+                <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
+                  <SelectItem value="black">Black</SelectItem>
+                  <SelectItem value="custom">Custom image</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         )}
         {onLetterboxModeChange != null && (
@@ -354,9 +399,6 @@ export function SettingsPanel({
                 </GlassButton>
               </div>
             </div>
-            <p className="pl-[calc(4rem+0.75rem)] text-[11px] leading-snug text-slate-500">
-              Controls background image scaling.
-            </p>
           </div>
         )}
         {onLetterboxCustomImageChange && onLetterboxBackgroundChange && (

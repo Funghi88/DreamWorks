@@ -12,6 +12,7 @@ dist
 dist-ssr
 release
 build
+vosk-models
 *.local
 
 # Signing keys (never commit)

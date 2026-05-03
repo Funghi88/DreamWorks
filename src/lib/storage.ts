@@ -99,7 +99,16 @@ export interface StoredSettings {
   avatarImageSrc?: string;
   beautyMode?: boolean;
   beautySettings?: StoredBeautySettings;
-  faceFilter?: "none" | "sunglasses" | "vampire" | "heart";
+  faceFilter?:
+    | "none"
+    | "sunglasses"
+    | "firefly"
+    | "heart"
+    | "moustache"
+    | "brows"
+    | "rolleyes";
+  /** PiP AR: built-in MediaPipe overlays vs Snap Camera Kit (env-gated). */
+  pipEffectBackend?: "mediapipe" | "snap";
   micVolume?: number;
   systemVolume?: number;
   /** When true, exported recording omits the in-app PiP (use macOS presenter / camera overlay in your meeting app instead). */
@@ -140,6 +149,8 @@ export interface StoredSettings {
   /** Control panel (editor) size — separate from floating overlay width/height */
   teleprompterPanelWidth?: number;
   teleprompterPanelHeight?: number;
+  /** Vosk model folder preference; `auto` resolves from script (CJK → zh). */
+  teleprompterVoskLang?: "en" | "zh" | "it" | "auto";
 }
 
 export type WhiteboardProject = NonNullable<StoredSettings["whiteboardProjects"]>[number];
@@ -326,9 +337,27 @@ function parseAndValidate(parsed: unknown): StoredSettings {
         : undefined,
     beautyMode: typeof p.beautyMode === "boolean" ? p.beautyMode : undefined,
     beautySettings: validBeautySettings(p.beautySettings),
-    faceFilter:
-      p.faceFilter && ["none", "sunglasses", "vampire", "heart"].includes(p.faceFilter as string)
-        ? (p.faceFilter as "none" | "sunglasses" | "vampire" | "heart")
+    faceFilter: (() => {
+      const v = p.faceFilter;
+      if (!v || typeof v !== "string") return undefined;
+      if (v === "vampire") return "firefly";
+      if (
+        [
+          "none",
+          "sunglasses",
+          "firefly",
+          "heart",
+          "moustache",
+          "brows",
+          "rolleyes",
+        ].includes(v)
+      )
+        return v as StoredSettings["faceFilter"];
+      return undefined;
+    })(),
+    pipEffectBackend:
+      p.pipEffectBackend === "snap" || p.pipEffectBackend === "mediapipe"
+        ? p.pipEffectBackend
         : undefined,
     micVolume:
       typeof p.micVolume === "number" && p.micVolume >= 0 && p.micVolume <= 100
@@ -356,6 +385,13 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterHeight: validNum(p.teleprompterHeight, 180, 500),
     teleprompterPanelWidth: validNum(p.teleprompterPanelWidth, 280, 920),
     teleprompterPanelHeight: validNum(p.teleprompterPanelHeight, 320, 900),
+    teleprompterVoskLang:
+      p.teleprompterVoskLang === "zh" ||
+      p.teleprompterVoskLang === "it" ||
+      p.teleprompterVoskLang === "en" ||
+      p.teleprompterVoskLang === "auto"
+        ? p.teleprompterVoskLang
+        : undefined,
   };
 
   if (p.splitStripWidthInitialized === true) {

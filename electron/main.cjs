@@ -3,6 +3,7 @@ const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const embeddedSignaling = require("./embedded-signaling.cjs");
+const voskStt = require("./vosk-stt.cjs");
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
 
@@ -275,6 +276,7 @@ function createHelperWindow(kind, options = {}) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, "preload.cjs"),
     },
     ...options,
   });
@@ -286,6 +288,61 @@ function createHelperWindow(kind, options = {}) {
     win.loadFile(path.join(__dirname, "../dist", url));
   }
 
+  win.on("closed", () => helperWindows.delete(label));
+  helperWindows.set(label, win);
+  return win;
+}
+
+/** Slim-only window: same stacking as Helper (`alwaysOnTop: true`); opens near bottom of work area. */
+function createTeleprompterSlimWindow(options = {}) {
+  const label = "teleprompter-slim";
+  const existing = helperWindows.get(label);
+  if (existing && !existing.isDestroyed()) {
+    existing.show();
+    existing.focus();
+    return existing;
+  }
+  /** Narrow bar; default height fits drag strip + toolbar + ~2 text lines at typical font (content sizes in renderer). */
+  const winW = 520;
+  const winH = 152;
+  let pos = { x: 120, y: 100 };
+  try {
+    const wa = screen.getPrimaryDisplay().workArea;
+    pos = {
+      x: Math.round(wa.x + (wa.width - winW) / 2),
+      y: Math.round(wa.y + wa.height - winH - 16),
+    };
+  } catch {
+    /* keep defaults */
+  }
+  const win = new BrowserWindow({
+    width: winW,
+    height: winH,
+    minWidth: 320,
+    minHeight: 108,
+    x: pos.x,
+    y: pos.y,
+    resizable: true,
+    alwaysOnTop: true,
+    frame: false,
+    transparent: true,
+    roundedCorners: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "preload.cjs"),
+    },
+    ...options,
+  });
+  const url = "/teleprompter-slim.html";
+  if (isDev) {
+    win.loadURL(`http://localhost:5173${url}`);
+  } else {
+    win.loadFile(path.join(__dirname, "../dist", "teleprompter-slim.html"));
+  }
   win.on("closed", () => helperWindows.delete(label));
   helperWindows.set(label, win);
   return win;
@@ -490,6 +547,10 @@ ipcMain.handle("openHelperWindow", async (_, kind) => {
   createHelperWindow(kind);
 });
 
+ipcMain.handle("openTeleprompterSlimWindow", async () => {
+  createTeleprompterSlimWindow();
+});
+
 // IPC: closeHelperWindow
 ipcMain.handle("closeHelperWindow", async (_, label) => {
   const win = helperWindows.get(label);
@@ -497,6 +558,30 @@ ipcMain.handle("closeHelperWindow", async (_, label) => {
     win.close();
     helperWindows.delete(label);
   }
+});
+
+ipcMain.handle("getHelperWindowBounds", async (_, label) => {
+  const win = helperWindows.get(label);
+  if (!win || win.isDestroyed()) return null;
+  return win.getBounds();
+});
+
+ipcMain.handle("setHelperWindowBounds", async (_, label, bounds) => {
+  const win = helperWindows.get(label);
+  if (!win || win.isDestroyed()) return false;
+  const cur = win.getBounds();
+  const isTeleprompter = label === "teleprompter-helper";
+  const minW = isTeleprompter ? 400 : 100;
+  const minH = isTeleprompter ? 180 : 100;
+  const nw = Math.round(bounds?.width ?? cur.width);
+  const nh = Math.round(bounds?.height ?? cur.height);
+  win.setBounds({
+    x: typeof bounds?.x === "number" ? Math.round(bounds.x) : cur.x,
+    y: typeof bounds?.y === "number" ? Math.round(bounds.y) : cur.y,
+    width: Math.max(minW, nw),
+    height: Math.max(minH, nh),
+  });
+  return true;
 });
 
 // IPC: getHelperByLabel (for close)
@@ -532,6 +617,34 @@ ipcMain.handle("openFile", async (_, filters = [{ name: "Excalidraw", extensions
     console.error("openFile:", e);
     return null;
   }
+});
+
+// IPC: teleprompter — native open dialog + fs.readFile (avoids hidden <input type="file"> issues in Electron)
+ipcMain.handle("openTextFiles", async (_, options = {}) => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (!win) return { ok: false, files: [] };
+  const multi = options.multi !== false;
+  const filters = Array.isArray(options.filters) && options.filters.length
+    ? options.filters
+    : [
+        { name: "Text / Markdown", extensions: ["txt", "md", "markdown", "script"] },
+        { name: "All files", extensions: ["*"] },
+      ];
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    filters,
+    properties: multi ? ["openFile", "multiSelections"] : ["openFile"],
+  });
+  if (canceled || !filePaths?.length) return { ok: false, files: [] };
+  const files = [];
+  for (const p of filePaths) {
+    try {
+      const content = fs.readFileSync(p, "utf8");
+      files.push({ path: p, name: path.basename(p), content });
+    } catch (e) {
+      console.error("openTextFiles read:", p, e);
+    }
+  }
+  return { ok: files.length > 0, files };
 });
 
 // IPC: saveFile (for whiteboard Save/Export). If `existingPath` is set, write without dialog (overwrite).
@@ -613,4 +726,77 @@ ipcMain.handle("setWindowIcon", async (_, buffer) => {
   const { nativeImage } = require("electron");
   const img = nativeImage.createFromBuffer(Buffer.from(buffer));
   if (!img.isEmpty()) win.setIcon(img);
+});
+
+/** Vosk model per language: user unpacks under userData/vosk-models/{en|zh|it}/ */
+function voskModelBaseDir() {
+  return path.join(app.getPath("userData"), "vosk-models");
+}
+
+ipcMain.handle("vosk:modelPath", async (_, lang) => {
+  const sub = lang === "zh" ? "zh" : lang === "it" ? "it" : "en";
+  const direct = path.join(voskModelBaseDir(), sub);
+  if (voskStt.isModelDir(direct)) return { path: direct, ok: true };
+  try {
+    if (fs.existsSync(direct)) {
+      const names = fs.readdirSync(direct, { withFileTypes: true });
+      const dirs = names.filter((d) => d.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
+      for (const d of dirs) {
+        const p = path.join(direct, d.name);
+        if (voskStt.isModelDir(p)) return { path: p, ok: true };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { path: direct, ok: false };
+});
+
+ipcMain.handle("vosk:init", async (_, modelPath) => {
+  try {
+    return await voskStt.init(modelPath);
+  } catch (e) {
+    console.error("[vosk:init]", e);
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+});
+
+function voskPcmPayloadToBuffer(payload) {
+  if (payload == null) return null;
+  if (Buffer.isBuffer(payload)) return payload;
+  if (payload instanceof ArrayBuffer) return Buffer.from(payload);
+  if (ArrayBuffer.isView(payload)) {
+    return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  }
+  if (typeof payload === "object" && payload.buffer instanceof ArrayBuffer) {
+    const o = payload;
+    return Buffer.from(o.buffer, o.byteOffset ?? 0, o.byteLength ?? o.buffer.byteLength);
+  }
+  if (typeof payload === "object" && payload.type === "Buffer" && Array.isArray(payload.data)) {
+    return Buffer.from(payload.data);
+  }
+  return null;
+}
+
+ipcMain.handle("vosk:feed", async (_, payload) => {
+  const buf = voskPcmPayloadToBuffer(payload);
+  if (!buf || buf.length < 2) return null;
+  if (buf.length % 2 !== 0) return null;
+  return voskStt.feed(buf);
+});
+
+ipcMain.handle("vosk:reset", async () => {
+  await voskStt.reset();
+});
+
+ipcMain.handle("vosk:release", async () => {
+  voskStt.release();
+});
+
+app.on("before-quit", () => {
+  try {
+    voskStt.release();
+  } catch {
+    /* ignore */
+  }
 });

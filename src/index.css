@@ -139,6 +139,31 @@
   }
 }
 
+/* Electron teleprompter helper window: same glass stack as main overlay — no solid shell bg. */
+html.dw-teleprompter-helper,
+html.dw-teleprompter-helper body,
+html.dw-teleprompter-helper #root {
+  background: transparent !important;
+}
+
+html.dw-teleprompter-slim {
+  height: 100%;
+}
+html.dw-teleprompter-slim body {
+  height: 100%;
+  margin: 0;
+}
+html.dw-teleprompter-slim,
+html.dw-teleprompter-slim body,
+html.dw-teleprompter-slim #root {
+  background: transparent !important;
+}
+/* Content-height panel; avoids a tall empty glass area below the two-line viewport. */
+html.dw-teleprompter-slim #root {
+  height: auto;
+  min-height: 0;
+}
+
 /* Auto-dismiss capture error: no motion → instant hide at timeout (JS skips exit phase). */
 @media (prefers-reduced-motion: reduce) {
   .dreamwork-capture-error-banner {
@@ -300,4 +325,9 @@
   ::view-transition-new(dreamwork-capture-pane) {
     animation-duration: 0.01ms;
   }
+}
+
+/* Teleprompter overlay follow: karaoke “read” span (ProseMirror decoration) */
+.dw-follow-read-muted {
+  color: rgba(255, 255, 255, 0.44) !important;
 }

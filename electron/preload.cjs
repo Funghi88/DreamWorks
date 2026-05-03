@@ -11,10 +11,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setBackgroundThrottling: (throttlingEnabled) =>
     ipcRenderer.invoke("setBackgroundThrottling", throttlingEnabled),
   openHelperWindow: (kind) => ipcRenderer.invoke("openHelperWindow", kind),
+  openTeleprompterSlimWindow: () => ipcRenderer.invoke("openTeleprompterSlimWindow"),
   closeHelperByLabel: (label) => ipcRenderer.invoke("closeHelperByLabel", label),
+  getHelperWindowBounds: (label) => ipcRenderer.invoke("getHelperWindowBounds", label),
+  setHelperWindowBounds: (label, bounds) => ipcRenderer.invoke("setHelperWindowBounds", label, bounds),
   setWindowIcon: (buffer) => ipcRenderer.invoke("setWindowIcon", buffer),
   setWindowTitle: (title) => ipcRenderer.invoke("setWindowTitle", title),
   openFile: (filters) => ipcRenderer.invoke("openFile", filters),
+  openTextFiles: (options) => ipcRenderer.invoke("openTextFiles", options),
   saveFile: (content, defaultName, filters, existingPath) =>
     ipcRenderer.invoke("saveFile", content, defaultName, filters, existingPath),
   getDefaultSavePath: () => ipcRenderer.invoke("getDefaultSavePath"),
@@ -31,4 +35,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   displayMediaPick: (sourceId) => ipcRenderer.invoke("displayMediaPick", sourceId),
   displayMediaCancel: () => ipcRenderer.invoke("displayMediaCancel"),
+  voskModelPath: (lang) => ipcRenderer.invoke("vosk:modelPath", lang),
+  voskInit: (modelPath) => ipcRenderer.invoke("vosk:init", modelPath),
+  /* ArrayBuffer slice is a copy; main does Buffer.from(ab) — reliable across IPC. */
+  voskFeed: (int16) => {
+    const ab = int16.buffer.slice(int16.byteOffset, int16.byteOffset + int16.byteLength);
+    return ipcRenderer.invoke("vosk:feed", ab);
+  },
+  voskReset: () => ipcRenderer.invoke("vosk:reset"),
+  voskRelease: () => ipcRenderer.invoke("vosk:release"),
 });

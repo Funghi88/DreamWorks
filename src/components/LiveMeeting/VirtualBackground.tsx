@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
 import { FilesetResolver, ImageSegmenter } from "@mediapipe/tasks-vision";
+import {
+  inferSegmentationMaskSemantics,
+  isSegmentationBackground,
+} from "@/lib/mediapipeSegmentationMask";
 import type { BackgroundMode } from "./useVirtualBackground";
 
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm";
@@ -101,6 +105,15 @@ export function VirtualBackground({
           const maskH = bgMask.height;
           const scaleX = maskW / w;
           const scaleY = maskH / h;
+          const blurSemantics = inferSegmentationMaskSemantics(
+            maskData,
+            maskW,
+            maskH,
+            w,
+            h,
+            scaleX,
+            scaleY
+          );
 
           const offscreen = document.createElement("canvas");
           offscreen.width = w;
@@ -123,6 +136,9 @@ export function VirtualBackground({
               const idx = Math.min(my * maskW + mx, maskData.length - 1);
               let bgConf = maskData[idx] ?? 0;
               bgConf = Math.max(0, Math.min(1, (bgConf - 0.25) / 0.5));
+              if (blurSemantics === "person") {
+                bgConf = 1 - bgConf;
+              }
               const i = (y * w + x) * 4;
               sd[i] = (1 - bgConf) * sd[i] + bgConf * bd[i];
               sd[i + 1] = (1 - bgConf) * sd[i + 1] + bgConf * bd[i + 1];
@@ -176,6 +192,15 @@ export function VirtualBackground({
         const scaleX = maskW / w;
         const scaleY = maskH / h;
         const threshold = 0.5;
+        const colorSemantics = inferSegmentationMaskSemantics(
+          maskData,
+          maskW,
+          maskH,
+          w,
+          h,
+          scaleX,
+          scaleY
+        );
 
         for (let y = 0; y < h; y++) {
           for (let x = 0; x < w; x++) {
@@ -183,7 +208,7 @@ export function VirtualBackground({
             const my = Math.min(Math.floor(y * scaleY), maskH - 1);
             const bgConf = maskData[my * maskW + mx] ?? 0;
             const i = (y * w + x) * 4;
-            if (bgConf > threshold) {
+            if (isSegmentationBackground(bgConf, colorSemantics, threshold)) {
               data[i] = r;
               data[i + 1] = g;
               data[i + 2] = b;
@@ -241,6 +266,15 @@ export function VirtualBackground({
         const scaleX = maskW / w;
         const scaleY = maskH / h;
         const threshold = 0.5;
+        const imageSemantics = inferSegmentationMaskSemantics(
+          maskData,
+          maskW,
+          maskH,
+          w,
+          h,
+          scaleX,
+          scaleY
+        );
 
         const iw = bgImg.naturalWidth;
         const ih = bgImg.naturalHeight;
@@ -263,7 +297,7 @@ export function VirtualBackground({
             const my = Math.min(Math.floor(y * scaleY), maskH - 1);
             const bgConf = maskData[my * maskW + mx] ?? 0;
             const i = (y * w + x) * 4;
-            if (bgConf > threshold) {
+            if (isSegmentationBackground(bgConf, imageSemantics, threshold)) {
               data[i] = bgData[i];
               data[i + 1] = bgData[i + 1];
               data[i + 2] = bgData[i + 2];

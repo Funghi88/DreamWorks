@@ -56,6 +56,11 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 4. **Live Meeting** — WebRTC 视频会议，支持聊天、屏幕共享、录制、虚拟背景、实时转录
 5. **Record** — 录制屏幕 + 摄像头合成画面，支持保存 WebM / MP4
 
+**PiP 背景 vs macOS 系统摄像头效果（含 Presenter Overlay）**
+
+- **系统里「背景 / Portrait」**：由 macOS 在系统层处理；Electron/网页通过 `getUserMedia` 拿到的通常是**未带系统虚拟背景**的原始摄像头画面，所以 **DreamWorks 圆环里不会显示**你在系统菜单里选的天空。**打成安装包 / 正式版也一样**，不是开发版才受限。
+- **应用内 PiP bg**：在 Settings 里 **PiP bg**（在 **Bg** 上方）选 **Custom image** 并上传，由应用内分割实现换背景；需要**实时摄像头**，且不要用 Source 里的静态「Use image」顶替真人。
+
 ### Excalidraw 白板：体验、存储与和录制的算力平衡
 
 本节概括我们在 **Excalidraw** 集成上的工程取舍：让画布跟手、**贴图与场景不丢**、并在 **白板 + 摄像头录制** 时尽量少抢 CPU/GPU。
@@ -224,6 +229,8 @@ The app opens in an Electron window.
 
 **Web-only (no Electron):** Run `npm run dev:web`, then open [http://localhost:5173](http://localhost:5173)
 
+**Snap Camera Kit (optional, private / self-use):** Copy `.env.example` to `.env` and set `VITE_ENABLE_SNAP_CAMERA_KIT=true` plus `VITE_SNAP_API_TOKEN`, `VITE_SNAP_LENS_ID`, and `VITE_SNAP_LENS_GROUP_ID` from the [Snap Camera Kit](https://camera-kit.snapchat.com/) developer portal. If you plan to **open-source or publicly ship** this repo or a fork, re-read `src/config/featureFlags.ts` and Snap’s terms before keeping this integration.
+
 **Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
 
 **Build for macOS:**
@@ -286,4 +293,5 @@ The app opens in an Electron window.
 - [使用指南与技术说明](docs/USER_GUIDE.md) — 功能详解、操作步骤、适用场景（中文）
 - [局域网会议测试指南](docs/TEST_LAN_MEETING.md) — 如何测试同一 WiFi 下多设备开会（中文）
 - [Tauri vs Electron comparison](docs/TAURI_VS_ELECTRON.md) — Framework comparison (Chinese)
+- [脸部 Effect：MediaPipe 精修 vs Jeeliz PoC](docs/FACE_EFFECTS_MEDIAPIPE_VS_JEELIZ.md) — 资源与趣味向选型对比（中文）
 

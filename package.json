@@ -9,12 +9,13 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -n vite,electron \"vite\" \"wait-on http://localhost:5173 && electronmon .\"",
+    "postinstall": "node scripts/sync-mediapipe-wasm.cjs",
+    "dev": "node scripts/sync-mediapipe-wasm.cjs && concurrently -n vite,electron \"vite\" \"wait-on http://localhost:5173 && electronmon .\"",
     "electron:dev": "npm run dev",
     "dev:electron": "wait-on http://localhost:5173 && electronmon .",
-    "dev:web": "vite --port 5173",
+    "dev:web": "node scripts/sync-mediapipe-wasm.cjs && vite --port 5173",
     "test": "vitest run",
-    "build": "tsc && vite build",
+    "build": "tsc && node scripts/sync-mediapipe-wasm.cjs && vite build",
     "preview": "vite preview",
     "electron": "electron .",
     "pack": "npm run create-icns && rm -rf dist release && npm run build && electron-builder --dir",
@@ -22,13 +23,23 @@
     "signaling": "npx tsx server/signaling-server.ts",
     "create-app-icon": "node scripts/create-app-icon.js",
     "create-icns": "node scripts/create-icns.js",
-    "copy-settings-to-defaults": "node scripts/copy-settings-to-defaults.cjs"
+    "copy-settings-to-defaults": "node scripts/copy-settings-to-defaults.cjs",
+    "rebuild:vosk": "electron-rebuild -f -w vosk",
+    "verify:vosk": "node scripts/verify-vosk-native.cjs"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.0",
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@mediapipe/tasks-vision": "^0.10.32",
+    "@snap/camera-kit": "^1.16.0",
+    "@snap/react-camera-kit": "^0.2.0",
+    "@tiptap/extension-highlight": "^3.22.3",
+    "@tiptap/extension-placeholder": "^3.22.3",
+    "@tiptap/extension-typography": "^3.22.3",
+    "@tiptap/markdown": "^3.22.3",
+    "@tiptap/react": "^3.22.3",
+    "@tiptap/starter-kit": "^3.22.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
@@ -38,12 +49,21 @@
     "radix-ui": "^1.4.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "rxjs": "^7.8.2",
     "socket.io": "^4.7.0",
     "socket.io-client": "^4.7.0",
     "tailwind-merge": "^3.5.0",
-    "tsx": "^4.19.0"
+    "tsx": "^4.19.0",
+    "unified": "^11.0.5",
+    "unist-util-visit-parents": "^6.0.2",
+    "vfile": "^6.0.3",
+    "vosk": "^0.3.39"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
     "@tailwindcss/vite": "^4.2.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
@@ -80,6 +100,12 @@
         "NSScreenCaptureUsageDescription": "DreamWorks needs screen capture to share or record your display."
       }
     },
+    "asarUnpack": [
+      "**/node_modules/vosk/**/*",
+      "electron/vosk-stt-worker.cjs",
+      "electron/vosk-stt.cjs",
+      "electron/vosk-result-text.cjs"
+    ],
     "directories": {
       "output": "release"
     },
@@ -97,5 +123,11 @@
       "!**/.cursor/**",
       "!**/.vscode/**"
     ]
+  },
+  "overrides": {
+    "vosk": {
+      "ffi-napi": "npm:@2060.io/ffi-napi@4.0.9",
+      "ref-napi": "npm:@2060.io/ref-napi@3.0.6"
+    }
   }
 }

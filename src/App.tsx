@@ -15,6 +15,7 @@ import { createPortal, flushSync } from "react-dom";
 import { RecordingControls } from "@/components/RecordingControls";
 import { TeleprompterOverlay, TeleprompterPanel } from "@/components/Teleprompter";
 import { useWindowSize, useWindowLiveResize } from "@/hooks/useWindowSize";
+import type { TeleprompterVoskLang } from "@/hooks/useVoskTeleprompterFollow";
 import { CircularWebcam } from "@/components/CircularWebcam";
 import { ExcalidrawBoard } from "@/components/ExcalidrawBoard";
 import { exportToCanvas, getSceneVersion } from "@excalidraw/excalidraw";
@@ -36,12 +37,17 @@ import {
 } from "@/lib/storage";
 import { captureFrame, getCaptureFilename, scaleTo2KAndBlob, type CapturePresetId, type CaptureModeId } from "@/lib/capture";
 import {
-  initFaceLandmarker,
-  nextVideoTimestamp,
   drawFaceFilter,
-  smoothLandmarksForFilter,
+  normalizeFaceFilterFromStorage,
   type FaceFilterType,
 } from "@/lib/faceFilters";
+import { useFaceLandmarksWorker } from "@/hooks/useFaceLandmarksWorker";
+import {
+  snapCameraKitEnvConfigured,
+  getSnapCameraKitConfig,
+  type PipEffectBackend,
+} from "@/config/featureFlags";
+import { SnapPipLens } from "@/components/SnapPipLens";
 import { createCircularIcon } from "@/lib/circularIcon";
 import { recordContentFit80 } from "@/lib/recordLayout";
 import {
@@ -54,9 +60,12 @@ import {
   trimMacOSScreenSharePadding,
   snapScreenTrimRect,
   mergeStableScreenTrim,
+  resetScreenShareTrimState,
   SCREEN_TRIM_REFRESH_FRAMES,
+  shouldSkipMacOSPaddingTrimForDisplaySurface,
   type ScreenTrimRect,
 } from "@/lib/screenShareTrim";
+import { normalizeTeleprompterImportedText } from "@/lib/teleprompterImport";
 import { isDisplayMediaUserCancellation } from "@/lib/userMediaError";
 import { getDisplayMediaForScreenCapture } from "@/lib/displayMedia";
 import { Settings } from "lucide-react";
@@ -108,6 +117,49 @@ const CAPTURE_ERROR_EXIT_MS = 420;
 function requestCanvasCaptureFrame(track: MediaStreamTrack | null) {
   if (!track) return;
   (track as MediaStreamTrack & { requestFrame?: () => void }).requestFrame?.();
+}
+
+/** Flex/grid can flip `getBoundingClientRect` / client size by 1–3px between frames; snap to 4px grid before hysteresis. */
+function quantizeCapturePanePx(n: number): number {
+  return Math.max(1, Math.round(n / 4) * 4);
+}
+
+/** Min delta (px) to accept a new capture-pane size — avoids resetting composite bitmap/CSS every rAF (visible shake, menu-bar capture icon flutter). */
+const SCREEN_SHARE_PANE_DEADBAND_PX = 12;
+/** Chromium sometimes reports ±2–6px `videoWidth`/`videoHeight` between frames on window capture → contain math jitters; lock until real resize. */
+const SCREEN_SHARE_INTRINSIC_JITTER_EPS_PX = 8;
+/** Live preview: ignore subpixel movement in computed dest rect (pairs with intrinsic lock). */
+const SCREEN_SHARE_DEST_JITTER_EPS_PX = 8;
+
+/**
+ * Face landmarks + PiP overlay must sample the same decoded camera as the user sees.
+ * Off-screen `cameraSourceVideo` (opacity 0, negative position) often does not advance frames on Electron;
+ * prefer portal `cameraVideoRef` when it has real dimensions.
+ */
+function pickDecodedCameraVideo(
+  portalCam: HTMLVideoElement | null,
+  offscreenCam: HTMLVideoElement | null
+): HTMLVideoElement | null {
+  const decoded = (v: HTMLVideoElement | null) =>
+    v && v.readyState >= 2 && v.videoWidth > 0 ? v : null;
+  /** Electron: visible PiP may decode; off-screen source often stays HAVE_METADATA but is still drawable. */
+  const metadataOk = (v: HTMLVideoElement | null) =>
+    v && v.srcObject && v.readyState >= 1 && v.videoWidth > 0 ? v : null;
+  // Prefer portal before decoded(offscreen): same stream, but off-DOM + opacity 0 often yields blank
+  // createImageBitmap frames on Electron while the visible PiP video already has metadata.
+  return (
+    decoded(portalCam) ??
+    metadataOk(portalCam) ??
+    decoded(offscreenCam) ??
+    metadataOk(offscreenCam) ??
+    portalCam ??
+    offscreenCam
+  );
+}
+
+/** PiP overlay + face filters: align with composite camPickRecording — don't require HAVE_CURRENT_DATA. */
+function cameraVideoReadableForPipEffects(video: HTMLVideoElement | null): boolean {
+  return !!(video?.srcObject && video.videoWidth > 0 && video.readyState >= 1);
 }
 const TELEPROMPTER_HELPER_URL = "/teleprompter-helper.html";
 const MONITOR_HELPER_URL = "/recording-monitor.html";
@@ -439,7 +491,7 @@ class LiveMeetingErrorBoundary extends Component<
 
 export default function App() {
   const screenVideoRef = useRef<HTMLVideoElement>(null);
-  const persistentScreenVideoRef = useRef<HTMLVideoElement>(null);
+  // Removed persistent screen video element (see note near render): dual-decoding caused jitter on macOS.
   const cameraSourceVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const compositeRef = useRef<HTMLCanvasElement>(null);
@@ -519,9 +571,18 @@ export default function App() {
     if (s) return s;
     return presets.natural;
   });
-  const [faceFilter, setFaceFilter] = useState<FaceFilterType>(
-    () => loadSettings().faceFilter ?? "none"
+  const [faceFilter, setFaceFilter] = useState<FaceFilterType>(() =>
+    normalizeFaceFilterFromStorage(loadSettings().faceFilter)
   );
+  const [pipEffectBackend, setPipEffectBackend] = useState<PipEffectBackend>(() => {
+    const raw = loadSettings().pipEffectBackend;
+    if (raw === "snap" && snapCameraKitEnvConfigured()) return "snap";
+    return "mediapipe";
+  });
+  const snapLiveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const onSnapLiveCanvas = useCallback((c: HTMLCanvasElement | null) => {
+    snapLiveCanvasRef.current = c;
+  }, []);
   const faceLandmarksRef = useRef<import("@mediapipe/tasks-vision").NormalizedLandmark[] | null>(null);
   const lastValidLandmarksRef = useRef<import("@mediapipe/tasks-vision").NormalizedLandmark[] | null>(null);
   const lastValidLandmarksAtRef = useRef<number>(0);
@@ -576,6 +637,32 @@ export default function App() {
   );
   const [pipDragging, setPipDragging] = useState(false);
   const pipDraggingRef = useRef(false);
+  const snapPipPortalLayer = useMemo(() => {
+    if (pipEffectBackend !== "snap" || avatarImageSrc) return null;
+    const cfg = getSnapCameraKitConfig();
+    if (!cfg) return null;
+    return (
+      <Suspense fallback={null}>
+        <div
+          className="absolute inset-0 overflow-hidden"
+          style={{
+            borderRadius: avatarShape === "circle" ? "50%" : AVATAR_RECT_RADIUS,
+            zIndex: 1,
+          }}
+        >
+          <SnapPipLens
+            apiToken={cfg.apiToken}
+            lensId={cfg.lensId}
+            lensGroupId={cfg.lensGroupId}
+            pipDragging={pipDragging}
+            onLiveCanvas={onSnapLiveCanvas}
+            className="h-full w-full"
+            style={{ width: "100%", height: "100%" }}
+          />
+        </div>
+      </Suspense>
+    );
+  }, [pipEffectBackend, avatarImageSrc, avatarShape, pipDragging, onSnapLiveCanvas]);
   const pipOffsetRef = useRef({ x: 0, y: 0 });
   const [previewBoxDragging, setPreviewBoxDragging] = useState(false);
   const previewBoxDraggingRef = useRef(false);
@@ -590,6 +677,19 @@ export default function App() {
   /** Throttle macOS trim + reduce flicker (per-frame re-trim oscillates). */
   const screenTrimCacheRef = useRef<{ key: string; rect: ScreenTrimRect } | null>(null);
   const screenTrimFrameRef = useRef(0);
+  /** Subpixel layout can flip `clientWidth`/`clientHeight` by 1px → composite canvas `width`/`height` reset every frame (GPU churn, jank, can hitch fullscreen captures like Keynote). */
+  const screenSharePaneStableRef = useRef<{ w: number; h: number } | null>(null);
+  /** Hysteresis for `videoWidth`×`videoHeight` during getDisplayMedia (reduces contain-scale wobble). */
+  const screenShareStableIntrinsicRef = useRef<{ sw: number; sh: number } | null>(null);
+  const screenShareIntrinsicTrackIdRef = useRef<string | null>(null);
+  /** Hold last drawImage dest when trim + geometry are unchanged and movement is ≤2px (stops ±1px shimmer). */
+  const screenShareDrawDestRef = useRef<{
+    trimKey: string;
+    tx: number;
+    ty: number;
+    tw: number;
+    th: number;
+  } | null>(null);
   const fullPageWhiteboard = true;
   const activeScreenStream = whiteboardScreenStream ?? previewScreenStream;
   const activeScreenStreamRef = useRef(activeScreenStream);
@@ -597,6 +697,11 @@ export default function App() {
   useEffect(() => {
     screenTrimCacheRef.current = null;
     screenTrimFrameRef.current = 0;
+    resetScreenShareTrimState();
+    screenSharePaneStableRef.current = null;
+    screenShareDrawDestRef.current = null;
+    screenShareStableIntrinsicRef.current = null;
+    screenShareIntrinsicTrackIdRef.current = null;
   }, [activeScreenStream]);
 
   /** Auto-dismiss capture/recording errors: fade/slide out, then unmount (instant clear if reduced motion). */
@@ -625,6 +730,34 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const isRecordingRef = useRef(false);
   isRecordingRef.current = isRecording;
+
+  const getLandmarkVideo = useCallback(
+    (): HTMLVideoElement | null =>
+      pickDecodedCameraVideo(cameraVideoRef.current, cameraSourceVideoRef.current),
+    []
+  );
+
+  useFaceLandmarksWorker({
+    enabled:
+      pipEffectBackend === "mediapipe" &&
+      faceFilter !== "none" &&
+      showPip &&
+      !avatarImageSrc,
+    getVideo: getLandmarkVideo,
+    isRecordingRef,
+    pipDraggingRef,
+    previewBoxDraggingRef,
+    faceLandmarksRef,
+    lastValidLandmarksRef,
+    lastValidLandmarksAtRef,
+  });
+
+  useEffect(() => {
+    if (pipEffectBackend === "snap" && !snapCameraKitEnvConfigured()) {
+      setPipEffectBackend("mediapipe");
+    }
+  }, [pipEffectBackend]);
+
   /** PiP position refs — synced from state when idle (not while dragging — onMove owns ref; not during recording — avoids one frame where setPos hasn't flushed and would overwrite ref with stale state). */
   const pipPosRef = useRef(pipPos);
   const fullPagePipPosRef = useRef(fullPagePipPos);
@@ -683,7 +816,9 @@ export default function App() {
       if (s.glowColor != null) setGlowColor(s.glowColor);
       if (s.beautyMode != null) setBeautyMode(s.beautyMode);
       if (s.beautySettings != null) setBeautySettings(s.beautySettings);
-      if (s.faceFilter != null) setFaceFilter(s.faceFilter);
+      if (s.faceFilter != null) setFaceFilter(normalizeFaceFilterFromStorage(s.faceFilter));
+      if (s.pipEffectBackend === "snap" && snapCameraKitEnvConfigured()) setPipEffectBackend("snap");
+      else if (s.pipEffectBackend === "mediapipe") setPipEffectBackend("mediapipe");
       if (s.pipPos != null) setPipPos(s.pipPos);
       if (s.fullPagePipPos != null) setFullPagePipPos(s.fullPagePipPos);
       if (s.sidebarWidth != null) setSidebarWidth(s.sidebarWidth);
@@ -695,9 +830,33 @@ export default function App() {
       if (s.shareWindowFillPercent != null && s.shareWindowFillPercent >= 80 && s.shareWindowFillPercent <= 100) {
         setShareWindowFillPercent(Math.round(s.shareWindowFillPercent));
       }
-      if (s.letterboxBackground != null) setLetterboxBackground(s.letterboxBackground);
-      if (s.letterboxCustomImage != null) setLetterboxCustomImage(s.letterboxCustomImage);
-      if (s.letterboxMode != null) setLetterboxMode(s.letterboxMode);
+      /** Letterbox: disk hydrate must not wipe an in-flight upload (async often resolves after user picks a file). */
+      {
+        const prevImg = letterboxCustomImageDataUrlRef.current;
+        let mergedImg: string | null;
+        if (s.letterboxCustomImage != null) {
+          mergedImg =
+            prevImg != null && prevImg !== s.letterboxCustomImage ? prevImg : s.letterboxCustomImage;
+        } else if (prevImg != null) {
+          mergedImg = prevImg;
+        } else {
+          mergedImg = null;
+        }
+        setLetterboxCustomImage(mergedImg);
+        setLetterboxBackground((prev) => {
+          if (s.letterboxBackground == null) return prev;
+          if (
+            prev === "custom" &&
+            s.letterboxBackground === "black" &&
+            mergedImg &&
+            !s.letterboxCustomImage
+          ) {
+            return "custom";
+          }
+          return s.letterboxBackground;
+        });
+        setLetterboxMode((prev) => (s.letterboxMode != null ? s.letterboxMode : prev));
+      }
       if (s.previewPosition != null) setPreviewPosition(s.previewPosition);
       if (s.previewLayoutMode != null) setPreviewLayoutMode(s.previewLayoutMode);
       if (s.fullPagePreviewPos != null) setFullPagePreviewPos(s.fullPagePreviewPos);
@@ -718,6 +877,9 @@ export default function App() {
       if (s.teleprompterHeight != null) setTeleprompterHeight(s.teleprompterHeight);
       if (s.teleprompterPanelWidth != null) setTeleprompterPanelWidth(s.teleprompterPanelWidth);
       if (s.teleprompterPanelHeight != null) setTeleprompterPanelHeight(s.teleprompterPanelHeight);
+      if (s.teleprompterVoskLang === "en" || s.teleprompterVoskLang === "zh" || s.teleprompterVoskLang === "it") {
+        setTeleprompterVoskLang(s.teleprompterVoskLang);
+      }
 
       hydratePersistedSettingsSnapshot(s);
       setElectronSettingsEpoch((e) => e + 1);
@@ -835,6 +997,10 @@ export default function App() {
   const [letterboxMode, setLetterboxMode] = useState<LetterboxMode>(
     () => loadSettings().letterboxMode ?? "fit"
   );
+  /** Electron: async disk load can finish after user uploads a bg image; ref used to merge without wiping in-flight data. */
+  const letterboxCustomImageDataUrlRef = useRef<string | null>(null);
+  letterboxCustomImageDataUrlRef.current = letterboxCustomImage;
+
   const [previewPosition, setPreviewPosition] = useState<
     "top-left" | "top-right" | "bottom-left" | "bottom-right"
   >(() => loadSettings().previewPosition ?? "top-left");
@@ -870,6 +1036,12 @@ export default function App() {
   const [teleprompterPanelPosition, setTeleprompterPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [teleprompterLocked, setTeleprompterLocked] = useState(false);
   const [teleprompterFollowMode, setTeleprompterFollowMode] = useState(false);
+  const [teleprompterVoskLang, setTeleprompterVoskLang] = useState<TeleprompterVoskLang>(() => {
+    const v = loadSettings().teleprompterVoskLang;
+    if (v === "zh" || v === "it") return v;
+    if (v === "auto") return "zh";
+    return "en";
+  });
   const [teleprompterSlimMode, setTeleprompterSlimMode] = useState(false);
   const [teleprompterResetSeq, setTeleprompterResetSeq] = useState(0);
   const [teleprompterEditorScrollRatio, setTeleprompterEditorScrollRatio] = useState<number | null>(null);
@@ -889,8 +1061,13 @@ export default function App() {
     fontSize: number;
     opacity: number;
     width: number;
+    height: number;
     locked: boolean;
     resetSeq: number;
+    followMode: boolean;
+    voskLang: TeleprompterVoskLang;
+    activeScriptId: string;
+    slimMode: boolean;
   } | null>(null);
   const teleprompterWindowRef = useRef<Window | null>(null);
   const monitorWindowRef = useRef<Window | null>(null);
@@ -905,6 +1082,7 @@ export default function App() {
     height: teleprompterHeight,
     panelWidth: teleprompterPanelWidth,
     panelHeight: teleprompterPanelHeight,
+    voskLang: teleprompterVoskLang,
   });
   teleprompterSaveRef.current = {
     scripts: teleprompterScripts,
@@ -916,6 +1094,7 @@ export default function App() {
     height: teleprompterHeight,
     panelWidth: teleprompterPanelWidth,
     panelHeight: teleprompterPanelHeight,
+    voskLang: teleprompterVoskLang,
   };
   const currentTeleprompterScript = teleprompterScripts.find((s) => s.id === activeTeleprompterScriptId);
   const teleprompterScript = currentTeleprompterScript?.content ?? defaultScript;
@@ -938,6 +1117,7 @@ export default function App() {
           teleprompterHeight: r.height,
           teleprompterPanelWidth: r.panelWidth,
           teleprompterPanelHeight: r.panelHeight,
+          teleprompterVoskLang: r.voskLang,
         });
       };
       if (typeof requestIdleCallback !== "undefined") {
@@ -959,6 +1139,7 @@ export default function App() {
     teleprompterHeight,
     teleprompterPanelWidth,
     teleprompterPanelHeight,
+    teleprompterVoskLang,
   ]);
 
   const flushTeleprompterSave = useCallback((pendingScriptContent?: string) => {
@@ -986,6 +1167,7 @@ export default function App() {
       teleprompterHeight: r.height,
       teleprompterPanelWidth: r.panelWidth,
       teleprompterPanelHeight: r.panelHeight,
+      teleprompterVoskLang: r.voskLang,
     });
   }, []);
 
@@ -1030,13 +1212,11 @@ export default function App() {
     const newScripts: TeleprompterScript[] = items.map((item, i) => ({
       id: `script-${t}-${i}`,
       name: item.name,
-      content: item.content.replace(/\n{3,}/g, "\n\n").replace(/\n\n/g, "\n"),
+      content: normalizeTeleprompterImportedText(item.content),
       updatedAt: t,
     }));
-    startTransition(() => {
-      setTeleprompterScripts((prev) => [...prev, ...newScripts]);
-      setActiveTeleprompterScriptId(newScripts[newScripts.length - 1]!.id);
-    });
+    setTeleprompterScripts((prev) => [...prev, ...newScripts]);
+    setActiveTeleprompterScriptId(newScripts[newScripts.length - 1]!.id);
   }, []);
 
   const handleSaveAsTeleprompterScript = useCallback(() => {
@@ -1105,19 +1285,6 @@ export default function App() {
     return () => { whiteboardTextureImgRef.current = null; };
   }, [whiteboardTextureId]);
 
-  useEffect(() => {
-    if (!letterboxCustomImage) {
-      letterboxCustomImgRef.current = null;
-      return;
-    }
-    const img = new Image();
-    img.onload = () => { letterboxCustomImgRef.current = img; };
-    img.onerror = () => { letterboxCustomImgRef.current = null; };
-    img.src = letterboxCustomImage;
-    if (img.complete) letterboxCustomImgRef.current = img;
-    return () => { letterboxCustomImgRef.current = null; };
-  }, [letterboxCustomImage]);
-
   // Bring window to foreground on launch (macOS often leaves it behind) — only after app has mounted
   useEffect(() => {
     if (isElectron && typeof window !== "undefined") {
@@ -1143,7 +1310,7 @@ export default function App() {
   const canvasCaptureTrackRef = useRef<MediaStreamTrack | null>(null);
   const stopDrawLoopRef = useRef<(() => void) | null>(null);
 
-  const hasScreen = !!activeScreenStream || !!persistentScreenVideoRef.current?.srcObject;
+  const hasScreen = !!activeScreenStream;
   hasScreenLayoutRef.current = hasScreen || captureMainNoStream;
 
   /** Which column gets `1fr`: capture preview vs whiteboard (see `splitGridTemplate`). */
@@ -1221,6 +1388,8 @@ export default function App() {
       const next = !prev;
       if (!next) {
         setTeleprompterPlaying(false);
+        setTeleprompterFollowMode(false);
+        setTeleprompterSlimMode(false);
         const w = teleprompterWindowRef.current;
         if (w && "close" in w && typeof w.close === "function") {
           try {
@@ -1231,6 +1400,7 @@ export default function App() {
         }
         teleprompterWindowRef.current = null;
         void closeHelperByLabel("teleprompter-helper");
+        void closeHelperByLabel("teleprompter-slim");
       }
       return next;
     });
@@ -1242,23 +1412,52 @@ export default function App() {
     setTeleprompterResetSeq((prev) => prev + 1);
   };
 
+  const prewarmVosk = useCallback(async () => {
+    const api = (
+      window as unknown as {
+        electronAPI?: {
+          isElectron?: boolean;
+          voskModelPath?: (lang: "en" | "zh" | "it") => Promise<{ path: string; ok: boolean }>;
+          voskInit?: (path: string) => Promise<{ ok: boolean; error?: string }>;
+        };
+      }
+    ).electronAPI;
+    /* Prewarm whenever IPC exists; do not require isElectron===true (some builds omit the flag). */
+    if (!api?.voskModelPath || !api.voskInit || api.isElectron === false) return;
+    try {
+      const mp = await api.voskModelPath!(teleprompterVoskLang);
+      if (!mp.ok) return;
+      await api.voskInit!(mp.path);
+    } catch {
+      /* ignore */
+    }
+  }, [teleprompterVoskLang]);
+
+  /** Prewarm on shell + language so first Follow is usually cache-hit. */
+  useEffect(() => {
+    void prewarmVosk();
+  }, [prewarmVosk]);
+
+  /** Opening the teleprompter panel retriggers init (no-op if already loaded) — cuts cold start if app just woke. */
+  useEffect(() => {
+    if (!showTeleprompter) return;
+    void prewarmVosk();
+  }, [showTeleprompter, prewarmVosk]);
+
   const handleSetTeleprompterNearCamera = (value: boolean) => {
     setTeleprompterNearCamera(value);
     if (value) setTeleprompterPosition(null);
   };
 
-  const closeHelperByLabel = useCallback(
-    async (label: "teleprompter-helper" | "recording-monitor") => {
-      if (!isElectron) return;
-      try {
-        const api = (window as unknown as { electronAPI?: { closeHelperByLabel: (l: string) => Promise<void> } }).electronAPI;
-        await api?.closeHelperByLabel?.(label);
-      } catch {
-        /* ignore close errors */
-      }
-    },
-    [isElectron]
-  );
+  const closeHelperByLabel = useCallback(async (label: string) => {
+    if (!isElectron) return;
+    try {
+      const api = (window as unknown as { electronAPI?: { closeHelperByLabel: (l: string) => Promise<void> } }).electronAPI;
+      await api?.closeHelperByLabel?.(label);
+    } catch {
+      /* ignore close errors */
+    }
+  }, [isElectron]);
 
   const openHelperWindow = useCallback(
     async (kind: "teleprompter" | "monitor") => {
@@ -1326,12 +1525,29 @@ export default function App() {
       } else if (payload.type === "teleprompter-control") {
         if (typeof payload.playing === "boolean") setTeleprompterPlaying(payload.playing);
         if (typeof payload.speed === "number") setTeleprompterSpeed(Math.max(10, Math.min(80, payload.speed)));
-        if (typeof payload.resetSeq === "number") setTeleprompterResetSeq(payload.resetSeq);
+        /* Never apply a stale/low resetSeq from a helper tab (would rewind voice-follow read position). */
+        if (typeof payload.resetSeq === "number") {
+          setTeleprompterResetSeq((prev) => Math.max(prev, payload.resetSeq as number));
+        }
+        if (typeof payload.followMode === "boolean") setTeleprompterFollowMode(payload.followMode);
+        if (payload.voskLang === "en" || payload.voskLang === "zh" || payload.voskLang === "it") {
+          setTeleprompterVoskLang(payload.voskLang);
+        }
+        if (typeof payload.width === "number") {
+          setTeleprompterWidth(Math.max(320, Math.min(900, payload.width)));
+        }
+        if (typeof payload.height === "number") {
+          setTeleprompterHeight(Math.max(180, Math.min(500, payload.height)));
+        }
+        if (typeof payload.locked === "boolean") setTeleprompterLocked(payload.locked);
+        if (typeof payload.slimMode === "boolean") setTeleprompterSlimMode(payload.slimMode);
       } else if (payload.type === "teleprompter-close") {
         setShowTeleprompter(false);
         setTeleprompterPlaying(false);
+        setTeleprompterSlimMode(false);
         teleprompterWindowRef.current = null;
         void closeHelperByLabel("teleprompter-helper");
+        void closeHelperByLabel("teleprompter-slim");
       }
     };
     teleprompterChannel.addEventListener("message", onTeleprompterMessage);
@@ -1354,13 +1570,35 @@ export default function App() {
       }
       teleprompterWindowRef.current = null;
       void closeHelperByLabel("teleprompter-helper");
+      void closeHelperByLabel("teleprompter-slim");
       return;
     }
-    // When screen sharing: open teleprompter helper if user toggled it on (floating window above shared content)
     if (showTeleprompter) {
       helperOpenRef.current?.("teleprompter");
     }
   }, [detachedHelpersEnabled, showTeleprompter, closeHelperByLabel]);
+
+  /** Slim mode in Electron: own always-on-top BrowserWindow (not clipped to main webview). */
+  useEffect(() => {
+    if (!isElectron) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const api = (window as unknown as { electronAPI?: { openTeleprompterSlimWindow?: () => Promise<void> } }).electronAPI;
+        if (showTeleprompter && teleprompterSlimMode) {
+          await api?.openTeleprompterSlimWindow?.();
+        } else if (!cancelled) {
+          await closeHelperByLabel("teleprompter-slim");
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [isElectron, showTeleprompter, teleprompterSlimMode, closeHelperByLabel]);
 
   useEffect(() => {
     if (!detachedHelpersEnabled) {
@@ -1398,8 +1636,13 @@ export default function App() {
       fontSize: teleprompterFontSize,
       opacity: teleprompterOpacity,
       width: teleprompterWidth,
+      height: teleprompterHeight,
       locked: teleprompterLocked,
       resetSeq: teleprompterResetSeq,
+      followMode: teleprompterFollowMode,
+      voskLang: teleprompterVoskLang,
+      activeScriptId: activeTeleprompterScriptId,
+      slimMode: teleprompterSlimMode,
     };
     teleprompterStateRef.current = state;
     const channel = teleprompterChannelRef.current;
@@ -1417,8 +1660,13 @@ export default function App() {
     teleprompterFontSize,
     teleprompterOpacity,
     teleprompterWidth,
+    teleprompterHeight,
     teleprompterLocked,
     teleprompterResetSeq,
+    teleprompterFollowMode,
+    teleprompterVoskLang,
+    activeTeleprompterScriptId,
+    teleprompterSlimMode,
   ]);
 
   // Compact only when Start Recording with screen share; never on Capture Screen or Whiteboard
@@ -1518,8 +1766,19 @@ export default function App() {
         // Size from the capture **pane** (`preview`), not `compositeRef`. We set canvas inline width/height each
         // frame; reading composite.clientWidth created a feedback loop after window resize (stale size → black
         // margins showing the pane's bg-slate-900). PiP math still uses `captureLayoutEl.getBoundingClientRect()`.
-        prevW = Math.max(1, Math.round(preview.clientWidth));
-        prevH = Math.max(1, Math.round(preview.clientHeight));
+        const r = preview.getBoundingClientRect();
+        const rawW = quantizeCapturePanePx(r.width);
+        const rawH = quantizeCapturePanePx(r.height);
+        const st = screenSharePaneStableRef.current;
+        if (
+          !st ||
+          Math.abs(rawW - st.w) >= SCREEN_SHARE_PANE_DEADBAND_PX ||
+          Math.abs(rawH - st.h) >= SCREEN_SHARE_PANE_DEADBAND_PX
+        ) {
+          screenSharePaneStableRef.current = { w: rawW, h: rawH };
+        }
+        prevW = screenSharePaneStableRef.current!.w;
+        prevH = screenSharePaneStableRef.current!.h;
       } else if (wbOnlyRecording) {
         // Match on-screen CSS box (Mac/non-16:9): frozen wbSnap can be smaller than real layout → PiP scales up in export.
         const pr = preview.getBoundingClientRect();
@@ -1559,8 +1818,14 @@ export default function App() {
         composite.width = w;
         composite.height = h;
       }
-      composite.style.width = `${prevW}px`;
-      composite.style.height = `${prevH}px`;
+      // For live screen share preview, canvas is absolutely positioned with `h-full w-full`;
+      // writing pixel CSS sizes each frame can cause layout micro-jitter (visible as shake in capture).
+      if (!activeScreenStream || useRecordRes) {
+        const sw = `${prevW}px`;
+        const sh = `${prevH}px`;
+        if (composite.style.width !== sw) composite.style.width = sw;
+        if (composite.style.height !== sh) composite.style.height = sh;
+      }
       const ctx = composite.getContext("2d", { alpha: false });
       if (!ctx) return;
       ctx.imageSmoothingEnabled = true;
@@ -1568,38 +1833,59 @@ export default function App() {
       ctx.imageSmoothingQuality =
         useRecordRes && activeScreenStream ? "medium" : useRecordRes ? "high" : "medium";
       ctx.clearRect(0, 0, w, h);
-      const screenPersistent = persistentScreenVideoRef.current;
       const screenVisible = screenVideoRef.current;
+      const usableScreenVideo = (v: HTMLVideoElement | null) =>
+        v && v.srcObject && v.readyState >= 2 && v.videoWidth > 0 ? v : null;
       const videoForDraw =
-        activeScreenStream &&
-        screenVisible &&
-        screenVisible.srcObject &&
-        screenVisible.readyState >= 2 &&
-        screenVisible.videoWidth > 0
-          ? screenVisible
-          : screenPersistent;
+        activeScreenStream
+          ? usableScreenVideo(screenVisible) ?? screenVisible
+          : null;
 
       if (videoForDraw?.srcObject && videoForDraw.readyState >= 2) {
         drawLetterboxBg(ctx, letterboxBackground, w, h, letterboxCustomImgRef.current, letterboxMode);
-        const sw0 = videoForDraw.videoWidth || w;
-        const sh0 = videoForDraw.videoHeight || h;
+        let sw0 = Math.max(1, videoForDraw.videoWidth || w);
+        let sh0 = Math.max(1, videoForDraw.videoHeight || h);
+        if (activeScreenStream) {
+          const vt = activeScreenStream.getVideoTracks()[0];
+          const tid = vt?.id ?? "";
+          const prevI = screenShareStableIntrinsicRef.current;
+          if (!prevI || tid !== screenShareIntrinsicTrackIdRef.current) {
+            screenShareStableIntrinsicRef.current = { sw: sw0, sh: sh0 };
+            screenShareIntrinsicTrackIdRef.current = tid;
+          } else if (
+            Math.abs(sw0 - prevI.sw) > SCREEN_SHARE_INTRINSIC_JITTER_EPS_PX ||
+            Math.abs(sh0 - prevI.sh) > SCREEN_SHARE_INTRINSIC_JITTER_EPS_PX
+          ) {
+            screenShareStableIntrinsicRef.current = { sw: sw0, sh: sh0 };
+          }
+          const locked = screenShareStableIntrinsicRef.current;
+          if (locked) {
+            sw0 = locked.sw;
+            sh0 = locked.sh;
+          }
+        }
         /** Share window: uniform scale (contain) inside the frame — split-view preview used to stretch to the cell and looked squashed while resizing; recording already used contain. */
         const screenShareDrawContained = activeScreenStream;
         let trimmed: { sx: number; sy: number; sw: number; sh: number };
         if (activeScreenStream) {
-          const key = `${sw0}x${sh0}`;
-          screenTrimFrameRef.current += 1;
-          const cached = screenTrimCacheRef.current;
-          if (cached?.key === key && screenTrimFrameRef.current % SCREEN_TRIM_REFRESH_FRAMES !== 0) {
-            trimmed = cached.rect;
+          const screenVTrack = activeScreenStream.getVideoTracks()[0];
+          if (shouldSkipMacOSPaddingTrimForDisplaySurface(screenVTrack)) {
+            trimmed = { sx: 0, sy: 0, sw: sw0, sh: sh0 };
           } else {
-            const raw = trimMacOSScreenSharePadding(videoForDraw, sw0, sh0);
-            let next = snapScreenTrimRect(raw, sw0, sh0);
-            if (cached?.key === key) {
-              next = mergeStableScreenTrim(cached.rect, next);
+            const key = `${sw0}x${sh0}`;
+            screenTrimFrameRef.current += 1;
+            const cached = screenTrimCacheRef.current;
+            if (cached?.key === key && screenTrimFrameRef.current % SCREEN_TRIM_REFRESH_FRAMES !== 0) {
+              trimmed = cached.rect;
+            } else {
+              const raw = trimMacOSScreenSharePadding(videoForDraw, sw0, sh0);
+              let next = snapScreenTrimRect(raw, sw0, sh0);
+              if (cached?.key === key) {
+                next = mergeStableScreenTrim(cached.rect, next);
+              }
+              screenTrimCacheRef.current = { key, rect: next };
+              trimmed = next;
             }
-            screenTrimCacheRef.current = { key, rect: next };
-            trimmed = next;
           }
         } else {
           trimmed = { sx: 0, sy: 0, sw: sw0, sh: sh0 };
@@ -1643,17 +1929,49 @@ export default function App() {
             : Math.min(SHARE_WINDOW_CORNER_RADIUS_OUT_PX * scaleX, dw / 2, dh / 2);
           /** Share content uses contain inside target window: full content visible, may show bars. */
           const scaleIn = Math.min(dw / Math.max(1, sw), dh / Math.max(1, sh));
-          const tw = sw * scaleIn;
-          const th = sh * scaleIn;
-          const tx = Math.round(dx + (dw - tw) / 2);
-          const ty = Math.round(dy + (dh - th) / 2);
+          const tw0 = sw * scaleIn;
+          const th0 = sh * scaleIn;
+          let tx = Math.round(dx + (dw - tw0) / 2);
+          let ty = Math.round(dy + (dh - th0) / 2);
+          let tw = Math.max(1, Math.round(tw0));
+          let th = Math.max(1, Math.round(th0));
+          if (!useRecordRes) {
+            const trimKey = `${sx},${sy},${sw},${sh}`;
+            const prevDest = screenShareDrawDestRef.current;
+            const JITTER_EPS = SCREEN_SHARE_DEST_JITTER_EPS_PX;
+            if (
+              prevDest &&
+              prevDest.trimKey === trimKey &&
+              Math.abs(tx - prevDest.tx) <= JITTER_EPS &&
+              Math.abs(ty - prevDest.ty) <= JITTER_EPS &&
+              Math.abs(tw - prevDest.tw) <= JITTER_EPS &&
+              Math.abs(th - prevDest.th) <= JITTER_EPS
+            ) {
+              tx = prevDest.tx;
+              ty = prevDest.ty;
+              tw = prevDest.tw;
+              th = prevDest.th;
+            } else {
+              screenShareDrawDestRef.current = { trimKey, tx, ty, tw, th };
+            }
+          }
           ctx.save();
           ctx.beginPath();
           roundRectPath(ctx, dx, dy, dw, dh, screenContentRad);
           ctx.clip();
           ctx.fillStyle = "#000000";
           ctx.fillRect(dx, dy, dw, dh);
-          ctx.drawImage(videoForDraw, sx, sy, sw, sh, tx, ty, tw, th);
+          {
+            const aw = videoForDraw.videoWidth || 1;
+            const ah = videoForDraw.videoHeight || 1;
+            let sxc = sx;
+            let syc = sy;
+            let swc = sw;
+            let shc = sh;
+            swc = Math.min(swc, Math.max(0, aw - sxc));
+            shc = Math.min(shc, Math.max(0, ah - syc));
+            ctx.drawImage(videoForDraw, sxc, syc, swc, shc, tx, ty, tw, th);
+          }
           ctx.restore();
           ctx.beginPath();
           roundRectPath(ctx, dx, dy, dw, dh, screenContentRad);
@@ -2091,7 +2409,10 @@ export default function App() {
         const drawH = rel.drawH;
         const dx = x + rel.dx;
         const dy = y + rel.dy;
-        if (pipSource instanceof HTMLVideoElement) {
+        const mirrorPipLikeVideo =
+          pipSource instanceof HTMLVideoElement ||
+          (pipSource instanceof HTMLCanvasElement && pipSource === overlayPip);
+        if (mirrorPipLikeVideo) {
           ctx.save();
           ctx.translate(dx + drawW, dy);
           ctx.scale(-1, 1);
@@ -2101,10 +2422,21 @@ export default function App() {
         } else {
           ctx.drawImage(pipSource, 0, 0, vw, vh, dx, dy, drawW, drawH);
         }
-        if (faceFilter !== "none" && !useAvatarImage && !pipIsPortalOverlay) {
+        if (
+          pipEffectBackend === "mediapipe" &&
+          faceFilter !== "none" &&
+          !useAvatarImage &&
+          !pipIsPortalOverlay
+        ) {
           try {
-            const lm = faceLandmarksRef.current ?? (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS ? lastValidLandmarksRef.current : null);
-            drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true);
+            const lm =
+              faceLandmarksRef.current ??
+              (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS
+                ? lastValidLandmarksRef.current
+                : null);
+            const nowMs = performance.now();
+            ctx.filter = "none";
+            drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true, nowMs);
           } catch {
             /* face filter may fail if landmarks invalid */
           }
@@ -2173,6 +2505,7 @@ export default function App() {
       beautyMode,
       beautySettings,
       faceFilter,
+      pipEffectBackend,
       activeScreenStream,
       cameraStream,
       recordOutputDimensions,
@@ -2197,6 +2530,35 @@ export default function App() {
 
   const drawCompositeRef = useRef(drawComposite);
   drawCompositeRef.current = drawComposite;
+
+  useEffect(() => {
+    if (!letterboxCustomImage) {
+      letterboxCustomImgRef.current = null;
+      queueMicrotask(() => drawCompositeRef.current?.());
+      return;
+    }
+    const img = new Image();
+    const url = letterboxCustomImage;
+    if (url.startsWith("http:") || url.startsWith("https:") || url.startsWith("blob:")) {
+      img.crossOrigin = "anonymous";
+    }
+    img.onload = () => {
+      letterboxCustomImgRef.current = img;
+      queueMicrotask(() => drawCompositeRef.current?.());
+    };
+    img.onerror = () => {
+      letterboxCustomImgRef.current = null;
+      queueMicrotask(() => drawCompositeRef.current?.());
+    };
+    img.src = url;
+    if (img.complete && img.naturalWidth > 0) {
+      letterboxCustomImgRef.current = img;
+      queueMicrotask(() => drawCompositeRef.current?.());
+    }
+    return () => {
+      letterboxCustomImgRef.current = null;
+    };
+  }, [letterboxCustomImage]);
 
   useEffect(() => {
     drawCompositeRef.current?.();
@@ -2295,18 +2657,23 @@ export default function App() {
   const showCameraSourceVideo = showPip && (!fullPageWhiteboard || isRecording || !!cameraStream);
   const drawCameraOverlay = useCallback(() => {
     const canvas = cameraOverlayRef.current;
-    // Prefer cameraSourceVideoRef when fullPageWhiteboard: it has fixed size, avoids resize delay on shape change
-    const video = fullPageWhiteboard ? (cameraSourceVideoRef.current ?? cameraVideoRef.current) : (cameraVideoRef.current ?? cameraSourceVideoRef.current);
+    const video = pickDecodedCameraVideo(cameraVideoRef.current, cameraSourceVideoRef.current);
     const img = avatarImgRef.current;
-    if (!canvas || (!video?.srcObject && !img?.complete)) return;
+    const snapCanvas =
+      pipEffectBackend === "snap" ? snapLiveCanvasRef.current : null;
     const useAvatarImage = showPip && !!avatarImageSrc && img?.complete;
-    const videoReadyForOverlay =
-      !!video?.srcObject &&
-      (video.readyState >= 2 ||
-        (isRecording && video.readyState >= 1 && video.videoWidth > 0));
-    const useCamera = showPip && !useAvatarImage && videoReadyForOverlay;
-    const pipSource = useAvatarImage ? img : video;
-    if (!pipSource || (!useAvatarImage && !useCamera)) return;
+    const useSnapCanvas =
+      showPip &&
+      pipEffectBackend === "snap" &&
+      !useAvatarImage &&
+      !!snapCanvas &&
+      snapCanvas.width > 0 &&
+      snapCanvas.height > 0;
+    const videoReadyForOverlay = cameraVideoReadableForPipEffects(video);
+    const useCamera =
+      showPip && !useAvatarImage && pipEffectBackend !== "snap" && videoReadyForOverlay;
+    if (!canvas) return;
+    if (!useAvatarImage && !useCamera && !useSnapCanvas) return;
     // PiP overlay is small — cap DPR so decode+draw+filters cost less during drag / whiteboard pan.
     const dpr = Math.min(1.5, window.devicePixelRatio || 1);
     const w = Math.round(avatarWidthDisplay * dpr);
@@ -2335,13 +2702,23 @@ export default function App() {
     ctx.clip();
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, pw, ph);
-    if (beautyMode) ctx.filter = beautySettingsToFilter(beautySettings);
+    if (beautyMode && !useSnapCanvas) ctx.filter = beautySettingsToFilter(beautySettings);
     if (useAvatarImage && img?.naturalWidth) {
       const s = Math.max(pw / img.naturalWidth, ph / img.naturalHeight);
       const sw = img.naturalWidth * s;
       const sh = img.naturalHeight * s;
       ctx.drawImage(img, (pw - sw) / 2, (ph - sh) / 2, sw, sh);
-    } else if (pipSource && video) {
+    } else if (useSnapCanvas && snapCanvas) {
+      const cw = snapCanvas.width;
+      const ch = snapCanvas.height;
+      const { drawW, drawH, dx, dy } = pipScaleForVideo(pw, ph, cw, ch);
+      ctx.save();
+      ctx.translate(dx + drawW, dy);
+      ctx.scale(-1, 1);
+      ctx.translate(-dx, -dy);
+      ctx.drawImage(snapCanvas, 0, 0, cw, ch, dx, dy, drawW, drawH);
+      ctx.restore();
+    } else if (useCamera && video) {
       const vw = video.videoWidth || pw;
       const vh = video.videoHeight || ph;
       const { drawW, drawH, dx, dy } = pipScaleForVideo(pw, ph, vw, vh);
@@ -2351,10 +2728,16 @@ export default function App() {
       ctx.translate(-dx, -dy);
       ctx.drawImage(video, 0, 0, vw, vh, dx, dy, drawW, drawH);
       ctx.restore();
-      if (faceFilter !== "none") {
+      if (pipEffectBackend === "mediapipe" && faceFilter !== "none") {
         try {
-          const lm = faceLandmarksRef.current ?? (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS ? lastValidLandmarksRef.current : null);
-          drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true);
+          const lm =
+            faceLandmarksRef.current ??
+            (performance.now() - lastValidLandmarksAtRef.current < LANDMARK_PERSIST_MS
+              ? lastValidLandmarksRef.current
+              : null);
+          const nowMs = performance.now();
+          ctx.filter = "none";
+          drawFaceFilter(ctx, lm, faceFilter, dx, dy, drawW, drawH, true, nowMs);
         } catch {
           /* face filter may fail if landmarks invalid */
         }
@@ -2399,6 +2782,7 @@ export default function App() {
     beautyMode,
     beautySettings,
     faceFilter,
+    pipEffectBackend,
     avatarWidthDisplay,
     avatarHeightDisplay,
     fullPageWhiteboard,
@@ -2432,71 +2816,17 @@ export default function App() {
     prevMainPreviewSizeRef.current = current;
   }, [fullPageWhiteboard, showPip, pipDragging, isRecording, mainLayoutPortalRect]);
 
-  // Face detection for sunglasses/heart/vampire filter
   useEffect(() => {
-    if (faceFilter === "none" || !showPip || avatarImageSrc) {
+    if (
+      faceFilter === "none" ||
+      !showPip ||
+      avatarImageSrc ||
+      pipEffectBackend !== "mediapipe"
+    ) {
       faceLandmarksRef.current = null;
       lastValidLandmarksRef.current = null;
-      return;
     }
-    const pickVideo = () =>
-      fullPageWhiteboard
-        ? (cameraSourceVideoRef.current ?? cameraVideoRef.current)
-        : (cameraVideoRef.current ?? cameraSourceVideoRef.current);
-    // Don't return early if video lacks srcObject - camera stream effect may run after this.
-    // The loop will wait for v.srcObject and v.readyState >= 2 before detecting.
-    let cancelled = false;
-    let rafId = 0;
-    const run = async () => {
-      try {
-        const landmarker = await initFaceLandmarker();
-        if (cancelled) return;
-        let detectFrame = 0;
-        const loop = () => {
-          if (cancelled) return;
-          if (previewBoxDraggingRef.current) {
-            rafId = requestAnimationFrame(loop);
-            return;
-          }
-          const v = pickVideo();
-          if (!v?.srcObject || v.readyState < 2) {
-            rafId = requestAnimationFrame(loop);
-            return;
-          }
-          try {
-            // ~½ MediaPipe calls: landmarks are smoothed; saves CPU while PiP + Excalidraw compete for the main thread.
-            if (detectFrame++ % 2 === 0) {
-              const result = landmarker.detectForVideo(v, nextVideoTimestamp());
-              if (result?.faceLandmarks?.[0]) {
-                const smoothed = smoothLandmarksForFilter(
-                  result.faceLandmarks[0],
-                  pipDraggingRef.current ? 0.93 : undefined
-                );
-                faceLandmarksRef.current = smoothed;
-                lastValidLandmarksRef.current = smoothed;
-                lastValidLandmarksAtRef.current = performance.now();
-              } else {
-                faceLandmarksRef.current = null;
-              }
-            }
-          } catch {
-            faceLandmarksRef.current = null;
-          }
-          rafId = requestAnimationFrame(loop);
-        };
-        rafId = requestAnimationFrame(loop);
-      } catch {
-        faceLandmarksRef.current = null;
-      }
-    };
-    void run();
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId);
-      faceLandmarksRef.current = null;
-      lastValidLandmarksRef.current = null;
-    };
-  }, [faceFilter, showPip, avatarImageSrc, cameraStream, fullPageWhiteboard]);
+  }, [faceFilter, showPip, avatarImageSrc, pipEffectBackend]);
 
   useEffect(() => {
     if (!showPip || pipDragging || isRecording) return;
@@ -2635,8 +2965,7 @@ export default function App() {
     splitPanelDragActiveRef.current = false;
     splitDragSessionRef.current = false;
     setWhiteboardPanelWidth(w);
-    const stream =
-      !!activeScreenStreamRef.current || !!persistentScreenVideoRef.current?.srcObject;
+    const stream = !!activeScreenStreamRef.current;
     const captureMainLayout =
       (stream || (captureMainNoStreamRef.current && !exitSqueeze)) &&
       !(stream && preferWhiteboardMainRef.current);
@@ -2700,7 +3029,7 @@ export default function App() {
     const wb = fullPageContentRef.current;
     if (!tri) return;
     let spx = Math.max(SPLIT_STRIP_MIN_PX, Math.round(whiteboardPanelWidthRef.current));
-    const hasStream = !!activeScreenStream || !!persistentScreenVideoRef.current?.srcObject;
+    const hasStream = !!activeScreenStream;
     const splitMain =
       (hasStream || captureMainNoStream) && !(hasStream && preferWhiteboardMain);
     const cw = contentAreaRef.current?.offsetWidth ?? 0;
@@ -3010,7 +3339,7 @@ export default function App() {
     if (fpSnap.x !== fullPagePipPos.x || fpSnap.y !== fullPagePipPos.y) {
       setFullPagePipPos(fpSnap);
     }
-    const hasContent = activeScreenStream || persistentScreenVideoRef.current?.srcObject || showPip;
+    const hasContent = activeScreenStream || showPip;
     if (!hasContent) {
       return;
     }
@@ -3077,14 +3406,19 @@ export default function App() {
         const comp = compositeRef.current;
         if (fullPageWhiteboard && rec && comp && rec.width > 0 && rec.height > 0) {
           const prevEl = previewRef.current;
+          const stPane = screenSharePaneStableRef.current;
           const pw =
-            activeScreenStreamRef.current && prevEl
-              ? Math.max(1, prevEl.clientWidth)
-              : contentAreaRef.current?.offsetWidth ?? rec.width;
+            activeScreenStreamRef.current && prevEl && stPane
+              ? stPane.w
+              : activeScreenStreamRef.current && prevEl
+                ? quantizeCapturePanePx(prevEl.getBoundingClientRect().width)
+                : contentAreaRef.current?.offsetWidth ?? rec.width;
           const ph =
-            activeScreenStreamRef.current && prevEl
-              ? Math.max(1, prevEl.clientHeight)
-              : contentAreaRef.current?.offsetHeight ?? rec.height;
+            activeScreenStreamRef.current && prevEl && stPane
+              ? stPane.h
+              : activeScreenStreamRef.current && prevEl
+                ? quantizeCapturePanePx(prevEl.getBoundingClientRect().height)
+                : contentAreaRef.current?.offsetHeight ?? rec.height;
           if (activeScreenStreamRef.current && prevEl) {
             const compW = Math.max(1, Math.round(pw));
             const compH = Math.max(1, Math.round(ph));
@@ -3092,8 +3426,10 @@ export default function App() {
               comp.width = compW;
               comp.height = compH;
             }
-            comp.style.width = `${pw}px`;
-            comp.style.height = `${ph}px`;
+            const csw = `${pw}px`;
+            const csh = `${ph}px`;
+            if (comp.style.width !== csw) comp.style.width = csw;
+            if (comp.style.height !== csh) comp.style.height = csh;
           } else {
             if (comp.width !== rec.width || comp.height !== rec.height) {
               comp.width = rec.width;
@@ -3423,9 +3759,6 @@ export default function App() {
     setWhiteboardScreenStream(null);
     setPreviewScreenStream(null);
     setPreferWhiteboardMain(false);
-    if (persistentScreenVideoRef.current?.srcObject) {
-      persistentScreenVideoRef.current.srcObject = null;
-    }
     if (screenVideoRef.current?.srcObject) {
       screenVideoRef.current.srcObject = null;
     }
@@ -3539,7 +3872,7 @@ export default function App() {
       return;
     }
 
-    const stream = !!activeScreenStreamRef.current || !!persistentScreenVideoRef.current?.srcObject;
+    const stream = !!activeScreenStreamRef.current;
     const captureMain =
       (stream || captureMainNoStreamRef.current) && !(stream && preferWhiteboardMainRef.current);
 
@@ -3774,19 +4107,8 @@ export default function App() {
     }
   };
 
-  // Persistent screen video: always mounted so stream survives layout switches (Whiteboard <-> Preview)
-  useEffect(() => {
-    const v = persistentScreenVideoRef.current;
-    if (!v) return;
-    if (activeScreenStream) {
-      v.srcObject = activeScreenStream;
-      v.play().catch(() => {});
-    } else {
-      v.srcObject = null;
-    }
-  }, [activeScreenStream]);
-
-  // Sync layout-specific video from persistent ref for display; drawComposite uses persistent ref
+  // Screen share decode: use a single <video> element (`screenVideoRef`) to avoid dual-decoding the same stream,
+  // which can trigger global UI jitter (menu bar capture indicator / QuickTime HUD) on macOS.
   useEffect(() => {
     const v = screenVideoRef.current;
     if (!v) return;
@@ -3914,36 +4236,55 @@ export default function App() {
   // Preview loop: PiP overlay canvas + in-app composite. While recording + Capture Screen, still refresh the
   // overlay when the portal is visible (PiP on whiteboard) so beauty/filter/wide-aspect paint does not stall.
   useEffect(() => {
-    if (!showPip || avatarImageSrc) return;
+    if (!showPip) return;
+    /** Static avatar image is drawn on the overlay canvas (z above video/img); skipping this loop left the canvas blank and hid the image. */
+    const pipWantsCameraOverlay =
+      !!avatarImageSrc ||
+      faceFilter !== "none" ||
+      pipEffectBackend === "snap";
     const shouldDrawCameraOverlayCanvas =
       (!(fullPageWhiteboard && activeScreenStream) && outsideForPipOverlay) ||
-      (fullPageWhiteboard && activeScreenStream && faceFilter !== "none" && !avatarImageSrc) ||
+      (fullPageWhiteboard && activeScreenStream && pipWantsCameraOverlay) ||
       (fullPageWhiteboard && !activeScreenStream && showPip) ||
-      (showPip && !activeScreenStream && faceFilter !== "none" && !!mainLayoutPortalRect) ||
-      (faceFilter !== "none" && showPip);
-    const needsCompositePreview = !(fullPageWhiteboard && !activeScreenStream);
+      (showPip && !activeScreenStream && pipWantsCameraOverlay && !!mainLayoutPortalRect) ||
+      (pipWantsCameraOverlay && showPip);
+    // Live screen share preview: prefer showing the shared <video> directly (no canvas composite)
+    // to reduce GPU/CPU contention that can manifest as global UI flicker (menu bar capture indicator).
+    const needsCompositePreview =
+      !(fullPageWhiteboard && !activeScreenStream) &&
+      !(!isRecording && !!activeScreenStream);
+    // When screen sharing and not recording, avoid repainting overlay every rAF unless it actually has effects.
+    const shouldDrawOverlayAtAll = !activeScreenStream || isRecording || pipWantsCameraOverlay;
     const drawOverlayWhileRecording =
       shouldDrawCameraOverlayCanvas &&
       (!isRecording ||
         !activeScreenStream ||
         outsideForPipOverlay ||
-        (fullPageWhiteboard && activeScreenStream && faceFilter !== "none"));
+        (fullPageWhiteboard && activeScreenStream && pipWantsCameraOverlay));
     let id: number;
     const loop = () => {
       const now = performance.now();
       const gesturing = pipDraggingRef.current || previewBoxDraggingRef.current;
-      const minStepMs = pipDraggingRef.current ? 0 : gesturing ? 56 : isRecording ? 48 : 40;
+      const minStepMs = pipDraggingRef.current
+        ? 0
+        : gesturing
+          ? 56
+          : isRecording
+            ? 48
+            : activeScreenStreamRef.current
+              ? 96
+              : 40;
       if (now - previewLoopLastAtRef.current < minStepMs) {
         id = requestAnimationFrame(loop);
         return;
       }
       previewLoopLastAtRef.current = now;
       if (fullPageWhiteboard) {
-        if (drawOverlayWhileRecording) drawCameraOverlayRef.current?.();
+        if (shouldDrawOverlayAtAll && drawOverlayWhileRecording) drawCameraOverlayRef.current?.();
         if (!isRecording && needsCompositePreview) drawCompositeRef.current?.();
       } else {
-        if (drawOverlayWhileRecording) drawCameraOverlayRef.current?.();
-        if (!isRecording) drawCompositeRef.current?.();
+        if (shouldDrawOverlayAtAll && drawOverlayWhileRecording) drawCameraOverlayRef.current?.();
+        if (!isRecording && needsCompositePreview) drawCompositeRef.current?.();
       }
       id = requestAnimationFrame(loop);
     };
@@ -3957,33 +4298,53 @@ export default function App() {
     fullPageWhiteboard,
     activeScreenStream,
     faceFilter,
+    pipEffectBackend,
     mainLayoutPortalRect,
     outsideForPipOverlay,
     pipDragging,
   ]);
 
-  // Full-page whiteboard composite only when PiP preview loop above is off (e.g. static image avatar instead of camera).
+  // Screen share live preview: draw composite on actual video frames (avoids CSS contain rounding jitter with Presenter Overlay).
   useEffect(() => {
-    if (!fullPageWhiteboard || isRecording) return;
-    if (!activeScreenStream && !showPip) return;
-    if (showPip && !avatarImageSrc) return;
-    // After the checks above, any remaining path with **no** screen share implies drawComposite early-returns
-    // (idle whiteboard + no capture) — spinning rAF here only contended with Excalidraw for no visual gain.
-    if (!activeScreenStream) return;
-    let id: number;
-    const loop = () => {
-      const now = performance.now();
-      if (now - previewLoopLastAtRef.current < 40) {
-        id = requestAnimationFrame(loop);
-        return;
+    if (!activeScreenStream || isRecording) return;
+    const v = screenVideoRef.current;
+    if (!v) return;
+    let stopped = false;
+    let rafId = 0;
+    let lastAt = 0;
+    const MIN_MS = 1000 / 15;
+
+    const tick = (now: number) => {
+      if (stopped) return;
+      if (now - lastAt >= MIN_MS) {
+        lastAt = now;
+        try {
+          drawCompositeRef.current?.(false);
+        } catch {
+          /* ignore draw errors */
+        }
       }
-      previewLoopLastAtRef.current = now;
-      drawCompositeRef.current?.();
-      id = requestAnimationFrame(loop);
+      // Prefer requestVideoFrameCallback when available; fallback to rAF.
+      if (typeof (v as HTMLVideoElement & { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === "function") {
+        (v as HTMLVideoElement & { requestVideoFrameCallback: (cb: (now: number) => void) => number }).requestVideoFrameCallback(
+          tick
+        );
+      } else {
+        rafId = requestAnimationFrame(tick);
+      }
     };
-    id = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(id);
-  }, [fullPageWhiteboard, isRecording, activeScreenStream, showPip, avatarImageSrc]);
+
+    // Kick once the video is ready.
+    const start = () => tick(performance.now());
+    if (v.readyState >= 2) start();
+    else v.addEventListener("loadeddata", start, { once: true });
+
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(rafId);
+      v.removeEventListener("loadeddata", start as EventListener);
+    };
+  }, [activeScreenStream, isRecording]);
 
   // Whiteboard-only recording: prefer stacking Excalidraw's on-screen canvases (follows zoom/pan).
   // Fallback: exportToCanvas when composite fails. Scene changes trigger immediate re-export via onSceneChange.
@@ -4159,6 +4520,7 @@ export default function App() {
       beautyMode,
       beautySettings,
       faceFilter,
+      pipEffectBackend,
       recordResolution,
       shareWindowFillPercent,
       letterboxBackground,
@@ -4187,6 +4549,7 @@ export default function App() {
       beautyMode,
       beautySettings,
       faceFilter,
+      pipEffectBackend,
       recordResolution,
       shareWindowFillPercent,
       letterboxBackground,
@@ -4443,8 +4806,19 @@ export default function App() {
       const target = e.target as HTMLElement;
       const el = target?.nodeType === Node.ELEMENT_NODE ? target : (target as Node).parentElement as HTMLElement;
       if (target?.closest?.('[role="dialog"], [data-modal-overlay]')) return;
-      // Let header/RecordingControls (data-dreamwork-no-intercept) handle their own clicks
+      // Let header/RecordingControls / Teleprompter (data-dreamwork-no-intercept) handle their own clicks.
+      // `target` alone is wrong when a child uses pointer-events-none: the hit falls through to Capture
+      // canvas/video beneath the panel, so also check the full stack at this point.
       if (target?.closest?.('[data-dreamwork-no-intercept]')) return;
+      if (
+        typeof e.clientX === "number" &&
+        typeof e.clientY === "number" &&
+        document.elementsFromPoint(e.clientX, e.clientY).some(
+          (node) => node instanceof Element && node.closest?.("[data-dreamwork-no-intercept]"),
+        )
+      ) {
+        return;
+      }
       // Geometric fallback: never intercept clicks in top 100px (header area)
       if (e.clientY < 100) return;
       if (!showPip) return;
@@ -4643,18 +5017,26 @@ export default function App() {
 
   const splitGridFallback = splitGridTemplate(stripPxForGrid, splitMainIsCapture);
 
+  /** Slim UI lives in a dedicated Electron window — do not duplicate in the main webview. */
+  const teleprompterSlimInOwnBrowserWindow = isElectron && teleprompterSlimMode;
+
   return (
     <>
       {typeof document !== "undefined" && createPortal(headerEl, document.getElementById("dreamwork-header-root") ?? document.body)}
       <TeleprompterErrorBoundary
-        key={`teleprompter-${teleprompterResetSeq}`}
         onCrash={() => {
           setShowTeleprompter(false);
           setTeleprompterPlaying(false);
+          setTeleprompterFollowMode(false);
+          setTeleprompterSlimMode(false);
         }}
       >
         <TeleprompterOverlay
-          isVisible={showTeleprompter && !detachedHelpersEnabled}
+          isVisible={
+            showTeleprompter &&
+            (!detachedHelpersEnabled || teleprompterSlimMode) &&
+            !teleprompterSlimInOwnBrowserWindow
+          }
           script={teleprompterScript}
           isPlaying={teleprompterPlaying}
           speed={teleprompterSpeed}
@@ -4664,7 +5046,11 @@ export default function App() {
           overlayHeight={teleprompterHeight}
           nearCamera={teleprompterNearCamera}
           anchorRect={teleprompterAnchorRect}
+          dockColumnRect={null}
           position={teleprompterPosition}
+          muteVoskForDetachedHelper={
+            (detachedHelpersEnabled && !teleprompterSlimMode) || teleprompterSlimInOwnBrowserWindow
+          }
           locked={teleprompterLocked}
           resetSignal={teleprompterResetSeq}
           editorScrollRatio={teleprompterEditorScrollRatio}
@@ -4684,11 +5070,15 @@ export default function App() {
           onHide={() => {
             setShowTeleprompter(false);
             setTeleprompterPlaying(false);
+            setTeleprompterFollowMode(false);
+            setTeleprompterSlimMode(false);
           }}
           onNudgeSpeed={(delta) => setTeleprompterSpeed((prev) => Math.max(10, Math.min(80, prev + delta)))}
+          voskLang={teleprompterVoskLang}
+          followScriptIdentity={activeTeleprompterScriptId}
         />
         <TeleprompterPanel
-          isVisible={showTeleprompter && !detachedHelpersEnabled}
+          isVisible={showTeleprompter}
           isPlaying={teleprompterPlaying}
           script={teleprompterScript}
           scripts={teleprompterScripts}
@@ -4724,6 +5114,8 @@ export default function App() {
           onHide={() => {
             setShowTeleprompter(false);
             setTeleprompterPlaying(false);
+            setTeleprompterFollowMode(false);
+            setTeleprompterSlimMode(false);
           }}
           onEditorScroll={(ratio) => {
             setTeleprompterEditorScrollRatio(ratio);
@@ -4732,6 +5124,8 @@ export default function App() {
           onFlushSave={flushTeleprompterSave}
           followMode={teleprompterFollowMode}
           onSetFollowMode={setTeleprompterFollowMode}
+          voskLang={teleprompterVoskLang}
+          onSetVoskLang={setTeleprompterVoskLang}
         />
       </TeleprompterErrorBoundary>
       {showLiveMeetingModal && (
@@ -4759,16 +5153,7 @@ export default function App() {
           </Suspense>
         </LiveMeetingErrorBoundary>
       )}
-      {/* Persistent screen video: never unmounts so stream survives Whiteboard <-> Preview navigation */}
-      <video
-        ref={persistentScreenVideoRef}
-        autoPlay
-        muted
-        playsInline
-        className={`fixed pointer-events-none ${isRecording && activeScreenStream ? "opacity-[0.01]" : "opacity-0"}`}
-        style={{ width: 2, height: 2, left: -9999, top: 0, zIndex: -50 }}
-        aria-hidden
-      />
+      {/* (Removed) Persistent screen video: dual-decoding caused global jitter on macOS window capture. */}
       {/* Persistent camera source: keep active during recording to avoid decode drops (readyState=0 flashes). */}
       {showCameraSourceVideo && (
       <video
@@ -4788,8 +5173,10 @@ export default function App() {
           /* opacity:0 avoids “almost transparent” layers (0.001) that sporadically composite wrong on Electron */
           opacity: 0,
         }}
-        onLoadedMetadata={(e) => {
-          setTimeout(() => e.currentTarget.play().catch(() => {}), 50);
+        onLoadedMetadata={() => {
+          setTimeout(() => {
+            cameraSourceVideoRef.current?.play().catch(() => {});
+          }, 50);
         }}
         aria-hidden
       />
@@ -4966,6 +5353,9 @@ export default function App() {
                   onBeautySettingsChange={setBeautySettings}
                   faceFilter={faceFilter}
                   onFaceFilterChange={setFaceFilter}
+                  pipEffectBackend={pipEffectBackend}
+                  onPipEffectBackendChange={setPipEffectBackend}
+                  snapCameraKitOptionAvailable={snapCameraKitEnvConfigured()}
                   micVolume={micVolume}
                   onMicVolumeChange={setMicVolume}
                   systemVolume={systemVolume}
@@ -5106,22 +5496,47 @@ export default function App() {
               onPointerDownCapture={handlePreviewPointerDown}
             >
               {/* Clip video only — base = output-aspect mat inside cell; target = Share% of base (uniform). */}
-              <div className="absolute inset-0 z-[1] flex min-h-0 min-w-0 items-center justify-center overflow-hidden rounded-[14px]">
+              {/* NOTE: inner clip edge (overflow/rounded) caused an extra “frame line” + jitter with Presenter Overlay. */}
+              <div className="absolute inset-0 z-[1] flex min-h-0 min-w-0 items-center justify-center">
                 <div className="relative flex h-full w-full min-h-0 min-w-0 flex-col items-center justify-center">
+                  {/* Letterbox background for live preview (canvas composite draws it only while recording). */}
+                  <div
+                    className="pointer-events-none absolute inset-0 z-0 h-full w-full"
+                    style={{
+                      backgroundColor: letterboxBackground === "black" ? "#000000" : "#000000",
+                      backgroundImage:
+                        letterboxBackground === "custom" && letterboxCustomImage
+                          ? `url(${letterboxCustomImage})`
+                          : undefined,
+                      backgroundRepeat: "no-repeat",
+                      backgroundPosition: "center",
+                      backgroundSize:
+                        letterboxMode === "fit"
+                          ? "contain"
+                          : letterboxMode === "crop"
+                            ? "cover"
+                            : "cover",
+                    }}
+                    aria-hidden
+                  />
                   {activeScreenStream && (
                     <canvas
                       ref={compositeRef}
-                      className="pointer-events-none absolute inset-0 z-0 h-full w-full"
+                      className="pointer-events-none absolute inset-0 z-[2] h-full w-full"
                       style={{ visibility: "visible" }}
                     />
                   )}
+                  {/* Screen-share video element: single decode source. Canvas draws it for live preview. */}
                   <video
                     ref={screenVideoRef}
-                    className={`pointer-events-none absolute inset-0 z-[1] h-full w-full object-contain ${isRecording && activeScreenStream ? "opacity-[0.01]" : "opacity-0"}`}
+                    className={`pointer-events-none absolute inset-0 z-[1] h-full w-full object-contain ${
+                      activeScreenStream ? "opacity-0" : "opacity-0"
+                    }`}
                     autoPlay
                     muted
                     playsInline
                     onLoadedData={() => drawComposite()}
+                    aria-hidden
                   />
                 </div>
               </div>
@@ -5185,7 +5600,8 @@ export default function App() {
                 {/* Capture Screen: skip mount-by-outside overlay (beauty uses CircularWebcam CSS) — mounting here caused boundary blink. Face filter still needs canvas. */}
                 {((!(fullPageWhiteboard && activeScreenStream) && outsideForPipOverlay) ||
                   (!activeScreenStream && !avatarImageSrc) ||
-                  (faceFilter !== "none" && !avatarImageSrc)) && (
+                  ((!avatarImageSrc && faceFilter !== "none") ||
+                    (!avatarImageSrc && pipEffectBackend === "snap"))) && (
                   <canvas
                     key={`overlay-${avatarShape}-${avatarDecor}-${avatarWidthDisplay}-${avatarHeightDisplay}`}
                     ref={cameraOverlayRef}
@@ -5196,6 +5612,7 @@ export default function App() {
                     }}
                   />
                 )}
+                {snapPipPortalLayer}
                 {/* Drag overlay: on top for pointer events */}
                 <div
                   style={{
@@ -5210,7 +5627,7 @@ export default function App() {
                   aria-label="Drag to move camera"
                 />
                 <CircularWebcam
-                  hidden={false}
+                  hidden={pipEffectBackend === "snap" && !avatarImageSrc}
                   forceCanvasDisplay={false}
                   useExternalVideo={false}
                   useCanvasForDisplay={false}
@@ -5231,6 +5648,7 @@ export default function App() {
                   cameraVideoRef={cameraVideoRef}
                   avatarImgRef={avatarImgRef}
                   suppressHeavyShadow={isRecording && wbOnlyUi}
+                  onAvatarImageLoad={() => drawCameraOverlayRef.current?.()}
                 />
               </div>,
               document.body

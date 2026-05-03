@@ -1,7 +1,28 @@
-import type { PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from "react";
+import { createPortal } from "react-dom";
 import { GlassButton } from "@/components/Glass";
+import { useVoskTeleprompterFollow, type TeleprompterVoskLang } from "@/hooks/useVoskTeleprompterFollow";
+import { handleTeleprompterFollowToggle } from "@/lib/teleprompterVoiceFollowAudio";
+import {
+  TeleprompterReadonlyDoc,
+  type TeleprompterReadonlyDocHandle,
+} from "@/components/TeleprompterReadonlyDoc";
+import { TeleprompterScriptEditor, type TeleprompterScriptEditorHandle } from "@/components/TeleprompterScriptEditor";
+import { collapseBlankLines } from "@/lib/teleprompterMarkdown";
+import { TELEPROMPTER_EDITOR_HTML_CLASS } from "@/lib/teleprompterTiptapExtensions";
+import { normalizeTeleprompterImportedText } from "@/lib/teleprompterImport";
 import { DREAMWORK_FLUSH_TELEPROMPTER_DRAFT } from "@/lib/storage";
+import { followScrollFraction, readCharsForFollowScrollFraction } from "@/lib/teleprompterFollowPlainMap";
+import {
+  FOLLOW_SCROLL_TOP_GHOST_LT,
+  FOLLOW_SCROLL_TOP_RESTORE_LAST_GT,
+  isCollapsedLayout,
+  shouldRestoreFollowScrollTop,
+} from "@/lib/teleprompterFollowScrollGuards";
+
+/** After manual seek applies, resume line-anchor scroll before generic scroll bumpPause (8s). */
+const FOLLOW_MANUAL_ANCHOR_RESUME_MS = 900;
 
 interface AnchorRect {
   left: number;
@@ -9,6 +30,12 @@ interface AnchorRect {
   width: number;
   height: number;
 }
+
+// #region agent log
+let _dwKaraokeLogTs = 0;
+let _dwScrollGuardLogTs = 0;
+let _dwUserScrollLogTs = 0;
+// #endregion
 
 interface TeleprompterOverlayProps {
   isVisible: boolean;
@@ -37,6 +64,20 @@ interface TeleprompterOverlayProps {
   onReset: () => void;
   onHide: () => void;
   onNudgeSpeed: (delta: number) => void;
+  /** Vosk model language (userData/vosk-models/{en|zh|it}). */
+  voskLang?: TeleprompterVoskLang;
+  /** Stable id of the active script tab — avoids treating every keystroke as a new script for follow state. */
+  followScriptIdentity?: string;
+  /** Electron screen-share: constrain overlay to the whiteboard column rect (getBoundingClientRect). */
+  dockColumnRect?: AnchorRect | null;
+  /** When true, Vosk/mic follow runs in the detached helper window — disable here to avoid duplicate engines. */
+  muteVoskForDetachedHelper?: boolean;
+  /** Render inside Electron `teleprompter-helper` BrowserWindow (fill parent, no fixed viewport drag). */
+  embeddedInDetachedHelperWindow?: boolean;
+  /** Dedicated `teleprompter-slim` BrowserWindow — fill window; drag moves OS window, not in-page offset. */
+  embeddedInSlimBrowserWindow?: boolean;
+  /** When set with `embeddedInDetachedHelperWindow`, show model language selector next to Follow. */
+  onSetVoskLang?: (lang: TeleprompterVoskLang) => void;
 }
 
 interface TeleprompterScriptItem {
@@ -85,6 +126,8 @@ interface TeleprompterPanelProps {
   onEditorScroll?: (ratio: number) => void;
   followMode?: boolean;
   onSetFollowMode?: (on: boolean) => void;
+  voskLang?: TeleprompterVoskLang;
+  onSetVoskLang?: (lang: TeleprompterVoskLang) => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -98,9 +141,18 @@ function getViewportSize() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
+function isElectronVosk(): boolean {
+  if (typeof window === "undefined") return false;
+  const api = (window as unknown as { electronAPI?: { isElectron?: boolean; voskInit?: unknown; voskFeed?: unknown } })
+    .electronAPI;
+  if (!api?.voskInit || !api?.voskFeed) return false;
+  if (api.isElectron === false) return false;
+  return true;
+}
+
 function teleprompterNameFromFilename(filename: string): string {
   const base = filename.replace(/\\/g, "/").split("/").pop() ?? filename;
-  const stripped = base.replace(/\.(md|txt|markdown)$/i, "").trim();
+  const stripped = base.replace(/\.(md|txt|markdown|script)$/i, "").trim();
   return stripped.length > 0 ? stripped : "Imported";
 }
 
@@ -216,56 +268,6 @@ function useTeleprompterScroll({
   return { viewportRef, scrollContentRef, reset, addScrollDelta, scrollPxRef };
 }
 
-/**
- * Collapse Markdown-style blank lines for teleprompter display:
- *  - 3+ consecutive newlines (intentional spacing) → keep one blank line (\n\n)
- *  - exactly 2 consecutive newlines (Markdown paragraph break) → single newline (no gap)
- * Order matters: replace longer runs first, then pairs.
- */
-function collapseBlankLines(s: string): string {
-  return s.replace(/\n{3,}/g, "\n\n").replace(/\n\n/g, "\n");
-}
-
-/** Split script into sentence segments at sentence-ending punctuation and newlines. */
-function splitSentences(text: string): number[] {
-  const boundaries: number[] = [];
-  const sentenceEnd = /[。！？；.!?;]\s*|\n+/g;
-  let m: RegExpExecArray | null;
-  while ((m = sentenceEnd.exec(text)) !== null) {
-    const pos = m.index + m[0].length;
-    if (pos < text.length) boundaries.push(pos);
-  }
-  if (boundaries.length === 0 || boundaries[boundaries.length - 1] < text.length) {
-    boundaries.push(text.length);
-  }
-  return boundaries;
-}
-
-/**
- * Tap-to-advance follow mode: user presses Space or clicks to advance
- * the read position to the next sentence boundary.
- */
-function useTapFollow({ active, script }: { active: boolean; script: string }) {
-  const boundaries = useMemo(() => splitSentences(script), [script]);
-  const [segIndex, setSegIndex] = useState(0);
-
-  const readChars = active ? (segIndex > 0 ? boundaries[Math.min(segIndex - 1, boundaries.length - 1)] : 0) : 0;
-
-  const advance = useCallback(() => {
-    setSegIndex((i) => Math.min(i + 1, boundaries.length));
-  }, [boundaries.length]);
-
-  const reset = useCallback(() => {
-    setSegIndex(0);
-  }, []);
-
-  useEffect(() => {
-    if (!active) setSegIndex(0);
-  }, [active, script]);
-
-  return { readChars, advance, reset, segIndex, totalSegments: boundaries.length };
-}
-
 export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   isVisible,
   script,
@@ -281,8 +283,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   locked,
   resetSignal,
   editorScrollRatio,
-  followMode: _followMode,
-  onSetFollowMode: _onSetFollowMode,
+  followMode = false,
+  onSetFollowMode,
   slimMode,
   onSetSlimMode,
   onSetPlaying,
@@ -293,25 +295,486 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   onReset,
   onHide,
   onNudgeSpeed,
+  voskLang = "en",
+  followScriptIdentity,
+  dockColumnRect = null,
+  muteVoskForDetachedHelper = false,
+  embeddedInDetachedHelperWindow = false,
+  embeddedInSlimBrowserWindow = false,
+  onSetVoskLang,
 }: TeleprompterOverlayProps) {
-  const followMode = false; // disabled until speech model supports CJK
   const displayScript = useMemo(() => script ? collapseBlankLines(script) : "", [script]);
-  const { readChars, advance: followAdvance, reset: followReset, segIndex, totalSegments } = useTapFollow({ active: !!followMode && isVisible, script: displayScript });
-  const followContentRef = useRef<HTMLDivElement>(null);
+  /**
+   * Prefer tab id — never fall back to full `displayScript` (every keystroke changed the key → scrollTop=0).
+   * If `followScriptIdentity` briefly goes empty between renders, keep last non-empty id.
+   */
+  const lastNonEmptyFollowScriptIdRef = useRef<string | null>(null);
+  const rawFollowScriptId =
+    followScriptIdentity != null && followScriptIdentity.length > 0 ? followScriptIdentity : null;
+  if (rawFollowScriptId != null) {
+    lastNonEmptyFollowScriptIdRef.current = rawFollowScriptId;
+  }
+  const followIdentityKey =
+    rawFollowScriptId ?? lastNonEmptyFollowScriptIdRef.current ?? "__default_follow__";
+  const clampedWidth = embeddedInDetachedHelperWindow
+    ? Math.max(280, overlayWidth)
+    : Math.max(320, Math.min(900, overlayWidth));
+  const clampedHeight = embeddedInDetachedHelperWindow
+    ? Math.max(160, overlayHeight)
+    : Math.max(180, Math.min(500, overlayHeight));
+  const useDock =
+    dockColumnRect != null && dockColumnRect.width >= 8 && dockColumnRect.height >= 8;
+  const effectiveWidth = useDock
+    ? Math.min(clampedWidth, Math.max(280, dockColumnRect!.width - 16))
+    : clampedWidth;
+  const effectiveHeight = useDock
+    ? Math.min(clampedHeight, Math.max(180, dockColumnRect!.height - 16))
+    : clampedHeight;
+  const followLayoutSyncKey = useMemo(
+    () => `${effectiveWidth}x${effectiveHeight}x${fontSize}`,
+    [effectiveWidth, effectiveHeight, fontSize],
+  );
 
   useEffect(() => {
-    if (!followMode || readChars === 0) return;
-    const mark = followContentRef.current?.querySelector("[data-follow-cursor]");
-    if (!mark) return;
-    const viewport = mark.closest("[data-follow-viewport]") as HTMLElement | null;
-    if (!viewport) return;
-    const vRect = viewport.getBoundingClientRect();
-    const mRect = mark.getBoundingClientRect();
-    const target = mRect.top - vRect.top - vRect.height * 0.4;
-    if (Math.abs(target) > 10) {
-      viewport.scrollBy({ top: target, behavior: "smooth" });
+    // #region agent log
+    fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "dc7a9b" },
+      body: JSON.stringify({
+        sessionId: "dc7a9b",
+        location: "TeleprompterOverlay.tsx:scriptProps",
+        message: "overlay script visibility",
+        hypothesisId: "H2",
+        data: {
+          isVisible,
+          followMode,
+          rawScriptLen: script?.length ?? 0,
+          displayLen: displayScript.length,
+          opacity,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [isVisible, followMode, script, displayScript.length, opacity]);
+
+  const speechFollow = useVoskTeleprompterFollow({
+    active: !!followMode && !muteVoskForDetachedHelper,
+    script: displayScript,
+    lang: voskLang,
+    resetSignal,
+  });
+  const applyFollowAnchorRef = useRef<(n: number, opts?: { allowBackward?: boolean }) => void>(() => {});
+  applyFollowAnchorRef.current = speechFollow.applyScriptReadAnchor;
+  const readChars = followMode ? speechFollow.readChars : 0;
+  const readCharsTargetRef = useRef(0);
+  readCharsTargetRef.current = readChars;
+
+  const followVisRef = useRef(0);
+  const [followVisualChars, setFollowVisualChars] = useState(0);
+  followVisRef.current = followVisualChars;
+  const displayScriptFollowRef = useRef(displayScript);
+  displayScriptFollowRef.current = displayScript;
+  const voskLangFollowRef = useRef(voskLang);
+  voskLangFollowRef.current = voskLang;
+
+  /**
+   * Monotonic follow head for overlay karaoke: never snap back toward the first line after the user
+   * has read forward — Vosk/readEnd can spuriously drop to 0 at end-of-utterance or model churn.
+   * Allowed decreases: new script tab (`followIdentityKey`), or panel reset (`resetSignal` bump).
+   */
+  const followScriptKeyForMonotonicRef = useRef(followIdentityKey);
+  const prevResetSignalForFollowRef = useRef(resetSignal ?? 0);
+
+  useEffect(() => {
+    if (!followMode) {
+      followVisRef.current = readChars;
+      setFollowVisualChars(readChars);
+      return;
     }
-  }, [followMode, readChars]);
+    if (followScriptKeyForMonotonicRef.current !== followIdentityKey) {
+      followScriptKeyForMonotonicRef.current = followIdentityKey;
+      followVisRef.current = readChars;
+      setFollowVisualChars(readChars);
+      return;
+    }
+    const prevRs = prevResetSignalForFollowRef.current ?? 0;
+    const rs = resetSignal ?? 0;
+    if (rs > prevRs) {
+      prevResetSignalForFollowRef.current = resetSignal;
+      followVisRef.current = readChars;
+      setFollowVisualChars(readChars);
+      return;
+    }
+    prevResetSignalForFollowRef.current = resetSignal;
+
+    if (readChars < followVisRef.current) {
+      /* Matcher/Vosk can move backward (not only to 0). Any decrease → frac drops → followFracScrollSync yanks the viewport toward the top. Only go back via tab/reset above, or manual seek (sets anchor + state in the same tick). */
+      return;
+    }
+    followVisRef.current = readChars;
+    setFollowVisualChars(readChars);
+  }, [followMode, readChars, followIdentityKey, resetSignal]);
+
+  const followContentRef = useRef<HTMLDivElement>(null);
+  /** Follow plain doc: viewport-band → script anchor for manual skip. */
+  const followReadonlyDocRef = useRef<TeleprompterReadonlyDocHandle | null>(null);
+  /** Scroll content wrapper (padding + readonly doc). */
+  const followInnerRef = useRef<HTMLDivElement>(null);
+
+  /** Declared before follow layout effect so initial align can mark programmatic scroll. */
+  const followScrollProgrammaticRef = useRef(false);
+  const followProgrammaticScrollAtRef = useRef(0);
+  /**
+   * Scroll events can fire after followScrollProgrammaticRef clears; without this, onScroll treats
+   * them as user intent → bumpPause (H_UI) blocks followFracScrollSync for seconds → drift.
+   */
+  const followProgrammaticScrollGuardUntilRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
+  /** Last applied follow scrollTop — used when raw layout reports scrollTop≈0 during transient scrollHeight collapse (log: H_SCROLL_TOP_RESTORE). */
+  const followLastGoodScrollTopRef = useRef(0);
+
+  useEffect(() => {
+    if (!followMode) {
+      followLastGoodScrollTopRef.current = 0;
+    }
+  }, [followMode]);
+
+  useEffect(() => {
+    if (!followMode || !isVisible) return;
+    const id = requestAnimationFrame(() => {
+      const vp = followContentRef.current;
+      const pm = vp?.querySelector(".ProseMirror") as HTMLElement | null;
+      // #region agent log
+      fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "dc7a9b" },
+        body: JSON.stringify({
+          sessionId: "dc7a9b",
+          location: "TeleprompterOverlay.tsx:followLayout",
+          message: "follow viewport vs ProseMirror geometry",
+          hypothesisId: "H3",
+          data: {
+            vpClientH: vp?.clientHeight ?? -1,
+            vpScrollH: vp?.scrollHeight ?? -1,
+            pmClientH: pm?.clientHeight ?? -1,
+            pmChildCount: pm?.childElementCount ?? -1,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+    });
+    return () => cancelAnimationFrame(id);
+  }, [followMode, isVisible, displayScript.length, followVisualChars]);
+
+  useEffect(() => {
+    if (!followMode) return;
+    // #region agent log
+    fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bad53" },
+      body: JSON.stringify({
+        sessionId: "6bad53",
+        location: "TeleprompterOverlay.tsx:followLayoutSyncKey",
+        message: "follow layout key changed — readonly doc will rebuild decorations (H_LAYOUT_RESYNC)",
+        hypothesisId: "H_LAYOUT_RESYNC",
+        data: { followLayoutSyncKey },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [followMode, followLayoutSyncKey]);
+
+  /** User scroll pauses voice-driven scroll sync; programmatic scroll sets followScrollProgrammaticRef. */
+  const followEasePauseUntilRef = useRef(0);
+  /** After user pause ends, ease in so the first H_SYNC does not snap the viewport (log: jump back). */
+  const followWasInUserPauseRef = useRef(false);
+  const followResumeEaseUntilRef = useRef(0);
+  /** After user wheel/scroll, block programmatic scroll-up (negative delta) — avoids snap-back (log: H_UI then H_SYNC). */
+  const followSuppressScrollUpUntilRef = useRef(0);
+  /** Ignore transient scrollHeight collapse (decorations/layout) that would snap scrollTop to ~0. */
+  const followScrollMaxStableRef = useRef(0);
+  /** Debounce manual scroll → script anchor (same norm fraction as `followFracScrollSync`). */
+  const manualSeekFromScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** User scrolled up (wheel / gradual drag) — allow manual seek to move anchor backward; otherwise ignore (layout glitches move scrollTop back and would re-highlight earlier text). */
+  const allowBackwardManualSeekUntilRef = useRef(0);
+
+  const followAutoScrollAllowedRef = useRef<() => boolean>(() => true);
+  followAutoScrollAllowedRef.current = () => Date.now() >= followEasePauseUntilRef.current;
+
+  /** Last time follow line-anchor scroll ran — suppress scrollTop restore briefly to avoid fighting mixed-script layout thrash. */
+  const lastFollowAutoScrollTsRef = useRef(0);
+
+  const markFollowProgrammaticScroll = useCallback(() => {
+    lastFollowAutoScrollTsRef.current = Date.now();
+    followScrollProgrammaticRef.current = true;
+    followProgrammaticScrollGuardUntilRef.current = Date.now() + 520;
+    followProgrammaticScrollAtRef.current = Date.now();
+    /* Scroll events can arrive after rAF; keep flag long enough so onScroll does not bumpPause. */
+    window.setTimeout(() => {
+      followScrollProgrammaticRef.current = false;
+    }, 90);
+  }, []);
+
+  useEffect(() => {
+    followScrollMaxStableRef.current = 0;
+  }, [displayScript.length]);
+
+  /** User wheel/trackpad — extend pause even when scrollTop delta is small (scroll listener alone missed sub-threshold moves). */
+  useEffect(() => {
+    if (!followMode) return;
+    const el = followContentRef.current;
+    if (!el) return;
+    const bumpPause = () => {
+      const t = Date.now();
+      /* Long window: frac sync must not override manual scroll (log: 0.75px floor blocked bumpPause → drag never paused). */
+      followEasePauseUntilRef.current = t + 8000;
+      followSuppressScrollUpUntilRef.current = t + 10000;
+    };
+    /* Programmatic scroll can emit scroll events after the sync flag clears; guard window avoids false H_UI. */
+    const ignoreRecentProgrammatic = () => Date.now() - followProgrammaticScrollAtRef.current < 520;
+    const scheduleManualSeekFromUser = () => {
+      if (manualSeekFromScrollTimerRef.current != null) {
+        clearTimeout(manualSeekFromScrollTimerRef.current);
+      }
+      manualSeekFromScrollTimerRef.current = setTimeout(() => {
+        manualSeekFromScrollTimerRef.current = null;
+        const vpSeek = followContentRef.current;
+        if (!vpSeek) return;
+        const md = displayScriptFollowRef.current;
+        if (!md.length) return;
+        const maxSeek = Math.max(0, vpSeek.scrollHeight - vpSeek.clientHeight);
+        const frac = maxSeek <= 0 ? 0 : Math.max(0, Math.min(1, vpSeek.scrollTop / maxSeek));
+        const lang = voskLangFollowRef.current;
+        const anchorFrac = readCharsForFollowScrollFraction(md, frac, lang);
+        const anchorView = followReadonlyDocRef.current?.getReadCharsAnchorFromViewportBand() ?? null;
+        let anchor = anchorFrac;
+        if (anchorView != null) {
+          anchor = anchorView;
+        }
+        const cur = followVisRef.current;
+        const allowBack = Date.now() < allowBackwardManualSeekUntilRef.current;
+        /** User skipped forward in the viewport — do not block anchor with stale scroll-frac guards. */
+        const forwardSeek = anchor > cur + 28;
+        if (anchor + 12 < cur && !allowBack && !forwardSeek) {
+          return;
+        }
+        const voice = readCharsTargetRef.current;
+        if (!allowBack && anchor < voice - 4 && !forwardSeek) {
+          return;
+        }
+        followVisRef.current = anchor;
+        setFollowVisualChars(anchor);
+        applyFollowAnchorRef.current(anchor, { allowBackward: allowBack });
+        followEasePauseUntilRef.current = Date.now() + FOLLOW_MANUAL_ANCHOR_RESUME_MS;
+        // #region agent log
+        fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bad53" },
+          body: JSON.stringify({
+            sessionId: "6bad53",
+            hypothesisId: "H_MANUAL_SEEK_ANCHOR",
+            location: "Teleprompter.tsx:manualSeekFromScroll",
+            message: "manual scroll → readChars + Vosk anchor (match viewport)",
+            data: {
+              scrollTop: vpSeek.scrollTop,
+              maxSeek,
+              frac: Math.round(frac * 1000) / 1000,
+              anchor,
+              anchorFrac,
+              anchorView,
+              mdLen: md.length,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+      }, 160);
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (followScrollProgrammaticRef.current || ignoreRecentProgrammatic()) return;
+      const now = Date.now();
+      if (now < followProgrammaticScrollGuardUntilRef.current) return;
+      if (e.deltaY < 0) {
+        allowBackwardManualSeekUntilRef.current = Date.now() + 900;
+      }
+      const vpW = followContentRef.current;
+      if (vpW) {
+        lastScrollTopRef.current = vpW.scrollTop;
+        followLastGoodScrollTopRef.current = vpW.scrollTop;
+      }
+      bumpPause();
+      scheduleManualSeekFromUser();
+    };
+    const onScroll = () => {
+      const now = Date.now();
+      if (followScrollProgrammaticRef.current || ignoreRecentProgrammatic()) return;
+      if (now < followProgrammaticScrollGuardUntilRef.current) {
+        const vpG = followContentRef.current;
+        if (vpG) lastScrollTopRef.current = vpG.scrollTop;
+        // #region agent log
+        const tG = Date.now();
+        if (tG - _dwScrollGuardLogTs > 500) {
+          _dwScrollGuardLogTs = tG;
+          fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bad53" },
+            body: JSON.stringify({
+              sessionId: "6bad53",
+              hypothesisId: "H_SCROLL_GUARD",
+              location: "Teleprompter.tsx:onScroll",
+              message: "ignored scroll echo after programmatic scrollTop (avoid false user pause)",
+              data: { scrollTop: vpG?.scrollTop },
+              timestamp: tG,
+            }),
+          }).catch(() => {});
+        }
+        // #endregion
+        return;
+      }
+      const vp = followContentRef.current;
+      if (!vp) return;
+      const st = vp.scrollTop;
+      const prevSt = lastScrollTopRef.current;
+      lastScrollTopRef.current = st;
+      /* Glitch to top while read head is deep: do not treat as user scroll (would pause frac sync for 8s). */
+      const glitchSnapToTop =
+        st < 48 && followLastGoodScrollTopRef.current > 120 && followVisRef.current > 72;
+      if (glitchSnapToTop) {
+        return;
+      }
+      if (prevSt - st > 4 && prevSt - st < 120) {
+        allowBackwardManualSeekUntilRef.current = Date.now() + 900;
+      }
+      followLastGoodScrollTopRef.current = st;
+      bumpPause();
+      scheduleManualSeekFromUser();
+      // #region agent log
+      const tUs = Date.now();
+      if (tUs - _dwUserScrollLogTs > 450) {
+        _dwUserScrollLogTs = tUs;
+        fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bad53" },
+          body: JSON.stringify({
+            sessionId: "6bad53",
+            hypothesisId: "H_USER_SCROLL_PAUSE",
+            location: "Teleprompter.tsx:onScroll",
+            message: "user scroll → bumpPause (removed 0.75px floor)",
+            data: { scrollTop: st },
+            timestamp: tUs,
+          }),
+        }).catch(() => {});
+      }
+      // #endregion
+    };
+    lastScrollTopRef.current = el.scrollTop;
+    el.addEventListener("wheel", onWheel as EventListener, { passive: true });
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      if (manualSeekFromScrollTimerRef.current != null) {
+        clearTimeout(manualSeekFromScrollTimerRef.current);
+        manualSeekFromScrollTimerRef.current = null;
+      }
+      el.removeEventListener("wheel", onWheel as EventListener);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [followMode, slimMode]);
+
+  useEffect(() => {
+    if (!followMode) {
+      followWasInUserPauseRef.current = false;
+      followResumeEaseUntilRef.current = 0;
+      followSuppressScrollUpUntilRef.current = 0;
+    }
+  }, [followMode]);
+
+  /**
+   * Follow viewport: restore scrollTop only on layout glitches (ghost ~0 / collapsed height).
+   * Continuous scrolling is {@link TeleprompterReadonlyDoc} line-anchor scroll.
+   */
+  useLayoutEffect(() => {
+    if (!followMode || !isVisible || !displayScript.length) return;
+
+    const vp = followContentRef.current;
+    if (!vp) return;
+
+    const rawMaxS = Math.max(0, vp.scrollHeight - vp.clientHeight);
+    const prevStable = followScrollMaxStableRef.current;
+    followScrollMaxStableRef.current = Math.max(prevStable, rawMaxS);
+    let maxS = rawMaxS;
+    if (isCollapsedLayout(prevStable, rawMaxS)) {
+      maxS = prevStable;
+    }
+
+    const collapsedLayout = isCollapsedLayout(prevStable, rawMaxS);
+    const scrollTopGhostZero =
+      !collapsedLayout &&
+      rawMaxS > 120 &&
+      vp.scrollTop < FOLLOW_SCROLL_TOP_GHOST_LT &&
+      followLastGoodScrollTopRef.current > FOLLOW_SCROLL_TOP_RESTORE_LAST_GT;
+
+    const suppressRestoreMs = 720;
+    if (
+      Date.now() - lastFollowAutoScrollTsRef.current >= suppressRestoreMs &&
+      shouldRestoreFollowScrollTop({
+        scrollTop: vp.scrollTop,
+        lastGoodScrollTop: followLastGoodScrollTopRef.current,
+        rawMaxS,
+        prevStable,
+        followVis: followVisRef.current,
+      })
+    ) {
+      const restore = Math.min(maxS, followLastGoodScrollTopRef.current);
+      vp.scrollTop = restore;
+      lastScrollTopRef.current = restore;
+      followScrollProgrammaticRef.current = true;
+      followProgrammaticScrollGuardUntilRef.current = Date.now() + 520;
+      followProgrammaticScrollAtRef.current = Date.now();
+      fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "6bad53" },
+        body: JSON.stringify({
+          sessionId: "6bad53",
+          hypothesisId: "H_SCROLL_TOP_RESTORE",
+          location: "Teleprompter.tsx:followViewportRestore",
+          message: scrollTopGhostZero && !collapsedLayout ? "ghost scrollTop restore" : "collapse restore",
+          data: {
+            reason: scrollTopGhostZero && !collapsedLayout ? "ghostZero" : "scrollHeightCollapse",
+            restored: restore,
+            followVisualChars: followVisRef.current,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      requestAnimationFrame(() => {
+        followScrollProgrammaticRef.current = false;
+      });
+    }
+  }, [followMode, isVisible, displayScript, followLayoutSyncKey, followVisualChars, slimMode]);
+
+  useEffect(() => {
+    if (!followMode || !displayScript.length) return;
+    const t = Date.now();
+    if (t - _dwKaraokeLogTs < 400) return;
+    _dwKaraokeLogTs = t;
+    const pct = followScrollFraction(displayScript, followVisualChars, voskLang);
+    // #region agent log
+    fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "dc7a9b" },
+      body: JSON.stringify({
+        sessionId: "dc7a9b",
+        location: "TeleprompterOverlay.tsx:karaokePct",
+        message: "follow karaoke fraction vs readChars (H_KARAOKE)",
+        hypothesisId: "H_KARAOKE",
+        data: { followVisualChars, scriptLen: displayScript.length, pct: Math.round(pct * 1000) / 1000 },
+        timestamp: t,
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [followMode, followVisualChars, displayScript, voskLang]);
 
   const draggingRef = useRef(false);
   const resizingRef = useRef(false);
@@ -320,9 +783,47 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   const livePosRef = useRef<{ x: number; y: number } | null>(null);
   const lastAnchoredPosRef = useRef<{ x: number; y: number } | null>(null);
   const [livePos, setLivePos] = useState<{ x: number; y: number } | null>(null);
+  /** Slim bar offset (px) from bottom-center anchor — drag handle moves panel within viewport. */
+  const [slimPanelOffset, setSlimPanelOffset] = useState({ x: 0, y: 0 });
+  const slimPanelOffsetRef = useRef(slimPanelOffset);
+  slimPanelOffsetRef.current = slimPanelOffset;
+
+  useEffect(() => {
+    if (!slimMode) setSlimPanelOffset({ x: 0, y: 0 });
+  }, [slimMode]);
+
+  const onSlimPanelMovePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const start = { x: e.clientX, y: e.clientY };
+      const origin = { ...slimPanelOffsetRef.current };
+      const onMove = (ev: PointerEvent) => {
+        const vp = getViewportSize();
+        const nx = origin.x + (ev.clientX - start.x);
+        const ny = origin.y + (ev.clientY - start.y);
+        const pad = 4;
+        const halfW = vp.width / 2 - pad;
+        const halfH = vp.height / 2 - pad;
+        setSlimPanelOffset({
+          x: Math.max(-halfW, Math.min(halfW, nx)),
+          y: Math.max(-halfH, Math.min(halfH, ny)),
+        });
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove, { passive: true });
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [],
+  );
 
   const { viewportRef, scrollContentRef, reset, addScrollDelta, scrollPxRef } = useTeleprompterScroll({
-    isVisible,
+    isVisible: isVisible && !slimMode,
     isPlaying,
     speed,
     script,
@@ -333,6 +834,33 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     resetSignal,
     editorScrollRatio,
   });
+
+  useEffect(() => {
+    if (followMode || !isVisible) return;
+    const id = requestAnimationFrame(() => {
+      const vp = viewportRef.current;
+      const pm = vp?.querySelector(".ProseMirror") as HTMLElement | null;
+      // #region agent log
+      fetch("http://127.0.0.1:7306/ingest/1331bf78-4458-41b9-8b23-f10213f04cd1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "dc7a9b" },
+        body: JSON.stringify({
+          sessionId: "dc7a9b",
+          location: "TeleprompterOverlay.tsx:scrollLayout",
+          message: "non-follow viewport vs ProseMirror geometry",
+          hypothesisId: "H3",
+          data: {
+            mode: "scroll",
+            vpClientH: vp?.clientHeight ?? -1,
+            pmClientH: pm?.clientHeight ?? -1,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+    });
+    return () => cancelAnimationFrame(id);
+  }, [followMode, isVisible, displayScript.length]);
 
   const scrollDragRef = useRef(false);
   const scrollDragStartRef = useRef(0);
@@ -375,11 +903,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       if (isTypingTarget(e.target)) return;
       if (e.key === " ") {
         e.preventDefault();
-        if (followMode) {
-          followAdvance();
-        } else {
-          onSetPlaying(!isPlaying);
-        }
+        if (followMode) return;
+        onSetPlaying(!isPlaying);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         onNudgeSpeed(8);
@@ -388,12 +913,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
         onNudgeSpeed(-8);
       } else if (e.key.toLowerCase() === "r") {
         e.preventDefault();
-        if (followMode) {
-          followReset();
-        } else {
-          reset();
-          onReset();
-        }
+        if (!followMode) reset();
+        onReset();
       } else if (e.key.toLowerCase() === "h" || e.key === "Escape") {
         e.preventDefault();
         onHide();
@@ -401,24 +922,28 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isVisible, isPlaying, onSetPlaying, onNudgeSpeed, onReset, onHide, reset, followMode, followAdvance, followReset]);
+  }, [isVisible, isPlaying, onSetPlaying, onNudgeSpeed, onReset, onHide, reset, followMode]);
 
   useEffect(() => {
     if (resetSignal != null) reset();
   }, [resetSignal, reset]);
 
-  const clampedWidth = Math.max(320, Math.min(900, overlayWidth));
-  const clampedHeight = Math.max(180, Math.min(500, overlayHeight));
   const viewport = getViewportSize();
-  const baseLeft = (viewport.width - clampedWidth) / 2;
+  const baseLeft = (viewport.width - effectiveWidth) / 2;
   const nearCameraLeft = anchorRect
-    ? Math.max(12, Math.min(viewport.width - clampedWidth - 12, anchorRect.left + anchorRect.width / 2 - clampedWidth / 2))
+    ? Math.max(12, Math.min(viewport.width - effectiveWidth - 12, anchorRect.left + anchorRect.width / 2 - effectiveWidth / 2))
     : baseLeft;
   const nearCameraTop = anchorRect
-    ? Math.max(10, Math.min(viewport.height - clampedHeight - 20, anchorRect.top + anchorRect.height + 12))
+    ? Math.max(10, Math.min(viewport.height - effectiveHeight - 20, anchorRect.top + anchorRect.height + 12))
     : 24;
-  const defaultLeft = nearCamera && anchorRect ? nearCameraLeft : baseLeft;
-  const defaultTop = nearCamera && anchorRect ? nearCameraTop : 24;
+  const dockDefaultLeft = useDock
+    ? dockColumnRect!.left + (dockColumnRect!.width - effectiveWidth) / 2
+    : null;
+  const dockDefaultTop = useDock ? dockColumnRect!.top + 8 : null;
+  const defaultLeft =
+    useDock && dockDefaultLeft != null ? dockDefaultLeft : nearCamera && anchorRect ? nearCameraLeft : baseLeft;
+  const defaultTop =
+    useDock && dockDefaultTop != null ? dockDefaultTop : nearCamera && anchorRect ? nearCameraTop : 24;
   const rawLeft = (livePos ?? position)?.x ?? defaultLeft;
   const rawTop = (livePos ?? position)?.y ?? defaultTop;
   const preserved = !anchorRect && lastAnchoredPosRef.current;
@@ -443,47 +968,264 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   if (!isVisible) return null;
 
   if (slimMode) {
-    const display = displayScript;
-    const pos = Math.min(readChars, display.length);
-    const lines = display.split("\n");
-    let charCount = 0;
-    let currentLineIdx = 0;
-    for (let i = 0; i < lines.length; i++) {
-      charCount += lines[i].length + 1;
-      if (charCount > pos) { currentLineIdx = i; break; }
-    }
-    const showStart = Math.max(0, currentLineIdx - 0);
-    const showEnd = Math.min(lines.length, currentLineIdx + 2);
-    const visibleText = lines.slice(showStart, showEnd).join("\n");
-    return (
-      <div
-        data-dreamwork-no-intercept
-        className="!fixed z-[1000000] pointer-events-none"
-        style={{
-          left: 12, right: 12, bottom: 16,
-          padding: "8px 20px",
-          borderRadius: 12,
-          background: "rgba(0,0,0,0.35)",
-          backdropFilter: "blur(6px)",
-          textAlign: "center",
-          fontSize: Math.max(14, fontSize * 0.75),
-          lineHeight: 1.5,
-          color: "white",
-          whiteSpace: "pre-wrap",
-        }}
-        aria-hidden
-      >
-        {visibleText || "..."}
-        <button
-          type="button"
-          className="pointer-events-auto absolute -top-2 -right-2 z-30 rounded-full border border-white/30 bg-black/60 px-1.5 py-0.5 text-[9px] text-white/80"
-          onClick={() => onSetSlimMode?.(false)}
-          title="Expand teleprompter"
+    /** Same as full overlay / helper readonly doc (see non-slim branch). */
+    const slimLineHeight = 1.55;
+    const slimFont = fontSize;
+    const slimFollowLayoutKey = `${followLayoutSyncKey}-slim`;
+    const noDragStyle = { WebkitAppRegion: "no-drag" } as CSSProperties;
+    const winDragStyle = { WebkitAppRegion: "drag" } as CSSProperties;
+    const moveWindowDragStyle = { WebkitAppRegion: "drag" } as CSSProperties;
+    const followStatusShort =
+      speechFollow.error != null && speechFollow.error.length > 0
+        ? speechFollow.error.slice(0, 48)
+        : speechFollow.status != null && speechFollow.status.length > 0
+          ? speechFollow.status.slice(0, 48)
+          : followMode
+            ? "Listening"
+            : "Follow off";
+    /** Visible window: exactly two lines; content scrolls inside (follow / manual). */
+    const slimTwoLineMaxPx = Math.ceil(slimFont * slimLineHeight * 2);
+
+    /** Slim-only Electron window: one surface fills the webview (like Helper). No fixed/portal/floating inner card — avoids a large transparent “box” with a small draggable card inside. */
+    if (embeddedInSlimBrowserWindow) {
+      return (
+        <div
+          data-dreamwork-no-intercept
+          className="box-border flex h-auto max-h-full w-full min-h-0 shrink-0 flex-col overflow-hidden rounded-[14px] border border-white/30 bg-black/60 text-white shadow-2xl backdrop-blur-sm"
+          style={{ opacity }}
         >
-          Expand
-        </button>
+          <div
+            className="h-5 shrink-0 rounded-t-[10px] border-b border-white/15 bg-white/5"
+            style={winDragStyle}
+            title="Drag to move window"
+          />
+          <div
+            className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-1 border-b border-white/15 px-1.5 py-1"
+            style={noDragStyle}
+          >
+            <button
+              type="button"
+              className="shrink-0 rounded border border-white/30 bg-black/40 px-1.5 py-0.5 text-[9px] leading-none text-white/85"
+              style={moveWindowDragStyle}
+              title="Drag to move window"
+            >
+              Move
+            </button>
+            <div className="flex min-w-0 flex-1 flex-row flex-wrap items-center justify-end gap-1">
+              {onSetFollowMode && isElectronVosk() && (
+                <button
+                  type="button"
+                  onClick={() => handleTeleprompterFollowToggle(!!followMode, onSetFollowMode)}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] leading-none ${
+                    followMode ? "border-emerald-400/70 bg-emerald-600/45 text-white" : "border-white/35 bg-black/35 text-white/95"
+                  }`}
+                  title={followMode ? "Exit voice follow" : "Voice follow (Vosk)"}
+                >
+                  {followMode ? "Following" : "Follow"}
+                </button>
+              )}
+              <span
+                className="max-w-[6rem] shrink-0 truncate text-[8px] leading-tight text-emerald-100/90"
+                title={speechFollow.error || speechFollow.status || followStatusShort}
+              >
+                {followStatusShort}
+              </span>
+              {onSetVoskLang && isElectronVosk() && (
+                <select
+                  value={voskLang}
+                  onChange={(e) => onSetVoskLang(e.target.value as TeleprompterVoskLang)}
+                  className="max-w-[4.5rem] shrink-0 rounded border border-white/30 bg-black/40 px-0.5 py-0.5 text-[8px] text-white"
+                  style={noDragStyle}
+                  title="Speech model language"
+                >
+                  <option value="en">EN</option>
+                  <option value="zh">ZH</option>
+                  <option value="it">IT</option>
+                </select>
+              )}
+              <button
+                type="button"
+                className="shrink-0 rounded-full border border-white/35 bg-black/45 px-1.5 py-0.5 text-[9px] leading-none text-white/90"
+                onClick={() => onReset()}
+                title="Reset scroll and reading position"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded-full border border-white/35 bg-black/45 px-1.5 py-0.5 text-[9px] leading-none text-white/85"
+                onClick={() => onSetSlimMode?.(false)}
+                title="Expand teleprompter"
+              >
+                Expand
+              </button>
+            </div>
+          </div>
+          <div
+            ref={followContentRef}
+            data-follow-viewport=""
+            className="min-h-0 shrink-0 overflow-x-hidden overflow-y-auto px-1.5 py-1 text-left text-white [scrollbar-width:thin]"
+            style={{ ...noDragStyle, maxHeight: slimTwoLineMaxPx }}
+          >
+            <div
+              className="relative min-h-0 break-words [word-break:break-word]"
+              style={{
+                fontSize: slimFont,
+                lineHeight: slimLineHeight,
+              }}
+            >
+              {displayScript ? (
+                <TeleprompterReadonlyDoc
+                  ref={followReadonlyDocRef}
+                  markdown={displayScript}
+                  style={{ fontSize: slimFont, lineHeight: slimLineHeight }}
+                  followReadChars={followMode ? followVisualChars : undefined}
+                  followSourceLen={displayScript.length}
+                  followLang={voskLang}
+                  followLayoutSync={slimFollowLayoutKey}
+                  followScrollViewportRef={followContentRef}
+                  followAutoScroll={followMode}
+                  followAutoScrollAllowedRef={followAutoScrollAllowedRef}
+                  onFollowScrollProgrammatic={markFollowProgrammaticScroll}
+                />
+              ) : (
+                <span className="block text-white/80" style={{ fontSize: slimFont, lineHeight: slimLineHeight }}>
+                  Paste your script in Teleprompter panel.
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /** Main webview / helper: bottom-anchored floating card; Move uses in-viewport offset. */
+    const slimBoxStyle: CSSProperties = {
+      position: "fixed",
+      left: "50%",
+      bottom: 12,
+      width: "calc(100% - 20px)",
+      maxWidth: "min(520px, calc(100vw - 20px))",
+      transform: `translate(calc(-50% + ${slimPanelOffset.x}px), ${slimPanelOffset.y}px)`,
+      zIndex: 2147483647,
+    };
+    const slimTree = (
+      <div data-dreamwork-no-intercept className="pointer-events-none" style={slimBoxStyle}>
+        <div
+          className="pointer-events-auto flex min-h-0 max-w-full flex-col overflow-hidden rounded-xl bg-black/60 shadow-xl backdrop-blur-sm ring-1 ring-white/15"
+          style={{ opacity }}
+        >
+          {embeddedInDetachedHelperWindow && (
+            <div
+              className="h-5 shrink-0 rounded-t-[10px] border-b border-white/15 bg-white/5"
+              style={winDragStyle}
+              title="Drag to move helper window"
+            />
+          )}
+          <div
+            className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-1 border-b border-white/15 px-1.5 py-1"
+            style={noDragStyle}
+          >
+            <button
+              type="button"
+              className="shrink-0 cursor-grab rounded border border-white/30 bg-black/40 px-1.5 py-0.5 text-[9px] leading-none text-white/85 active:cursor-grabbing"
+              style={noDragStyle}
+              onPointerDown={onSlimPanelMovePointerDown}
+              title="Drag to move this bar on screen"
+            >
+              Move
+            </button>
+            <div className="flex min-w-0 flex-1 flex-row flex-wrap items-center justify-end gap-1">
+              {onSetFollowMode && isElectronVosk() && (
+                <button
+                  type="button"
+                  onClick={() => handleTeleprompterFollowToggle(!!followMode, onSetFollowMode)}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] leading-none ${
+                    followMode ? "border-emerald-400/70 bg-emerald-600/45 text-white" : "border-white/35 bg-black/35 text-white/95"
+                  }`}
+                  title={followMode ? "Exit voice follow" : "Voice follow (Vosk)"}
+                >
+                  {followMode ? "Following" : "Follow"}
+                </button>
+              )}
+              <span
+                className="max-w-[6rem] shrink-0 truncate text-[8px] leading-tight text-emerald-100/90"
+                title={speechFollow.error || speechFollow.status || followStatusShort}
+              >
+                {followStatusShort}
+              </span>
+              {embeddedInDetachedHelperWindow && onSetVoskLang && isElectronVosk() && (
+                <select
+                  value={voskLang}
+                  onChange={(e) => onSetVoskLang(e.target.value as TeleprompterVoskLang)}
+                  className="max-w-[4.5rem] shrink-0 rounded border border-white/30 bg-black/40 px-0.5 py-0.5 text-[8px] text-white"
+                  style={noDragStyle}
+                  title="Speech model language"
+                >
+                  <option value="en">EN</option>
+                  <option value="zh">ZH</option>
+                  <option value="it">IT</option>
+                </select>
+              )}
+              <button
+                type="button"
+                className="shrink-0 rounded-full border border-white/35 bg-black/45 px-1.5 py-0.5 text-[9px] leading-none text-white/90"
+                onClick={() => onReset()}
+                title="Reset scroll and reading position"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded-full border border-white/35 bg-black/45 px-1.5 py-0.5 text-[9px] leading-none text-white/85"
+                onClick={() => onSetSlimMode?.(false)}
+                title="Expand teleprompter"
+              >
+                Expand
+              </button>
+            </div>
+          </div>
+          <div
+            ref={followContentRef}
+            data-follow-viewport=""
+            className="min-h-0 w-full overflow-x-hidden overflow-y-auto px-1.5 py-1 text-left text-white [scrollbar-width:thin]"
+            style={{ ...noDragStyle, maxHeight: slimTwoLineMaxPx }}
+          >
+            <div
+              className="relative min-h-0 break-words [word-break:break-word]"
+              style={{
+                fontSize: slimFont,
+                lineHeight: slimLineHeight,
+              }}
+            >
+              {displayScript ? (
+                <TeleprompterReadonlyDoc
+                  ref={followReadonlyDocRef}
+                  markdown={displayScript}
+                  style={{ fontSize: slimFont, lineHeight: slimLineHeight }}
+                  followReadChars={followMode ? followVisualChars : undefined}
+                  followSourceLen={displayScript.length}
+                  followLang={voskLang}
+                  followLayoutSync={slimFollowLayoutKey}
+                  followScrollViewportRef={followContentRef}
+                  followAutoScroll={followMode}
+                  followAutoScrollAllowedRef={followAutoScrollAllowedRef}
+                  onFollowScrollProgrammatic={markFollowProgrammaticScroll}
+                />
+              ) : (
+                <span className="block text-white/80" style={{ fontSize: slimFont, lineHeight: slimLineHeight }}>
+                  Paste your script in Teleprompter panel.
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     );
+    if (embeddedInDetachedHelperWindow && typeof document !== "undefined") {
+      return createPortal(slimTree, document.body);
+    }
+    return slimTree;
   }
 
   const onDragPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -501,8 +1243,21 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     const onMove = (ev: PointerEvent) => {
       if (!draggingRef.current) return;
       const vp = getViewportSize();
-      const x = Math.max(8, Math.min(vp.width - clampedWidth - 8, ev.clientX - dragOffsetRef.current.x));
-      const y = Math.max(8, Math.min(vp.height - clampedHeight - 8, ev.clientY - dragOffsetRef.current.y));
+      let minL = 8;
+      let maxL = vp.width - effectiveWidth - 8;
+      let minT = 8;
+      let maxT = vp.height - effectiveHeight - 8;
+      if (useDock && dockColumnRect) {
+        const r = dockColumnRect;
+        const colRight = r.left + r.width;
+        const colBottom = r.top + r.height;
+        minL = r.left + 8;
+        maxL = colRight - effectiveWidth - 8;
+        minT = r.top + 8;
+        maxT = colBottom - effectiveHeight - 8;
+      }
+      const x = Math.max(minL, Math.min(maxL, ev.clientX - dragOffsetRef.current.x));
+      const y = Math.max(minT, Math.min(maxT, ev.clientY - dragOffsetRef.current.y));
       const next = { x, y };
       livePosRef.current = next;
       setLivePos(next);
@@ -525,8 +1280,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     e.stopPropagation();
     resizingRef.current = true;
     resizeStartRef.current = {
-      width: clampedWidth,
-      height: clampedHeight,
+      width: effectiveWidth,
+      height: effectiveHeight,
       clientX: e.clientX,
       clientY: e.clientY,
     };
@@ -539,8 +1294,10 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       const dx = ev.clientX - clientX;
       const dy = ev.clientY - clientY;
       const vp = getViewportSize();
-      const newWidth = Math.max(320, Math.min(900, Math.min(vp.width - left - 16, width + dx)));
-      const newHeight = Math.max(180, Math.min(500, Math.min(vp.height - top - 16, height + dy)));
+      const maxW = useDock && dockColumnRect ? dockColumnRect.width - 16 : vp.width - left - 16;
+      const maxH = useDock && dockColumnRect ? dockColumnRect.height - 16 : vp.height - top - 16;
+      const newWidth = Math.max(320, Math.min(900, Math.min(maxW, width + dx)));
+      const newHeight = Math.max(180, Math.min(500, Math.min(maxH, height + dy)));
       onOverlaySizeChange(newWidth, newHeight);
     };
     const onUp = () => {
@@ -554,17 +1311,44 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     window.addEventListener("pointercancel", onUp);
   };
 
+  const scrollClip = embeddedInDetachedHelperWindow ? "inset(0)" : "inset(32px 0 0 0)";
+
   return (
     <div
       data-dreamwork-no-intercept
-      className="!fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
-      style={{ width: clampedWidth, maxWidth: "calc(100vw - 24px)", height: clampedHeight, left, top, opacity }}
+      className={
+        embeddedInDetachedHelperWindow
+          ? "relative z-0 flex max-h-full max-w-full shrink-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+          : "!fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+      }
+      style={
+        embeddedInDetachedHelperWindow
+          ? {
+              width: "100%",
+              height: "100%",
+              minWidth: 0,
+              minHeight: 0,
+              maxWidth: "100%",
+              maxHeight: "100%",
+              opacity,
+            }
+          : {
+              width: effectiveWidth,
+              maxWidth: useDock ? effectiveWidth : "calc(100vw - 24px)",
+              height: effectiveHeight,
+              left,
+              top,
+              opacity,
+            }
+      }
       aria-hidden
     >
-      <div
-        className={`absolute inset-x-0 top-0 z-20 h-8 border-b border-white/20 bg-black/30 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
-        onPointerDown={onDragPointerDown}
-      />
+      {!embeddedInDetachedHelperWindow && (
+        <div
+          className={`absolute inset-x-0 top-0 z-20 h-8 border-b border-white/20 bg-black/30 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
+          onPointerDown={onDragPointerDown}
+        />
+      )}
       <button
         type="button"
         onClick={onToggleLocked}
@@ -573,18 +1357,32 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       >
         {locked ? "Locked" : "Lock"}
       </button>
-      <div className="absolute left-2 top-1.5 z-30 flex gap-1">
-        {/* Follow button hidden — speech model not ready for CJK yet
-        {onSetFollowMode && (
+      <div className="absolute left-2 top-1.5 z-30 flex max-w-[calc(100%-4rem)] flex-wrap items-center gap-1">
+        {onSetFollowMode && isElectronVosk() && (
           <button
             type="button"
-            onClick={() => onSetFollowMode(!followMode)}
+            onClick={() => handleTeleprompterFollowToggle(!!followMode, onSetFollowMode)}
             className={`rounded border px-1.5 py-0.5 text-[10px] ${followMode ? "border-emerald-400/60 bg-emerald-600/50 text-white" : "border-white/30 bg-black/50 text-white/90"}`}
-            title={followMode ? "Exit follow mode" : "Follow mode (Space/click to advance)"}
+            title={followMode ? "Exit voice follow" : "Voice follow (Vosk — desktop app)"}
           >
             {followMode ? "Following" : "Follow"}
           </button>
-        )} */}
+        )}
+        {embeddedInDetachedHelperWindow && onSetVoskLang && isElectronVosk() && (
+          <label className="flex min-w-0 items-center gap-0.5 text-[9px] text-white/75">
+            <span className="shrink-0">Model</span>
+            <select
+              value={voskLang}
+              onChange={(e) => onSetVoskLang(e.target.value as TeleprompterVoskLang)}
+              className="max-w-[120px] rounded border border-white/25 bg-black/55 px-1 py-0.5 text-[9px] text-white"
+              title="Must match how you speak."
+            >
+              <option value="en">English (EN)</option>
+              <option value="zh">中英混稿 (ZH)</option>
+              <option value="it">Italiano (IT)</option>
+            </select>
+          </label>
+        )}
         {onSetSlimMode && (
           <button
             type="button"
@@ -598,52 +1396,72 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       </div>
       <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/80 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/80 to-transparent" />
-      <div className="pointer-events-none absolute inset-x-0 top-1/2 h-12 -translate-y-1/2 border-y border-emerald-300/40 bg-emerald-200/10" />
       {followMode ? (
-        <div
-          ref={followContentRef}
-          data-follow-viewport=""
-          className="relative h-full overflow-y-auto px-6 py-7 text-center text-white cursor-pointer"
-          style={{ clipPath: "inset(32px 0 0 0)" }}
-          onClick={followAdvance}
-        >
-          <div style={{ fontSize, lineHeight: 1.55, paddingTop: "1em", paddingBottom: "80%", whiteSpace: "pre-wrap" }}>
-            {displayScript ? (() => {
-              const pos = Math.min(readChars, displayScript.length);
-              return (
-                <>
-                  <span style={{ color: "rgba(255,255,255,0.35)" }}>{displayScript.slice(0, pos)}</span>
-                  <span data-follow-cursor="" />
-                  <span>{displayScript.slice(pos)}</span>
-                </>
-              );
-            })() : "Paste your script in Teleprompter panel."}
+        <div className="relative h-full min-h-0 overflow-hidden">
+          <div
+            ref={followContentRef}
+            data-follow-viewport=""
+            className="relative z-0 h-full overflow-y-auto px-6 py-7 text-center text-white"
+          >
+            <div
+              ref={followInnerRef}
+              className="relative text-center"
+              style={{
+                fontSize,
+                paddingTop: "1em",
+                paddingBottom: "80%",
+              }}
+            >
+              {displayScript ? (
+                <TeleprompterReadonlyDoc
+                  ref={followReadonlyDocRef}
+                  markdown={displayScript}
+                  style={{ fontSize, lineHeight: 1.55 }}
+                  followReadChars={followVisualChars}
+                  followSourceLen={displayScript.length}
+                  followLang={voskLang}
+                  followLayoutSync={followLayoutSyncKey}
+                  followScrollViewportRef={followContentRef}
+                  followAutoScroll
+                  followAutoScrollAllowedRef={followAutoScrollAllowedRef}
+                  onFollowScrollProgrammatic={markFollowProgrammaticScroll}
+                />
+              ) : (
+                <span className="block w-full text-center" style={{ fontSize, lineHeight: 1.55 }}>
+                  Paste your script in Teleprompter panel.
+                </span>
+              )}
+            </div>
           </div>
-          <div className="pointer-events-none absolute bottom-2 inset-x-0 flex items-center justify-center gap-3">
-            <span className="rounded-full bg-black/60 px-3 py-1 text-[10px] text-white/50 backdrop-blur-sm">
-              Space / Click to advance
+          <div className="pointer-events-none absolute bottom-2 inset-x-0 z-20 flex flex-col items-center justify-center gap-1 px-2">
+            <span className="rounded-full bg-black/60 px-3 py-1 text-[10px] text-emerald-200/80 backdrop-blur-sm">
+              {speechFollow.error ? speechFollow.error.slice(0, 120) : speechFollow.status || "Voice follow"}
             </span>
-            {segIndex > 0 && (
-              <span className="rounded-full bg-black/60 px-2.5 py-1 text-[10px] tabular-nums text-white/40 backdrop-blur-sm">
-                {segIndex}/{totalSegments}
-              </span>
-            )}
           </div>
         </div>
       ) : (
         <div
           ref={viewportRef}
           className={`relative h-full overflow-hidden px-6 py-7 text-center text-white ${isScrollDragging ? "cursor-grabbing" : "cursor-grab"}`}
-          style={{ clipPath: "inset(32px 0 0 0)" }}
+          style={{ clipPath: scrollClip }}
           onPointerDown={onScrollPointerDown}
           title="Drag to scroll"
         >
           <div
             ref={scrollContentRef}
+            className="text-center"
             style={{ fontSize, lineHeight: 1.55, willChange: "transform" }}
           >
-            <div style={{ paddingTop: "1em", paddingBottom: "80%", whiteSpace: "pre-wrap" }}>
-              {displayScript || "Paste your script in Teleprompter panel."}
+            <div style={{ paddingTop: "1em", paddingBottom: "80%" }}>
+              {displayScript ? (
+                <TeleprompterReadonlyDoc
+                  markdown={displayScript}
+                  style={{ fontSize, lineHeight: 1.55 }}
+                  followLang={voskLang}
+                />
+              ) : (
+                <span className="block w-full">Paste your script in Teleprompter panel.</span>
+              )}
             </div>
           </div>
           {isPlaying && displayScript && (
@@ -669,18 +1487,20 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
           )}
         </div>
       )}
-      <div
-        role="button"
-        tabIndex={0}
-        onPointerDown={onResizePointerDown}
-        className={`absolute bottom-0 right-0 z-30 h-[18px] w-[18px] cursor-se-resize rounded-br-xl ${locked ? "pointer-events-none opacity-40" : "hover:bg-white/[0.06]"}`}
-        style={{
-          background:
-            "linear-gradient(to top left, rgba(255,255,255,.28) 0%, rgba(255,255,255,.28) 42%, transparent 42.5%)",
-        }}
-        title="Drag to resize"
-        aria-label="Resize overlay"
-      />
+      {!embeddedInDetachedHelperWindow && (
+        <div
+          role="button"
+          tabIndex={0}
+          onPointerDown={onResizePointerDown}
+          className={`absolute bottom-0 right-0 z-30 h-[18px] w-[18px] cursor-se-resize rounded-br-xl ${locked ? "pointer-events-none opacity-40" : "hover:bg-white/[0.06]"}`}
+          style={{
+            background:
+              "linear-gradient(to top left, rgba(255,255,255,.28) 0%, rgba(255,255,255,.28) 42%, transparent 42.5%)",
+          }}
+          title="Drag to resize"
+          aria-label="Resize overlay"
+        />
+      )}
     </div>
   );
 });
@@ -719,8 +1539,10 @@ export function TeleprompterPanel({
   onHide,
   onFlushSave,
   onEditorScroll,
-  followMode: _followModePanel,
-  onSetFollowMode: _onSetFollowModePanel,
+  followMode,
+  onSetFollowMode,
+  voskLang = "en",
+  onSetVoskLang,
 }: TeleprompterPanelProps) {
   const MIN_PANEL_HEIGHT = 320;
   const MIN_EDITOR_HEIGHT = 96;
@@ -730,37 +1552,31 @@ export function TeleprompterPanel({
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const saveAsRef = useRef<HTMLDivElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const scriptEditorRef = useRef<TeleprompterScriptEditorHandle>(null);
   const scrollTopByScriptRef = useRef<Record<string, number>>({});
-  const scriptPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevActiveScriptIdRef = useRef(activeScriptId);
   const currentScript = scripts.find((s) => s.id === activeScriptId);
   /** Local draft: avoid lifting every keystroke to App (heavy re-renders + settings effect). */
   const [draftScript, setDraftScript] = useState(script);
 
+  /** Keep editor in sync with App; refresh when switching scripts or importing. If only `script` changes while the user is typing, skip overwrite. */
   useEffect(() => {
+    const switchedScript = prevActiveScriptIdRef.current !== activeScriptId;
+    prevActiveScriptIdRef.current = activeScriptId;
+    if (switchedScript) {
+      setDraftScript(script);
+      return;
+    }
+    const wrap = panelRef.current?.querySelector("[data-teleprompter-editor]") as HTMLElement | null;
+    const focused = wrap && (wrap === document.activeElement || wrap.contains(document.activeElement));
+    if (focused) return;
     setDraftScript(script);
-  }, [activeScriptId]);
+  }, [activeScriptId, script]);
 
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (ta && document.activeElement === ta) return;
-    setDraftScript(script);
-  }, [script]);
-
-  useEffect(() => {
-    return () => {
-      if (scriptPushTimerRef.current != null) clearTimeout(scriptPushTimerRef.current);
-    };
-  }, []);
-
-  /** Whiteboard ⌘S runs before React state catches textarea debounce — sync draft into settings snapshot first. */
+  /** Whiteboard ⌘S runs before React state catches editor debounce — sync draft into settings snapshot first. */
   useEffect(() => {
     const onFlushDraft = () => {
-      if (scriptPushTimerRef.current != null) {
-        clearTimeout(scriptPushTimerRef.current);
-        scriptPushTimerRef.current = null;
-      }
-      const v = textareaRef.current?.value ?? draftScript;
+      const v = scriptEditorRef.current?.getMarkdown() ?? draftScript;
       setDraftScript(v);
       onSetScript(v);
       onFlushSave?.(v);
@@ -788,12 +1604,62 @@ export function TeleprompterPanel({
   );
 
   const flushDraftToParent = useCallback(() => {
-    if (scriptPushTimerRef.current != null) {
-      clearTimeout(scriptPushTimerRef.current);
-      scriptPushTimerRef.current = null;
-    }
-    onSetScript(draftScript);
+    const v = scriptEditorRef.current?.getMarkdown() ?? draftScript;
+    onSetScript(v);
   }, [draftScript, onSetScript]);
+
+  const handleEditorScroll = useCallback(
+    (ratio: number) => {
+      const wrap = panelRef.current?.querySelector("[data-teleprompter-editor]") as HTMLElement | null;
+      if (wrap) scrollTopByScriptRef.current[activeScriptId] = wrap.scrollTop;
+      onEditorScroll?.(ratio);
+      onSetPlaying(false);
+    },
+    [activeScriptId, onEditorScroll, onSetPlaying]
+  );
+
+  const runImportItems = useCallback(
+    (items: { name: string; content: string }[]) => {
+      if (!items.length) return;
+      setDraftScript(normalizeTeleprompterImportedText(items[items.length - 1]!.content));
+      onImportScripts(items);
+    },
+    [onImportScripts]
+  );
+
+  const handleImportClick = useCallback(async () => {
+    flushDraftToParent();
+    const openTextFiles = (
+      typeof window !== "undefined"
+        ? (
+            window as unknown as {
+              electronAPI?: {
+                openTextFiles?: (opts?: { multi?: boolean }) => Promise<{
+                  ok: boolean;
+                  files: { name: string; content: string }[];
+                }>;
+              };
+            }
+          ).electronAPI?.openTextFiles
+        : undefined
+    );
+    if (typeof openTextFiles === "function") {
+      try {
+        const res = await openTextFiles({ multi: true });
+        if (res?.ok && res.files?.length) {
+          const items = res.files.map((f) => ({
+            name: teleprompterNameFromFilename(f.name),
+            content: f.content,
+          }));
+          runImportItems(items);
+          return;
+        }
+      } catch {
+        /* fall through to hidden file input */
+      }
+    }
+    importInputRef.current?.click();
+  }, [flushDraftToParent, runImportItems]);
 
   useEffect(() => {
     if (!saveAsOpen) return;
@@ -804,7 +1670,10 @@ export function TeleprompterPanel({
     return () => document.removeEventListener("mousedown", close);
   }, [saveAsOpen]);
   const autoMinimizeTimerRef = useRef<number | null>(null);
+  /** True while the pointer is over the expanded main panel; auto-mini only arms after pointerleave. */
+  const pointerInsidePanelRef = useRef(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const collapsedRef = useRef(false);
   const draggingRef = useRef(false);
   const lastPointerDuringDragRef = useRef({ x: 0, y: 0 });
   const dragOffsetRef = useRef({ x: 0, y: 0 });
@@ -836,7 +1705,7 @@ export function TeleprompterPanel({
 
   const expandedWidth = panelSize.w;
   const expandedHeight = panelSize.h;
-  const collapsedWidth = 360;
+  const collapsedWidth = 440;
   const collapsedHeight = 44;
   const viewport = getViewportSize();
 
@@ -862,24 +1731,81 @@ export function TeleprompterPanel({
     }
   }, []);
 
-  /** 鼠标离开「提词器控制面板」整块区域一段时间后收起（鼠标在编辑器/按钮/下拉等任一子区域内均视为仍在面板内）。 */
-  const scheduleAutoMinimize = useCallback(() => {
-    if (collapsed || draggingRef.current) return;
+  useEffect(() => {
+    collapsedRef.current = collapsed;
+    if (collapsed) pointerInsidePanelRef.current = false;
+  }, [collapsed]);
+
+  /** 指针离开主面板且 3s 内未再回到面板内（或未保持焦点在内）则收起为 Mini。 */
+  const scheduleEditIdleCollapse = useCallback(() => {
+    if (collapsedRef.current || draggingRef.current) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    if (pointerInsidePanelRef.current) return;
+    if (panel.contains(document.activeElement)) return;
     clearAutoMinimizeTimer();
-    autoMinimizeTimerRef.current = window.setTimeout(() => setCollapsed(true), AUTO_MINIMIZE_MS);
-  }, [collapsed, clearAutoMinimizeTimer]);
+    autoMinimizeTimerRef.current = window.setTimeout(() => {
+      const p = panelRef.current;
+      if (!p || collapsedRef.current) return;
+      if (pointerInsidePanelRef.current) return;
+      if (p.contains(document.activeElement)) return;
+      setCollapsed(true);
+    }, AUTO_MINIMIZE_MS);
+  }, [clearAutoMinimizeTimer]);
+
+  /** 指针在面板外编辑时重置「离开空闲」计时；指针在面板内由 pointerenter 负责不清计时。 */
+  const bumpEditActivity = useCallback(() => {
+    if (pointerInsidePanelRef.current) return;
+    scheduleEditIdleCollapse();
+  }, [scheduleEditIdleCollapse]);
 
   useEffect(() => {
     if (!isVisible) return;
     setCollapsed(false);
+    pointerInsidePanelRef.current = false;
     clearAutoMinimizeTimer();
     return clearAutoMinimizeTimer;
   }, [isVisible, clearAutoMinimizeTimer]);
 
-  // Restore textarea scroll position when panel expands (e.g. after returning from whiteboard)
+  /** Expanded panel: focus 离开到面板外时，与 pointerleave 一样启动空闲收起计时。 */
   useEffect(() => {
-    if (!collapsed && textareaRef.current) {
-      const el = textareaRef.current;
+    if (!isVisible || collapsed) return;
+    const el = panelRef.current;
+    if (!el) return;
+    const onFocusIn = () => clearAutoMinimizeTimer();
+    const onFocusOut = (e: FocusEvent) => {
+      const rt = e.relatedTarget as Node | null;
+      if (rt && el.contains(rt)) return;
+      requestAnimationFrame(() => {
+        if (!panelRef.current || collapsedRef.current) return;
+        if (pointerInsidePanelRef.current) return;
+        if (panelRef.current.contains(document.activeElement)) return;
+        scheduleEditIdleCollapse();
+      });
+    };
+    el.addEventListener("focusin", onFocusIn);
+    el.addEventListener("focusout", onFocusOut);
+    return () => {
+      el.removeEventListener("focusin", onFocusIn);
+      el.removeEventListener("focusout", onFocusOut);
+    };
+  }, [isVisible, collapsed, clearAutoMinimizeTimer, scheduleEditIdleCollapse]);
+
+  const onExpandedPanelPointerEnter = useCallback(() => {
+    pointerInsidePanelRef.current = true;
+    clearAutoMinimizeTimer();
+  }, [clearAutoMinimizeTimer]);
+
+  const onExpandedPanelPointerLeave = useCallback(() => {
+    pointerInsidePanelRef.current = false;
+    if (!collapsedRef.current && !draggingRef.current) scheduleEditIdleCollapse();
+  }, [scheduleEditIdleCollapse]);
+
+  // Restore editor scroll position when panel expands (e.g. after returning from whiteboard)
+  useEffect(() => {
+    if (!collapsed && panelRef.current) {
+      const el = panelRef.current.querySelector("[data-teleprompter-editor]") as HTMLElement | null;
+      if (!el) return;
       const saved = scrollTopByScriptRef.current[activeScriptId] ?? 0;
       const maxScroll = el.scrollHeight - el.clientHeight;
       if (maxScroll > 0) {
@@ -923,17 +1849,18 @@ export function TeleprompterPanel({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
-      const el = panelRef.current;
-      if (el && !collapsed) {
-        const { x, y } = lastPointerDuringDragRef.current;
-        const r = el.getBoundingClientRect();
-        const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-        if (!inside) scheduleAutoMinimize();
-      }
+      if (!collapsedRef.current) scheduleEditIdleCollapse();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
+  };
+
+  const onPanelChromePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (locked) return;
+    const t = e.target as HTMLElement;
+    if (t.closest("button, a, input, select, textarea")) return;
+    onPanelDragDown(e);
   };
 
   const onPanelResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -970,6 +1897,7 @@ export function TeleprompterPanel({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      if (!collapsedRef.current) scheduleEditIdleCollapse();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -1015,6 +1943,7 @@ export function TeleprompterPanel({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      if (!collapsedRef.current) scheduleEditIdleCollapse();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -1022,68 +1951,6 @@ export function TeleprompterPanel({
   };
 
   if (!isVisible) return null;
-  if (collapsed) {
-    const vp = getViewportSize();
-    const clampedLeft = Math.max(8, Math.min(left, vp.width - collapsedWidth - 8));
-    const clampedTop = Math.max(8, Math.min(top, vp.height - collapsedHeight - 8));
-    return (
-      <div
-        ref={panelRef}
-        data-dreamwork-no-intercept
-        className="!fixed z-[1000000] flex h-11 items-center gap-1.5 whitespace-nowrap rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md [color-scheme:dark]"
-        style={{ left: clampedLeft, top: clampedTop }}
-      >
-        <div
-          className={`h-7 w-7 shrink-0 rounded border border-white/25 bg-black/45 text-center leading-7 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
-          onPointerDown={onPanelDragDown}
-          title={locked ? "Position locked" : "Drag panel"}
-        >
-          ::
-        </div>
-        <span className="shrink-0 text-[11px] text-white/80">Teleprompter</span>
-        <div className="flex shrink-0 gap-1">
-          <button
-            type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
-            onClick={() => onSetPlaying(!isPlaying)}
-          >
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-          {/* Follow button hidden — speech model not ready for CJK yet
-          {onSetFollowMode && (
-            <button
-              type="button"
-              className={`rounded border px-2 py-1 text-[10px] ${followMode ? "border-emerald-400/60 bg-emerald-600/50 text-white" : "border-white/30 bg-black/45 text-white"}`}
-              onClick={() => onSetFollowMode(!followMode)}
-              title={followMode ? "Exit follow mode" : "Follow mode (Space/click to advance)"}
-            >
-              {followMode ? "Following" : "Follow"}
-            </button>
-          )} */}
-          <button
-            type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
-            onClick={() => {
-              setCollapsed(false);
-              clearAutoMinimizeTimer();
-            }}
-          >
-            Open
-          </button>
-          <button
-            type="button"
-            className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
-            onClick={() => {
-              flushDraftToParent();
-              onHide();
-            }}
-          >
-            Hide
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   /** Same height / radius / horizontal padding as GlassButton `sm` overrides (h-7, rounded-lg, px-2). */
   const tpActionClass =
@@ -1091,7 +1958,81 @@ export function TeleprompterPanel({
   const tpSelectClass =
     "box-border h-7 min-w-0 flex-1 rounded-lg border border-white/20 bg-black/45 px-2 py-0 text-[10px] font-normal leading-7 text-white outline-none [color-scheme:dark]";
 
-  return (
+  const collapsedVp = getViewportSize();
+  const collapsedClampedLeft = Math.max(
+    8,
+    Math.min(left, collapsedVp.width - collapsedWidth - 8),
+  );
+  const collapsedClampedTop = Math.max(
+    8,
+    Math.min(top, collapsedVp.height - collapsedHeight - 8),
+  );
+
+  const panelEl = collapsed ? (
+    <div
+      ref={panelRef}
+      data-dreamwork-no-intercept
+      className={`!fixed z-[1000000] flex h-11 items-center gap-1.5 whitespace-nowrap rounded-xl border border-white/30 bg-black/75 px-2 text-xs text-white shadow-2xl backdrop-blur-md [color-scheme:dark] ${locked ? "" : "cursor-grab"}`}
+      style={{ left: collapsedClampedLeft, top: collapsedClampedTop }}
+      onPointerDown={onPanelChromePointerDown}
+    >
+      <div
+        className={`shrink-0 select-none rounded border border-white/25 bg-black/45 px-0.5 text-center text-[10px] leading-7 text-white/70 ${locked ? "cursor-not-allowed opacity-60" : "cursor-grab active:cursor-grabbing"}`}
+        aria-hidden
+        title="Drag to move"
+      >
+        ⋮⋮
+      </div>
+      <span className="shrink-0 select-none text-[11px] text-white/80">Teleprompter</span>
+      <div className="flex shrink-0 gap-1">
+        <button
+          type="button"
+          className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
+          onClick={() => onSetPlaying(!isPlaying)}
+        >
+          {isPlaying ? "Pause" : "Play"}
+        </button>
+        {onSetFollowMode && isElectronVosk() && (
+          <button
+            type="button"
+            className={`rounded border px-2 py-1 text-[10px] ${followMode ? "border-emerald-400/60 bg-emerald-600/50 text-white" : "border-white/30 bg-black/45 text-white"}`}
+            onClick={() => handleTeleprompterFollowToggle(!!followMode, onSetFollowMode)}
+            title={followMode ? "Exit voice follow" : "Voice follow (Vosk)"}
+          >
+            {followMode ? "Following" : "Follow"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
+          onClick={() => onReset()}
+          title="Reset scroll and reading position"
+        >
+          Reset
+        </button>
+        <button
+          type="button"
+          className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
+          onClick={() => {
+            setCollapsed(false);
+            clearAutoMinimizeTimer();
+          }}
+        >
+          Open
+        </button>
+        <button
+          type="button"
+          className="rounded border border-white/30 bg-black/45 px-2 py-1 text-[10px] text-white"
+          onClick={() => {
+            flushDraftToParent();
+            onHide();
+          }}
+        >
+          Hide
+        </button>
+      </div>
+    </div>
+  ) : (
     <div
       ref={panelRef}
       data-dreamwork-no-intercept
@@ -1103,19 +2044,22 @@ export function TeleprompterPanel({
         height: panelSize.h,
         maxWidth: "min(920px, calc(100vw - 16px))",
       }}
-      onMouseEnter={clearAutoMinimizeTimer}
-      onMouseLeave={scheduleAutoMinimize}
+      onPointerEnter={onExpandedPanelPointerEnter}
+      onPointerLeave={onExpandedPanelPointerLeave}
     >
-      {/* Fixed chrome — never overlaps; body uses flex-1 + min-h-0 like Figma auto-layout */}
-      <div className="mb-1.5 flex shrink-0 items-center gap-2">
+      {/* Fixed chrome — drag from title row (not only ::); Lock stays clickable */}
+      <div
+        className={`mb-1.5 flex shrink-0 items-center gap-2 ${locked ? "" : "cursor-grab"}`}
+        onPointerDown={onPanelChromePointerDown}
+      >
         <div
-          className={`h-6 w-7 shrink-0 rounded border border-white/25 bg-black/45 text-center text-[10px] leading-6 ${locked ? "cursor-not-allowed" : "cursor-grab"}`}
-          onPointerDown={onPanelDragDown}
-          title={locked ? "Position locked" : "Drag panel"}
+          className={`shrink-0 select-none rounded border border-white/25 bg-black/45 px-0.5 text-center text-[10px] leading-6 text-white/70 ${locked ? "cursor-not-allowed opacity-60" : "cursor-grab active:cursor-grabbing"}`}
+          aria-hidden
+          title="Drag to move"
         >
-          ::
+          ⋮⋮
         </div>
-        <span className="mr-auto text-[12px] font-semibold">Teleprompter</span>
+        <span className="mr-auto select-none text-[12px] font-semibold">Teleprompter</span>
         <button
           type="button"
           onClick={onToggleLocked}
@@ -1137,7 +2081,15 @@ export function TeleprompterPanel({
         <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={onReset}>
           Reset
         </GlassButton>
-        <GlassButton size="sm" className={tpActionClass} variant="secondary" onClick={() => setCollapsed(true)}>
+        <GlassButton
+          size="sm"
+          className={tpActionClass}
+          variant="secondary"
+          onClick={() => {
+            clearAutoMinimizeTimer();
+            setCollapsed(true);
+          }}
+        >
           Min
         </GlassButton>
         <GlassButton
@@ -1152,6 +2104,32 @@ export function TeleprompterPanel({
           Hide
         </GlassButton>
       </div>
+      {isElectronVosk() && onSetFollowMode && onSetVoskLang && (
+        <div className="mb-2 flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1.5">
+          <GlassButton
+            size="sm"
+            className={tpActionClass}
+            variant={followMode ? "primary" : "secondary"}
+            onClick={() => handleTeleprompterFollowToggle(!!followMode, onSetFollowMode)}
+            title="Follow uses the model language: pick 中英混稿 (ZH) for Chinese speech, English (EN) for English."
+          >
+            {followMode ? "Following" : "Voice follow"}
+          </GlassButton>
+          <label className="flex min-w-0 items-center gap-1 text-[10px] text-white/70">
+            <span className="shrink-0">Model</span>
+            <select
+              value={voskLang}
+              onChange={(e) => onSetVoskLang(e.target.value as TeleprompterVoskLang)}
+              className={tpSelectClass}
+              title="Must match how you speak: zh = Chinese (and mixed CN/EN script), en = English, it = Italian."
+            >
+              <option value="en">English (EN)</option>
+              <option value="zh">中英混稿 (ZH)</option>
+              <option value="it">Italiano (IT)</option>
+            </select>
+          </label>
+        </div>
+      )}
       <div className="mb-2 flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1">
         {editingScriptName ? (
           <input
@@ -1204,7 +2182,7 @@ export function TeleprompterPanel({
         <input
           ref={importInputRef}
           type="file"
-          accept=".txt,.md,.markdown,text/plain"
+          accept="text/plain,text/markdown,.txt,.md,.markdown,.script,*/*"
           multiple
           className="sr-only h-px w-px overflow-hidden border-0 p-0 opacity-0"
           tabIndex={-1}
@@ -1224,7 +2202,7 @@ export function TeleprompterPanel({
                 }
               }
               inputEl.value = "";
-              if (items.length) onImportScripts(items);
+              runImportItems(items);
             })();
           }}
         />
@@ -1233,11 +2211,8 @@ export function TeleprompterPanel({
           size="sm"
           className={tpActionClass}
           variant="secondary"
-          onClick={() => {
-            flushDraftToParent();
-            importInputRef.current?.click();
-          }}
-          title="Import .txt or .md from disk (multiple files allowed)"
+          onClick={() => void handleImportClick()}
+          title="Import .txt, .md, or .script from disk (multiple files allowed)"
         >
           Import
         </GlassButton>
@@ -1297,83 +2272,26 @@ export function TeleprompterPanel({
 
       {/* Scroll body: stack is non-overlapping; short panels scroll as one column (auto-layout safe) */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain">
-        <textarea
-          ref={textareaRef}
+        <TeleprompterScriptEditor
+          ref={scriptEditorRef}
           value={draftScript}
-          onChange={(e) => {
-            const v = e.target.value;
+          activeScriptId={activeScriptId}
+          height={editorHeight}
+          placeholder="Paste script here…"
+          className={TELEPROMPTER_EDITOR_HTML_CLASS}
+          onChange={(v) => {
             setDraftScript(v);
-            if (scriptPushTimerRef.current != null) clearTimeout(scriptPushTimerRef.current);
-            scriptPushTimerRef.current = setTimeout(() => {
-              scriptPushTimerRef.current = null;
-              onSetScript(v);
-            }, 120);
+            bumpEditActivity();
           }}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-              e.preventDefault();
-              if (scriptPushTimerRef.current != null) {
-                clearTimeout(scriptPushTimerRef.current);
-                scriptPushTimerRef.current = null;
-              }
-              const v = textareaRef.current?.value ?? draftScript;
-              setDraftScript(v);
-              onSetScript(v);
-              onFlushSave?.(v);
-            }
-          }}
-          onPaste={(e) => {
-            const pasted = e.clipboardData.getData("text");
-            if (/\n\n/.test(pasted)) {
-              e.preventDefault();
-              const ta = e.currentTarget;
-              const start = ta.selectionStart;
-              const end = ta.selectionEnd;
-              const cleaned = collapseBlankLines(pasted);
-              const next = ta.value.slice(0, start) + cleaned + ta.value.slice(end);
-              setDraftScript(next);
-              onSetScript(next);
-              requestAnimationFrame(() => {
-                const pos = start + cleaned.length;
-                ta.selectionStart = pos;
-                ta.selectionEnd = pos;
-              });
-            }
-          }}
-          onBlur={(e) => {
-            if (scriptPushTimerRef.current != null) {
-              clearTimeout(scriptPushTimerRef.current);
-              scriptPushTimerRef.current = null;
-            }
-            const v = e.target.value;
+          onDebouncedCommit={onSetScript}
+          debounceMs={120}
+          onScroll={handleEditorScroll}
+          onBlurCommit={() => {
+            const v = scriptEditorRef.current?.getMarkdown() ?? draftScript;
             setDraftScript(v);
             onSetScript(v);
             onFlushSave?.(v);
           }}
-          onFocus={() => {
-            const el = textareaRef.current;
-            const saved = scrollTopByScriptRef.current[activeScriptId];
-            if (el && saved != null) {
-              const maxScroll = el.scrollHeight - el.clientHeight;
-              if (maxScroll > 0 && el.scrollTop !== saved) {
-                el.scrollTop = Math.min(saved, maxScroll);
-              }
-            }
-          }}
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            scrollTopByScriptRef.current[activeScriptId] = el.scrollTop;
-            const max = el.scrollHeight - el.clientHeight;
-            if (max > 0) {
-              const ratio = el.scrollTop / max;
-              onEditorScroll?.(ratio);
-              onSetPlaying(false);
-            }
-          }}
-          rows={6}
-          style={{ height: editorHeight }}
-          className="w-full min-w-0 shrink-0 resize-none overflow-y-auto rounded-md border border-white/20 bg-black/45 p-2 text-[11px] leading-relaxed text-white caret-white outline-none placeholder:text-white/45"
-          placeholder="Paste script here..."
         />
         <div
           role="separator"
@@ -1460,4 +2378,6 @@ export function TeleprompterPanel({
       />
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(panelEl, document.body) : null;
 }
