@@ -1,3 +1,6 @@
+import type { SettingsPanelGeom } from "@/lib/settingsPanelGeom";
+import { parseSettingsPanelGeom } from "@/lib/settingsPanelGeom";
+
 const KEY = "dreamwork-settings";
 
 /** Latest full settings (last `saveSettings` or disk hydrate). Used instead of rereading LS mid-flight so e.g. Teleprompter save cannot wipe in-memory whiteboard data. */
@@ -64,6 +67,39 @@ export interface StoredBeautySettings {
 
 export type RecordResolution = "1080p" | "2K" | "4K";
 
+/** Landscape: explicit 16∶9 or 16∶10 encode sizes; portrait → fixed 3∶4 / 9∶16 (short-edge tiers). */
+export type RecordOutputShape =
+  | "landscape_16_9"
+  | "landscape_16_10"
+  | "portrait_3_4"
+  | "portrait_9_16";
+
+export function isLandscapeRecordOutputShape(s: RecordOutputShape): boolean {
+  return s === "landscape_16_9" || s === "landscape_16_10";
+}
+
+export function isPortraitRecordOutputShape(s: RecordOutputShape): boolean {
+  return s === "portrait_3_4" || s === "portrait_9_16";
+}
+
+/** Legacy saved `"landscape"` → pick table by primary screen aspect (same threshold as detectScreenOutputAspectFamily). */
+function migrateStoredLandscapeRecordShape(): "landscape_16_9" | "landscape_16_10" {
+  if (typeof window !== "undefined" && window.screen) {
+    const sw = window.screen.width;
+    const sh = window.screen.height;
+    if (sw > 0 && sh > 0 && sw / sh < 1.72) return "landscape_16_10";
+  }
+  return "landscape_16_9";
+}
+
+function parseRecordOutputShape(raw: unknown): RecordOutputShape | undefined {
+  if (raw === "landscape_16_9" || raw === "landscape_16_10" || raw === "portrait_3_4" || raw === "portrait_9_16") {
+    return raw;
+  }
+  if (raw === "landscape") return migrateStoredLandscapeRecordShape();
+  return undefined;
+}
+
 export type LetterboxBackground = "black" | "custom";
 /** Custom background (and non–screen-share composites): fit = contain, crop = cover, fill = stretch. */
 export type LetterboxMode = "fill" | "fit" | "crop";
@@ -75,8 +111,13 @@ export interface StoredSettings {
   pipPos?: { x: number; y: number };
   fullPagePipPos?: { x: number; y: number };
   recordResolution?: RecordResolution;
-  /** Share window / whiteboard-only record: width & height scale vs output frame (80–100). Higher = sharper, less margin. */
+  recordOutputShape?: RecordOutputShape;
+  /** Share window / whiteboard-only record: width & height scale vs output frame (40–100%). Higher = sharper, less margin. */
   shareWindowFillPercent?: number;
+  /** Pan share window inside letterbox ([-1,1] × [-1,1], 0 = centered). Landscape & portrait Capture. */
+  sharePortraitWindowPanNorm?: { x: number; y: number };
+  /** Whiteboard-only record: pan fitted whiteboard surface inside output slack (same norm as share pan). */
+  whiteboardRecordSurfacePanNorm?: { x: number; y: number };
   letterboxBackground?: LetterboxBackground;
   letterboxCustomImage?: string;
   letterboxMode?: LetterboxMode;
@@ -115,6 +156,8 @@ export interface StoredSettings {
   omitPipFromRecording?: boolean;
   /** When true, starting a recording moves PiP to the whiteboard column (off the shared capture area when screen sharing). */
   autoParkPipOnRecordStart?: boolean;
+  /** Floating Settings panel geometry (CSS px, viewport). */
+  settingsPanelGeom?: SettingsPanelGeom;
   /** @deprecated Migrated to whiteboardProjects */
   whiteboardData?: { elements: unknown[]; appState: Record<string, unknown>; files?: Record<string, unknown> };
   /** Whiteboard projects: one document per project */
@@ -260,7 +303,29 @@ function parseAndValidate(parsed: unknown): StoredSettings {
         ? (p.fullPagePipPos as { x: number; y: number })
         : undefined,
     recordResolution: p.recordResolution === "1080p" || p.recordResolution === "2K" || p.recordResolution === "4K" ? (p.recordResolution as RecordResolution) : undefined,
-    shareWindowFillPercent: validNum(p.shareWindowFillPercent, 80, 100),
+    recordOutputShape: parseRecordOutputShape(p.recordOutputShape),
+    shareWindowFillPercent: validNum(p.shareWindowFillPercent, 40, 100),
+    sharePortraitWindowPanNorm: (() => {
+      const raw = p.sharePortraitWindowPanNorm;
+      if (!raw || typeof raw !== "object") return undefined;
+      const o = raw as Record<string, unknown>;
+      const x = typeof o.x === "number" ? o.x : NaN;
+      const y = typeof o.y === "number" ? o.y : NaN;
+      if (Number.isNaN(x) || Number.isNaN(y)) return undefined;
+      const cx = Math.min(1, Math.max(-1, x));
+      const cy = Math.min(1, Math.max(-1, y));
+      return { x: cx, y: cy };
+    })(),
+    whiteboardRecordSurfacePanNorm: (() => {
+      const raw = p.whiteboardRecordSurfacePanNorm;
+      if (!raw || typeof raw !== "object") return undefined;
+      const o = raw as Record<string, unknown>;
+      const x = typeof o.x === "number" ? o.x : NaN;
+      const y = typeof o.y === "number" ? o.y : NaN;
+      if (Number.isNaN(x) || Number.isNaN(y)) return undefined;
+      return { x: Math.min(1, Math.max(-1, x)), y: Math.min(1, Math.max(-1, y)) };
+    })(),
+    settingsPanelGeom: parseSettingsPanelGeom(p.settingsPanelGeom),
     letterboxBackground:
       p.letterboxBackground && ["black", "custom"].includes(p.letterboxBackground as string)
         ? (p.letterboxBackground as LetterboxBackground)

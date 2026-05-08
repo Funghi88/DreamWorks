@@ -1,4 +1,12 @@
 /**
+ * Share / whiteboard record fill: clamp to 40–100% for all output shapes.
+ */
+export function effectiveShareFillPercent(pct: number): number {
+  const n = typeof pct === "number" && !Number.isNaN(pct) ? Math.round(pct) : 80;
+  return Math.min(100, Math.max(40, n));
+}
+
+/**
  * Width (CSS px) of the largest 16:9 rectangle that fits inside a W×H box.
  * This is the “16” side of the 16:9 reference used for share layout (not always === W).
  */
@@ -25,7 +33,7 @@ export function recordContentFit80(
   const ch = Math.max(1, contentH);
   const basisW = options?.basisW ?? frameW;
   const fill =
-    typeof options?.fillRatio === "number" && options.fillRatio >= 0.5 && options.fillRatio <= 1
+    typeof options?.fillRatio === "number" && options.fillRatio >= 0.4 && options.fillRatio <= 1
       ? options.fillRatio
       : 0.8;
   const targetW = Math.round(basisW * fill);

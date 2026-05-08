@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/select";
 import type {
   RecordResolution,
+  RecordOutputShape,
   LetterboxBackground,
   LetterboxMode,
 } from "@/lib/storage";
@@ -53,7 +54,9 @@ interface SettingsPanelProps {
   onSystemVolumeChange: (v: number) => void;
   recordResolution?: RecordResolution;
   onRecordResolutionChange?: (v: RecordResolution) => void;
-  /** 80–100: Share window / whiteboard record area vs frame; higher = sharper, less margin. */
+  recordOutputShape?: RecordOutputShape;
+  onRecordOutputShapeChange?: (v: RecordOutputShape) => void;
+  /** Share window / whiteboard record: 40–100% vs output frame (all shapes); higher = sharper, less margin. */
   shareWindowFillPercent?: number;
   onShareWindowFillPercentChange?: (v: number) => void;
   letterboxBackground?: LetterboxBackground;
@@ -95,6 +98,8 @@ export function SettingsPanel({
   onSystemVolumeChange,
   recordResolution,
   onRecordResolutionChange,
+  recordOutputShape,
+  onRecordOutputShapeChange,
   shareWindowFillPercent,
   onShareWindowFillPercentChange,
   letterboxBackground,
@@ -169,7 +174,7 @@ export function SettingsPanel({
             <SelectTrigger className="min-w-[7rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
+            <SelectContent side="top" className="z-[1000035] border-slate-200 bg-white">
               <SelectItem value="none">Black border</SelectItem>
               <SelectItem value="simple">Simple</SelectItem>
               <SelectItem value="glow">Glow</SelectItem>
@@ -215,7 +220,7 @@ export function SettingsPanel({
                 position="popper"
                 side="top"
                 sideOffset={6}
-                className="z-[1000020] border-slate-200 bg-white"
+                className="z-[1000035] border-slate-200 bg-white"
               >
                 <SelectItem value="none">None</SelectItem>
                 <SelectItem value="sunglasses">Sunglasses</SelectItem>
@@ -250,7 +255,7 @@ export function SettingsPanel({
                   <SelectTrigger className="min-w-[6rem] border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
+                  <SelectContent side="top" className="z-[1000035] border-slate-200 bg-white">
                     <SelectItem value="natural">Natural</SelectItem>
                     <SelectItem value="professional">Pro</SelectItem>
                     <SelectItem value="glamour">Glamour</SelectItem>
@@ -280,6 +285,30 @@ export function SettingsPanel({
             )}
           </div>
         )}
+        {recordOutputShape != null && onRecordOutputShapeChange && (
+          <div className="flex items-center gap-3">
+            <span
+              className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}
+              title="Output frame for screen share + whiteboard recording only. Does not change PiP size (shape slider). Choose 16∶9 or 16∶10 landscape, or portrait tiers (Res sets short edge)."
+            >
+              Frame
+            </span>
+            <Select
+              value={recordOutputShape}
+              onValueChange={(v) => onRecordOutputShapeChange(v as RecordOutputShape)}
+            >
+              <SelectTrigger className="min-w-[10rem] border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent side="top" className="z-[1000035] border-slate-200 bg-white">
+                <SelectItem value="landscape_16_9">Landscape 16∶9</SelectItem>
+                <SelectItem value="landscape_16_10">Landscape 16∶10</SelectItem>
+                <SelectItem value="portrait_3_4">Portrait 3∶4</SelectItem>
+                <SelectItem value="portrait_9_16">Portrait 9∶16</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         {recordResolution != null && onRecordResolutionChange && (
           <div className="flex items-center gap-3">
             <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}>Res</span>
@@ -290,7 +319,7 @@ export function SettingsPanel({
               <SelectTrigger className="min-w-[5rem] border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
+              <SelectContent side="top" className="z-[1000035] border-slate-200 bg-white">
                 <SelectItem value="1080p">1080p</SelectItem>
                 <SelectItem value="2K">2K</SelectItem>
                 <SelectItem value="4K">4K</SelectItem>
@@ -301,13 +330,18 @@ export function SettingsPanel({
         {shareWindowFillPercent != null && onShareWindowFillPercentChange && (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-3">
-              <span className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`} title="Share area vs output frame">
+              <span
+                className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}
+                title="Share area vs output frame (40–100%). Drag the capture preview to pan; double-click to center."
+              >
                 Share
               </span>
               <Slider
                 value={[shareWindowFillPercent]}
-                onValueChange={([v]) => onShareWindowFillPercentChange(Math.round(v ?? 80))}
-                min={80}
+                onValueChange={([v]) => {
+                  onShareWindowFillPercentChange(Math.round(Math.min(100, Math.max(40, v ?? 40))));
+                }}
+                min={40}
                 max={100}
                 step={5}
                 className="flex-1 min-w-0"
@@ -361,7 +395,7 @@ export function SettingsPanel({
                 <SelectTrigger className="min-w-[10rem] flex-1 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-900">
                   <SelectValue placeholder="Background" />
                 </SelectTrigger>
-                <SelectContent side="top" className="z-[1000020] border-slate-200 bg-white">
+                <SelectContent side="top" className="z-[1000035] border-slate-200 bg-white">
                   <SelectItem value="black">Black</SelectItem>
                   <SelectItem value="custom">Custom image</SelectItem>
                 </SelectContent>

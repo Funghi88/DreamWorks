@@ -5,8 +5,6 @@
 
 DreamWorks 主界面
 
-DreamWorks 主界面
-
 ---
 
 ## 中文
@@ -49,12 +47,19 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 
 ### 功能概览
 
-1. **Capture Screen** — 使用**系统原生**屏幕/窗口选取界面（macOS 为 Apple UI）。整屏请在原生界面中选**显示器 / Desktop**（通常在上方或顶栏），不要只选当前应用窗口。
-  - **浏览器 (仅网页)**：使用浏览器自带的屏幕共享界面。
+1. **Capture Screen** — **Electron（macOS）**：应用内列表选取**整台显示器**或**单个窗口**（主进程 `desktopCapturer`，非 Apple 系统全屏 picker；整屏请在列表中选显示器条目）。**浏览器**：使用浏览器自带的屏幕共享界面。
 2. **Start Camera** — 圆形画中画，可拖拽调整位置
 3. **Whiteboard** — Excalidraw 白板，支持绘图、标注
 4. **Live Meeting** — WebRTC 视频会议，支持聊天、屏幕共享、录制、虚拟背景、实时转录
 5. **Record** — 录制屏幕 + 摄像头合成画面，支持保存 WebM / MP4
+
+**录制与成片（当前版本）**
+
+- **输出画幅**：横屏可选 **16∶9** 或 **16∶10**（与常见外接屏 / MacBook 内建屏对应）；竖屏可选 **3∶4** 或 **9∶16**，分辨率档 **1080p / 2K / 4K**（具体像素由 `outputAspect` 表统一计算）。
+- **黑边与内容适配**：可设黑边背景（纯黑或自定义图），内容在画幅内 **拉伸 / 等比包含 / 等比裁切**（`letterboxMode`）。
+- **共享窗口 / 白板占比**：**Share %**（约 40–100%）控制屏幕共享或白板在成片中的占比；横屏、竖屏捕获下可在黑边内 **平移** 共享窗口；仅白板录制时可 **平移** 已适配的白板表面。
+- **白板录制小地图**：录制白板时可用 **布局小地图** 预览最终成片框，在小地图内拖动 **画中画**、调整 Share 占比或平移白板区域，与主界面合成逻辑对齐。
+- **设置面板**：**可拖动、可改大小的浮动设置窗**（无全屏遮罩，便于对照画面调参），位置与尺寸会写入设置并持久化。
 
 **PiP 背景 vs macOS 系统摄像头效果（含 Presenter Overlay）**
 
@@ -108,6 +113,8 @@ npm run dev
 
 **仅 Web 模式（无 Electron）：** `npm run dev:web`，然后访问 [http://localhost:5173](http://localhost:5173)
 
+**Snap Camera Kit（可选，自用 / 私有）：** 复制 `.env.example` 为 `.env`，设置 `VITE_ENABLE_SNAP_CAMERA_KIT=true` 及 `VITE_SNAP_API_TOKEN`、`VITE_SNAP_LENS_ID`、`VITE_SNAP_LENS_GROUP_ID`（见 [Snap Camera Kit](https://camera-kit.snapchat.com/) 开发者后台）。若计划**开源或公开发布**本仓库或分支，请先阅读 `src/config/featureFlags.ts` 与 Snap 条款再保留该集成。
+
 **Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
 
 **构建 macOS 应用：**
@@ -124,6 +131,8 @@ npm run dev
 
 
 ### 项目进展
+
+**录制与界面：** 可配置成片比例与分辨率、黑边与 Share / 白板布局、白板录制布局小地图、浮动可持久化设置面板（与当前 `src/` 实现一致）。
 
 **Live Meeting 功能状态：** 加入/创建房间 ✅、音视频通话 ✅、屏幕共享 ✅、文字聊天 ✅、会议内录制 ✅、虚拟背景 ✅、实时转录 ✅、**局域网模式（同一 Wi-Fi 免费会议）** ✅（Electron 内置信令）
 
@@ -177,11 +186,19 @@ Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
 
 ### Features
 
-1. **Capture Screen** — Native OS screen/window picker. Browser build uses the browser’s picker.
+1. **Capture Screen** — Electron (macOS): in-app picker listing **full displays** and **individual windows** (`desktopCapturer`, not Apple’s fullscreen system sheet). Browser build uses the browser’s picker.
 2. **Start Camera** — Circular PiP, draggable
 3. **Whiteboard** — Excalidraw overlay for drawing and annotation
 4. **Live Meeting** — WebRTC video calls with chat, screen share, recording, virtual backgrounds, live transcription
 5. **Record** — Composite screen + webcam; save as WebM or MP4
+
+**Recording & export (current build)**
+
+- **Output frame:** Landscape **16∶9** or **16∶10**; portrait **3∶4** or **9∶16**; resolution tiers **1080p / 2K / 4K** (pixel sizes from a single `outputAspect` table).
+- **Letterboxing:** Background can be black or a **custom image**; content fit modes **stretch / contain / crop** inside the encode frame (`letterboxMode`).
+- **Share / whiteboard fill:** **Share %** (~40–100%) scales how much of the frame the screen share or whiteboard occupies; pan the share window inside letterbox on landscape/portrait capture, and pan the fitted whiteboard **surface** in whiteboard-only recording.
+- **Whiteboard recording minimap:** While recording the board, use the **layout minimap** to preview the final frame—drag **PiP**, adjust Share %, or pan the board area in sync with the main compositor.
+- **Settings UI:** **Floating Settings** window—drag the header, resize from the corner, no fullscreen dimmer—geometry is **persisted** so your layout survives restarts.
 
 ### Excalidraw whiteboard: UX, storage, and balancing CPU/GPU with recording
 
@@ -248,6 +265,8 @@ The app opens in an Electron window.
 
 ### Project status
 
+**Recording & UI:** Configurable encode aspect and resolution, letterbox/fit options, Share / whiteboard layout controls, whiteboard-recording layout minimap, and a persisted floating Settings panel (matches current `src/`).
+
 **Live Meeting:** Join/create room ✅, audio/video ✅, screen share ✅, chat ✅, in-call recording ✅, virtual backgrounds ✅, live transcription ✅, **LAN mode (free same-WiFi meetings)** ✅ (embedded signaling in Electron)
 
 ### Roadmap
@@ -271,18 +290,12 @@ The app opens in an Electron window.
 2. **Web-only dev:** If you only ran the UI in a **browser** (`localhost`), data lived in **browser localStorage**, not in that file — use **Electron** (`npm run dev` or `electron .`) so saves go to disk, or copy settings manually.
 3. **Bundle a snapshot into the next pack:** Run `npm run copy-settings-to-defaults` (copies your current `settings.json` into `defaults/`), then `npm run pack`. See `defaults/README.md`.
 
-**Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
-
-1. **Old folder name:** Older builds may have used `~/Library/Application Support/dreamwork/` — the app now **auto-migrates** from `dreamwork` to `DreamWorks` when the new file is empty.
-2. **Web-only dev:** If you only ran the UI in a **browser** (`localhost`), data lived in **browser localStorage**, not in that file — use **Electron** (`npm run dev` or `electron .`) so saves go to disk, or copy settings manually.
-3. **Bundle a snapshot into the next pack:** Run `npm run copy-settings-to-defaults` (copies your current `settings.json` into `defaults/`), then `npm run pack`. See `defaults/README.md`.
-
 ---
 
 ## Tech stack
 
-- **Electron** — Desktop framework
-- **React + TypeScript + Vite** — Frontend
+- **Electron 33** — Desktop framework (see `package.json` for pinned minor)
+- **React 19 + TypeScript + Vite 7** — Frontend
 - **Tailwind CSS v4 + Shadcn/UI** — Styling and components
 - **getDisplayMedia + getUserMedia + MediaRecorder + Canvas 2D** — Media and recording
 

@@ -1,4 +1,4 @@
-import type { RecordResolution } from "@/lib/storage";
+import type { RecordResolution, RecordOutputShape } from "@/lib/storage";
 
 /** iMac / 多数外接屏 ≈16:9；MacBook 内置屏 ≈16:10 */
 export type OutputAspectFamily = "16:9" | "16:10";
@@ -13,6 +13,20 @@ const SIZES_16_10: Record<RecordResolution, { w: number; h: number }> = {
   "1080p": { w: 1920, h: 1200 },
   "2K": { w: 2560, h: 1600 },
   "4K": { w: 3840, h: 2400 },
+};
+
+/** Portrait 3:4 — short edge 1080 / 1440 / 2160 for 1080p / 2K / 4K tier. */
+const SIZES_PORTRAIT_3_4: Record<RecordResolution, { w: number; h: number }> = {
+  "1080p": { w: 1080, h: 1440 },
+  "2K": { w: 1440, h: 1920 },
+  "4K": { w: 2160, h: 2880 },
+};
+
+/** Portrait 9:16 — same short-edge tiers. */
+const SIZES_PORTRAIT_9_16: Record<RecordResolution, { w: number; h: number }> = {
+  "1080p": { w: 1080, h: 1920 },
+  "2K": { w: 1440, h: 2560 },
+  "4K": { w: 2160, h: 3840 },
 };
 
 /**
@@ -38,8 +52,7 @@ export function detectScreenOutputAspectFamily(): OutputAspectFamily {
 }
 
 /**
- * 成片宽高比：MacBook Pro / Air → 固定 16:10 输出表；否则按主屏比例在 16:9 / 16:10 间选择。
- * 与 {@link getRecordOutputDimensions} 及 Share 区域占满度框共用同一 family。
+ * MacBook Pro / Air → 16∶10 family hint；否则按主屏比例。可用于 UI 提示；成片尺寸见 {@link getRecordOutputDimensions} 与 Settings 中的 Frame 选项。
  */
 export function resolveOutputAspectFamily(options: {
   hardwareModel?: string | null;
@@ -50,12 +63,21 @@ export function resolveOutputAspectFamily(options: {
   return detectScreenOutputAspectFamily();
 }
 
+/** 编码成片像素尺寸（由 Res + Frame shape 唯一决定）。 */
 export function getRecordOutputDimensions(
   preset: RecordResolution,
-  family: OutputAspectFamily
+  outputShape: RecordOutputShape = "landscape_16_9"
 ): { w: number; h: number } {
-  const table = family === "16:10" ? SIZES_16_10 : SIZES_16_9;
-  return table[preset] ?? table["1080p"];
+  if (outputShape === "portrait_3_4") {
+    return SIZES_PORTRAIT_3_4[preset] ?? SIZES_PORTRAIT_3_4["1080p"];
+  }
+  if (outputShape === "portrait_9_16") {
+    return SIZES_PORTRAIT_9_16[preset] ?? SIZES_PORTRAIT_9_16["1080p"];
+  }
+  if (outputShape === "landscape_16_10") {
+    return SIZES_16_10[preset] ?? SIZES_16_10["1080p"];
+  }
+  return SIZES_16_9[preset] ?? SIZES_16_9["1080p"];
 }
 
 /**

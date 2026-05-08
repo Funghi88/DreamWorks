@@ -47,6 +47,8 @@ interface CircularWebcamProps {
   avatarImgRef: React.RefObject<HTMLImageElement | null>;
   /** 拖动时关掉外层大发光，减轻合成拖影 */
   suppressHeavyShadow?: boolean;
+  /** When parent paints avatar edge (stroke/glow) on an overlay canvas, hide duplicate borders here to avoid ghosting */
+  edgeDecorHandledByOverlay?: boolean;
   /** After PiP static image loads, parent can repaint overlay canvas (same frame as img.complete). */
   onAvatarImageLoad?: () => void;
 }
@@ -73,6 +75,7 @@ export function CircularWebcam({
   cameraVideoRef,
   avatarImgRef,
   suppressHeavyShadow = false,
+  edgeDecorHandledByOverlay = false,
   onAvatarImageLoad,
 }: CircularWebcamProps) {
   const videoElRef = useRef<HTMLVideoElement | null>(null);
@@ -228,7 +231,8 @@ export function CircularWebcam({
         pointerEvents: "auto",
         zIndex: 9999,
         ...(avatarDecor === "glow" &&
-          !suppressHeavyShadow && {
+          !suppressHeavyShadow &&
+          !edgeDecorHandledByOverlay && {
             boxShadow: `0 0 48px ${hexToRgba(glowColor, 0.85)}, 0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 20px rgba(255,255,255,0.15)`,
           }),
       }}
@@ -246,7 +250,10 @@ export function CircularWebcam({
             src={avatarImageSrc}
             alt=""
             className="pointer-events-none absolute inset-0 w-full h-full object-cover"
-            style={beautyMode ? { filter: beautyFilter } : undefined}
+            style={{
+              ...(beautyMode ? { filter: beautyFilter } : {}),
+              ...(edgeDecorHandledByOverlay ? { opacity: 0 } : {}),
+            }}
             draggable={false}
             onLoad={() => onAvatarImageLoad?.()}
           />
@@ -273,7 +280,13 @@ export function CircularWebcam({
               muted
               playsInline
               className="absolute w-[320px] h-[240px] pointer-events-none"
-              style={{ left: 0, top: 0, opacity: 1, zIndex: -1, transform: "translate3d(0,0,0)" }}
+              style={{
+                left: 0,
+                top: 0,
+                opacity: edgeDecorHandledByOverlay ? 0 : 1,
+                zIndex: -1,
+                transform: "translate3d(0,0,0)",
+              }}
               aria-hidden
             />
             <canvas
@@ -320,12 +333,16 @@ export function CircularWebcam({
             muted
             playsInline
             className={`pointer-events-none absolute inset-0 w-full h-full ${pipWideAspect ? "object-contain" : "object-cover"}`}
-            style={{ transform: "scaleX(-1)", ...(beautyMode ? { filter: beautyFilter } : {}) }}
+            style={{
+              transform: "scaleX(-1)",
+              ...(beautyMode ? { filter: beautyFilter } : {}),
+              ...(edgeDecorHandledByOverlay ? { opacity: 0 } : {}),
+            }}
             draggable={false}
           />
         )}
         {/* Border overlay - on top of video, transparent bg, pointer-events-none so drag works */}
-        {borderClass && (
+        {borderClass && !edgeDecorHandledByOverlay && (
           <div
             className={`absolute inset-0 pointer-events-none z-[1] ${shapeClass} ${borderClass}`}
             style={{
