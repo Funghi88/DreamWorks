@@ -56,7 +56,7 @@ interface SettingsPanelProps {
   onRecordResolutionChange?: (v: RecordResolution) => void;
   recordOutputShape?: RecordOutputShape;
   onRecordOutputShapeChange?: (v: RecordOutputShape) => void;
-  /** Share window / whiteboard record: 40–100% vs output frame (all shapes); higher = sharper, less margin. */
+  /** Share window / whiteboard record: 20–100% vs output frame (all shapes); higher = sharper, less margin. */
   shareWindowFillPercent?: number;
   onShareWindowFillPercentChange?: (v: number) => void;
   letterboxBackground?: LetterboxBackground;
@@ -332,16 +332,16 @@ export function SettingsPanel({
             <div className="flex items-center gap-3">
               <span
                 className={`${labelWidth} shrink-0 text-xs font-medium text-slate-600 uppercase tracking-wider`}
-                title="Share area vs output frame (40–100%). Drag the capture preview to pan; double-click to center."
+                title="Share area vs output frame (20–100%). Drag the capture preview to pan; double-click to center."
               >
                 Share
               </span>
               <Slider
                 value={[shareWindowFillPercent]}
                 onValueChange={([v]) => {
-                  onShareWindowFillPercentChange(Math.round(Math.min(100, Math.max(40, v ?? 40))));
+                  onShareWindowFillPercentChange(Math.round(Math.min(100, Math.max(20, v ?? 20))));
                 }}
-                min={40}
+                min={20}
                 max={100}
                 step={5}
                 className="flex-1 min-w-0"

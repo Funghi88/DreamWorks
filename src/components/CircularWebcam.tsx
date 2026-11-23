@@ -17,6 +17,15 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+function attachVideoStreamIfNeeded(el: HTMLVideoElement, stream: MediaStream | null | undefined) {
+  if (!stream) return;
+  if (el.srcObject !== stream) {
+    el.setAttribute("playsinline", "");
+    el.setAttribute("webkit-playsinline", "");
+    el.srcObject = stream;
+  }
+}
+
 interface CircularWebcamProps {
   hidden?: boolean;
   /** When true, hide the video so canvas composite shows through */
@@ -41,7 +50,7 @@ interface CircularWebcamProps {
   beautyFilter: string;
   avatarImageSrc: string | null;
   pipPos: { x: number; y: number };
-  onPipMouseDown: (e: React.MouseEvent) => void;
+  onPipPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   pipRef: React.RefObject<HTMLDivElement | null>;
   cameraVideoRef?: React.Ref<HTMLVideoElement | null>;
   avatarImgRef: React.RefObject<HTMLImageElement | null>;
@@ -70,7 +79,7 @@ export function CircularWebcam({
   beautyFilter,
   avatarImageSrc,
   pipPos,
-  onPipMouseDown,
+  onPipPointerDown,
   pipRef,
   cameraVideoRef,
   avatarImgRef,
@@ -236,8 +245,7 @@ export function CircularWebcam({
             boxShadow: `0 0 48px ${hexToRgba(glowColor, 0.85)}, 0 0 24px ${hexToRgba(glowColor, 0.6)}, inset 0 0 20px rgba(255,255,255,0.15)`,
           }),
       }}
-      onMouseDown={onPipMouseDown}
-      onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+      onPointerDown={onPipPointerDown}
     >
       {/* Inner: overflow-hidden clips video to shape; glow stays on outer (no clip) */}
       <div
@@ -267,9 +275,7 @@ export function CircularWebcam({
                   else (cameraVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
                 }
                 if (el && cameraStream) {
-                  el.setAttribute("playsinline", "");
-                  el.setAttribute("webkit-playsinline", "");
-                  el.srcObject = cameraStream;
+                  attachVideoStreamIfNeeded(el, cameraStream);
                   el.onloadedmetadata = () => {
                     setTimeout(() => el.play().catch(() => {}), 50);
                   };
@@ -325,7 +331,7 @@ export function CircularWebcam({
                 }
               }
               if (el && cameraStream) {
-                el.srcObject = cameraStream;
+                attachVideoStreamIfNeeded(el, cameraStream);
                 el.play().catch(() => {});
               }
             }}
@@ -359,8 +365,7 @@ export function CircularWebcam({
       <div
         className={`absolute bottom-0 right-0 z-10 cursor-grab active:cursor-grabbing ${avatarShape === "circle" ? "rounded-full" : ""}`}
         style={{ width: "40%", height: "40%", minWidth: 24, minHeight: 24 }}
-        onMouseDown={onPipMouseDown}
-        onPointerDown={(e) => onPipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+        onPointerDown={onPipPointerDown}
         aria-label="Drag to move camera"
       />
     </div>

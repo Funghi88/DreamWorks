@@ -30,7 +30,7 @@ DreamWorks 主界面
 
 **Mac 系统兼容性**
 
-DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
+DreamWorks 基于 **Electron 45** 构建，支持 Apple Silicon 与 Intel Mac。macOS 27 Golden Gate（含 27.2.1）已验证支持。
 
 
 | 系统版本                       | 支持情况  |
@@ -40,6 +40,8 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 | **macOS 13 (Ventura)**     | ✅ 支持  |
 | **macOS 14 (Sonoma)**      | ✅ 支持  |
 | **macOS 15 (Sequoia)**     | ✅ 支持  |
+| **macOS 26 (Tahoe)**       | ✅ 支持  |
+| **macOS 27 (Golden Gate)** | ✅ 支持  |
 | macOS 10.15 (Catalina) 及更早 | ❌ 不支持 |
 
 
@@ -57,7 +59,7 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 
 - **输出画幅**：横屏可选 **16∶9** 或 **16∶10**（与常见外接屏 / MacBook 内建屏对应）；竖屏可选 **3∶4** 或 **9∶16**，分辨率档 **1080p / 2K / 4K**（具体像素由 `outputAspect` 表统一计算）。
 - **黑边与内容适配**：可设黑边背景（纯黑或自定义图），内容在画幅内 **拉伸 / 等比包含 / 等比裁切**（`letterboxMode`）。
-- **共享窗口 / 白板占比**：**Share %**（约 40–100%）控制屏幕共享或白板在成片中的占比；横屏、竖屏捕获下可在黑边内 **平移** 共享窗口；仅白板录制时可 **平移** 已适配的白板表面。
+- **共享窗口 / 白板占比**：**Share %**（约 20–100%）控制屏幕共享或白板在成片中的占比；横屏、竖屏捕获下可在黑边内 **平移** 共享窗口；仅白板录制时可 **平移** 已适配的白板表面。
 - **白板录制小地图**：录制白板时可用 **布局小地图** 预览最终成片框，在小地图内拖动 **画中画**、调整 Share 占比或平移白板区域，与主界面合成逻辑对齐。
 - **设置面板**：**可拖动、可改大小的浮动设置窗**（无全屏遮罩，便于对照画面调参），位置与尺寸会写入设置并持久化。
 
@@ -96,7 +98,7 @@ DreamWorks 基于 **Electron 33** 构建，支持以下 macOS 版本：
 
 ### 本地使用指南
 
-**环境要求**：Node.js 18+，npm 或 yarn
+**环境要求**：Node.js **22.12+**，npm 或 yarn
 
 **安装与运行：**
 
@@ -109,6 +111,13 @@ npm run dev
 
 应用会在 Electron 窗口中打开。
 
+**Electron / Vosk 更新后：** Vosk 是原生语音识别模块；每次变更 Electron 主版本、切换 CPU 架构或重新安装依赖后，运行：
+
+```bash
+npm run rebuild:vosk
+npm run verify:vosk
+```
+
 **日常开发：** 保持 **一个** `npm run dev` 终端常开即可。修改 `src/` 由 Vite **热更新**；修改 `electron/`（主进程、preload）时 **electronmon** 会**自动重启** Electron 窗口，一般不必反复输入 `npm run dev`（只有关掉终端或结束进程后才需再开）。
 
 **仅 Web 模式（无 Electron）：** `npm run dev:web`，然后访问 [http://localhost:5173](http://localhost:5173)
@@ -119,8 +128,9 @@ npm run dev
 
 **构建 macOS 应用：**
 
-- `npm run pack` — 生成 `.app`，输出至 `release/mac-arm64/DreamWorks.app`（可直接双击运行）
-- `npm run dist` — 生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`
+- `npm run pack` — 重新编译 Vosk、构建并生成 `.app`，Apple Silicon 输出至 `release/mac-arm64/DreamWorks.app`（可直接双击运行）。此命令会清空旧的 `dist/` 与 `release/` 构建产物。
+- `npm run dist` — 重新编译 Vosk、构建并生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`。
+- 日常把本次改动编译成桌面 App，运行 `npm run pack`；要给别人安装，运行 `npm run dist`。
 
 ### 截图
 
@@ -169,7 +179,7 @@ Remote collaboration and content creation often require showing your screen, cam
 
 **macOS compatibility**
 
-DreamWorks is built on **Electron 33** and supports:
+DreamWorks is built on **Electron 45**, with support for both Apple Silicon and Intel Macs. macOS 27 Golden Gate (including 27.2.1) is verified.
 
 
 | macOS version                      | Support |
@@ -179,6 +189,8 @@ DreamWorks is built on **Electron 33** and supports:
 | **macOS 13 (Ventura)**             | ✅       |
 | **macOS 14 (Sonoma)**              | ✅       |
 | **macOS 15 (Sequoia)**             | ✅       |
+| **macOS 26 (Tahoe)**                | ✅       |
+| **macOS 27 (Golden Gate)**          | ✅       |
 | macOS 10.15 (Catalina) and earlier | ❌       |
 
 
@@ -196,7 +208,7 @@ Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
 
 - **Output frame:** Landscape **16∶9** or **16∶10**; portrait **3∶4** or **9∶16**; resolution tiers **1080p / 2K / 4K** (pixel sizes from a single `outputAspect` table).
 - **Letterboxing:** Background can be black or a **custom image**; content fit modes **stretch / contain / crop** inside the encode frame (`letterboxMode`).
-- **Share / whiteboard fill:** **Share %** (~40–100%) scales how much of the frame the screen share or whiteboard occupies; pan the share window inside letterbox on landscape/portrait capture, and pan the fitted whiteboard **surface** in whiteboard-only recording.
+- **Share / whiteboard fill:** **Share %** (~20–100%) scales how much of the frame the screen share or whiteboard occupies; pan the share window inside letterbox on landscape/portrait capture, and pan the fitted whiteboard **surface** in whiteboard-only recording.
 - **Whiteboard recording minimap:** While recording the board, use the **layout minimap** to preview the final frame—drag **PiP**, adjust Share %, or pan the board area in sync with the main compositor.
 - **Settings UI:** **Floating Settings** window—drag the header, resize from the corner, no fullscreen dimmer—geometry is **persisted** so your layout survives restarts.
 
@@ -229,7 +241,7 @@ This section summarizes how we integrate **Excalidraw**: keep the canvas respons
 
 ### Local setup
 
-**Requirements:** Node.js 18+, npm or yarn
+**Requirements:** Node.js **22.12+**, npm or yarn
 
 **Install and run:**
 
@@ -242,6 +254,13 @@ npm run dev
 
 The app opens in an Electron window.
 
+**After changing Electron or Vosk:** Vosk is a native speech-recognition module. Rebuild it after changing the Electron major version, switching CPU architecture, or reinstalling dependencies:
+
+```bash
+npm run rebuild:vosk
+npm run verify:vosk
+```
+
 **Day-to-day dev:** Keep **one** `npm run dev` running. Edits under `src/` hot-reload via Vite; edits under `electron/` trigger **electronmon** to **restart** the Electron window—no need to re-run `npm run dev` each time (only after you stop the terminal or kill the process).
 
 **Web-only (no Electron):** Run `npm run dev:web`, then open [http://localhost:5173](http://localhost:5173)
@@ -252,8 +271,9 @@ The app opens in an Electron window.
 
 **Build for macOS:**
 
-- `npm run pack` — Produces `.app` in `release/mac-arm64/DreamWorks.app` (double-click to run)
-- `npm run dist` — Produces `.dmg` and `.zip` installers in `release/`
+- `npm run pack` — Rebuilds Vosk, builds the app, and produces an `.app` at `release/mac-arm64/DreamWorks.app` on Apple Silicon. It clears previous `dist/` and `release/` build outputs.
+- `npm run dist` — Rebuilds Vosk, builds the app, and produces `.dmg` and `.zip` installers in `release/`.
+- To compile your current changes into a desktop app, run `npm run pack`. To create an installer for someone else, run `npm run dist`.
 
 ### Screenshots
 
@@ -282,7 +302,7 @@ The app opens in an Electron window.
 1. **Screen Recording must be ON (blue)** for the exact app you’re running — **Electron** when using `npm run dev`, **DreamWorks** when using the built `.app`. If you see both **DreamWork** and **DreamWorks** in the list, enable the one that matches your build (or enable both while testing).
 2. After changing permission, **quit and reopen** the app (macOS often won’t refresh the picker until restart).
 3. **macOS + Electron:** The main process uses a `**desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
-4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused `**getDisplayMedia` → “Not supported”** in testing on this Electron + macOS combo, so the app uses `**desktopCapturer` + the in-app sheet** instead. Upgrading Electron later may allow revisiting the native path.
+4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused `**getDisplayMedia` → “Not supported”** in testing, so the app continues to use `**desktopCapturer` + the in-app sheet** for predictable full-display and window selection.
 
 **Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
 
@@ -294,7 +314,7 @@ The app opens in an Electron window.
 
 ## Tech stack
 
-- **Electron 33** — Desktop framework (see `package.json` for pinned minor)
+- **Electron 45** — Desktop framework (see `package.json` for pinned minor)
 - **React 19 + TypeScript + Vite 7** — Frontend
 - **Tailwind CSS v4 + Shadcn/UI** — Styling and components
 - **getDisplayMedia + getUserMedia + MediaRecorder + Canvas 2D** — Media and recording

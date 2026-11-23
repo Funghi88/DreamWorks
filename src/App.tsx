@@ -202,18 +202,34 @@ const SHARE_WINDOW_CORNER_RADIUS_OUT_PX = 20;
 const CAMERA_SOURCE_VIDEO_BOX_PX = 480;
 /** Widescreen / Presenter-style frames: use `contain` in PiP so the speaker is not over-cropped vs `cover`. */
 const PIP_VIDEO_CONTAIN_MIN_ASPECT = 1.42;
+/** Hysteresis guard to prevent contain/cover flapping near threshold. */
+const PIP_VIDEO_CONTAIN_ON_ASPECT = 1.5;
+const PIP_VIDEO_CONTAIN_OFF_ASPECT = 1.34;
 
-function pipScaleForVideo(pw: number, ph: number, vw: number, vh: number) {
+function pipScaleForVideo(
+  pw: number,
+  ph: number,
+  vw: number,
+  vh: number,
+  prevContainMode?: boolean
+) {
   const safeW = Math.max(1, vw);
   const safeH = Math.max(1, vh);
   const ar = safeW / safeH;
-  const useContain = ar >= PIP_VIDEO_CONTAIN_MIN_ASPECT;
+  let useContain: boolean;
+  if (typeof prevContainMode === "boolean") {
+    if (ar >= PIP_VIDEO_CONTAIN_ON_ASPECT) useContain = true;
+    else if (ar <= PIP_VIDEO_CONTAIN_OFF_ASPECT) useContain = false;
+    else useContain = prevContainMode;
+  } else {
+    useContain = ar >= PIP_VIDEO_CONTAIN_MIN_ASPECT;
+  }
   const s = useContain ? Math.min(pw / safeW, ph / safeH) : Math.max(pw / safeW, ph / safeH);
   const drawW = safeW * s;
   const drawH = safeH * s;
   const dx = (pw - drawW) / 2;
   const dy = (ph - drawH) / 2;
-  return { drawW, drawH, dx, dy };
+  return { drawW, drawH, dx, dy, useContain };
 }
 /** PiP portal vs Settings: backdrop < camera (sharp preview) < drawer */
 const Z_PIP_PORTAL = 99_999;
@@ -714,6 +730,9 @@ export default function App() {
   const [previewBoxDragging, setPreviewBoxDragging] = useState(false);
   const previewBoxDraggingRef = useRef(false);
   const previewBoxOffsetRef = useRef({ x: 0, y: 0 });
+  const pipContainModeRef = useRef<boolean | null>(null);
+  const pipOverlayContainModeRef = useRef<boolean | null>(null);
+  const pipCompositeContainModeRef = useRef<boolean | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [captureErrorExiting, setCaptureErrorExiting] = useState(false);
   const captureScreenInFlightRef = useRef(false);
@@ -782,6 +801,14 @@ export default function App() {
     sharePanLayoutRef.current = null;
     sharePortraitPanDragRef.current = null;
   }, [activeScreenStream]);
+
+  useEffect(() => {
+    if (!showPip || !cameraStream) {
+      pipContainModeRef.current = null;
+      pipOverlayContainModeRef.current = null;
+      pipCompositeContainModeRef.current = null;
+    }
+  }, [showPip, cameraStream]);
 
   /** Auto-dismiss capture/recording errors: fade/slide out, then unmount (instant clear if reduced motion). */
   useEffect(() => {
@@ -917,7 +944,7 @@ export default function App() {
       if (s.systemVolume != null) setSystemVolume(s.systemVolume);
       if (s.recordResolution != null) setRecordResolution(s.recordResolution);
       if (s.recordOutputShape != null) setRecordOutputShape(s.recordOutputShape);
-      if (s.shareWindowFillPercent != null && s.shareWindowFillPercent >= 40 && s.shareWindowFillPercent <= 100) {
+      if (s.shareWindowFillPercent != null && s.shareWindowFillPercent >= 20 && s.shareWindowFillPercent <= 100) {
         setShareWindowFillPercent(Math.round(s.shareWindowFillPercent));
       }
       if (s.sharePortraitWindowPanNorm != null) {
@@ -1071,7 +1098,7 @@ export default function App() {
   );
   const [shareWindowFillPercent, setShareWindowFillPercent] = useState(() => {
     const v = loadSettings().shareWindowFillPercent;
-    if (typeof v !== "number" || v < 40 || v > 100) return 80;
+    if (typeof v !== "number" || v < 20 || v > 100) return 80;
     return Math.round(v);
   });
   /** True while minimap Share% SE handle is dragging — ref holds live %; avoid syncing from React state that frame. */
@@ -1728,7 +1755,8 @@ export default function App() {
           setTeleprompterWidth(Math.max(320, Math.min(900, payload.width)));
         }
         if (typeof payload.height === "number") {
-          setTeleprompterHeight(Math.max(180, Math.min(500, payload.height)));
+          const maxH = Math.max(180, window.innerHeight - 16);
+          setTeleprompterHeight(Math.max(180, Math.min(maxH, payload.height)));
         }
         if (typeof payload.locked === "boolean") setTeleprompterLocked(payload.locked);
         if (typeof payload.slimMode === "boolean") setTeleprompterSlimMode(payload.slimMode);
@@ -2729,7 +2757,15 @@ export default function App() {
             : pipSource instanceof HTMLCanvasElement
               ? pipSource.height
               : (pipSource as HTMLImageElement).naturalHeight || ph;
-        const rel = pipScaleForVideo(pw, ph, vw, vh);
+        const rel = pipScaleForVideo(
+          pw,
+          ph,
+          vw,
+          vh,
+          pipCompositeContainModeRef.current ?? pipContainModeRef.current ?? undefined
+        );
+        pipCompositeContainModeRef.current = rel.useContain;
+        pipContainModeRef.current = rel.useContain;
         const drawW = rel.drawW;
         const drawH = rel.drawH;
         const dx = x + rel.dx;
@@ -3096,14 +3132,14 @@ export default function App() {
   );
 
   const onWbMiniSharePctLive = useCallback((pct: number) => {
-    const v = Math.min(100, Math.max(40, Math.round(pct)));
+    const v = Math.min(100, Math.max(20, Math.round(pct)));
     wbMiniShareResizeDragActiveRef.current = true;
     shareWindowFillPercentRef.current = v;
     drawCompositeRef.current?.();
   }, []);
 
   const onWbMiniSharePctCommit = useCallback((pct: number) => {
-    const v = Math.min(100, Math.max(40, Math.round(pct)));
+    const v = Math.min(100, Math.max(20, Math.round(pct)));
     wbMiniShareResizeDragActiveRef.current = false;
     shareWindowFillPercentRef.current = v;
     setShareWindowFillPercent(v);
@@ -3210,7 +3246,7 @@ export default function App() {
       else if (drag.corner === "ne") vector = (-dx + dy) / 2;
       else vector = (dx - dy) / 2; // sw
       const sens = 0.2;
-      const next = Math.min(100, Math.max(40, Math.round(drag.startPct + vector * sens)));
+      const next = Math.min(100, Math.max(20, Math.round(drag.startPct + vector * sens)));
       drag.lastPct = next;
       shareWindowFillPercentRef.current = next;
       scheduleShareInteractionDraw();
@@ -3244,7 +3280,7 @@ export default function App() {
     if (!drag || drag.pointerId !== e.pointerId) return;
     if (drag.mode === "resizePct") {
       shareOverlayResizeDragActiveRef.current = false;
-      const v = Math.min(100, Math.max(40, Math.round(drag.lastPct)));
+      const v = Math.min(100, Math.max(20, Math.round(drag.lastPct)));
       shareWindowFillPercentRef.current = v;
       setShareWindowFillPercent(v);
       queueMicrotask(() => scheduleShareInteractionDraw());
@@ -3538,7 +3574,16 @@ export default function App() {
     } else if (useSnapCanvas && snapCanvas) {
       const cw = snapCanvas.width;
       const ch = snapCanvas.height;
-      const { drawW, drawH, dx, dy } = pipScaleForVideo(pw, ph, cw, ch);
+      const rel = pipScaleForVideo(
+        pw,
+        ph,
+        cw,
+        ch,
+        pipOverlayContainModeRef.current ?? pipContainModeRef.current ?? undefined
+      );
+      pipOverlayContainModeRef.current = rel.useContain;
+      pipContainModeRef.current = rel.useContain;
+      const { drawW, drawH, dx, dy } = rel;
       ctx.save();
       ctx.translate(dx + drawW, dy);
       ctx.scale(-1, 1);
@@ -3548,7 +3593,16 @@ export default function App() {
     } else if (useCamera && video) {
       const vw = video.videoWidth || pw;
       const vh = video.videoHeight || ph;
-      const { drawW, drawH, dx, dy } = pipScaleForVideo(pw, ph, vw, vh);
+      const rel = pipScaleForVideo(
+        pw,
+        ph,
+        vw,
+        vh,
+        pipOverlayContainModeRef.current ?? pipContainModeRef.current ?? undefined
+      );
+      pipOverlayContainModeRef.current = rel.useContain;
+      pipContainModeRef.current = rel.useContain;
+      const { drawW, drawH, dx, dy } = rel;
       ctx.save();
       ctx.translate(dx + drawW, dy);
       ctx.scale(-1, 1);
@@ -5288,7 +5342,8 @@ export default function App() {
   }, [activeScreenStream, isRecording]);
 
   // Whiteboard-only recording: prefer stacking Excalidraw's on-screen canvases (follows zoom/pan).
-  // Fallback: exportToCanvas when composite fails. Scene changes trigger immediate re-export via onSceneChange.
+  // Fallback: exportToCanvas when composite fails. Scene changes are coalesced so a pointer drag does not
+  // compete with Excalidraw by requesting an export on every animation frame.
   useEffect(() => {
     if (!isRecording || activeScreenStream) return;
     const res = recordOutputDimensions;
@@ -5298,6 +5353,8 @@ export default function App() {
     let lastSceneVersion = -1;
     let exportSeq = 0;
     let exportBusy = false;
+    let sceneExportTimer: number | null = null;
+    let lastSceneExportAt = 0;
 
     const doExport = async () => {
       if (exportBusy || cancelled) return;
@@ -5355,12 +5412,24 @@ export default function App() {
       }
     };
 
+    const scheduleSceneExport = () => {
+      if (cancelled || sceneExportTimer != null) return;
+      const minGapMs = 100;
+      const delay = Math.max(0, minGapMs - (performance.now() - lastSceneExportAt));
+      sceneExportTimer = window.setTimeout(() => {
+        sceneExportTimer = null;
+        lastSceneExportAt = performance.now();
+        void doExport();
+      }, delay);
+    };
+
     doExport();
-    wbImmediateExportRef.current = doExport;
+    wbImmediateExportRef.current = scheduleSceneExport;
     const id = window.setInterval(doExport, exportIntervalMs);
     return () => {
       cancelled = true;
       wbImmediateExportRef.current = null;
+      if (sceneExportTimer != null) clearTimeout(sceneExportTimer);
       clearInterval(id);
       whiteboardExportedRef.current = null;
       wbViewportReuseCanvasRef.current = null;
@@ -5537,7 +5606,7 @@ export default function App() {
   const avatarSizeDisplayRef = useRef(avatarSizeDisplay);
   avatarSizeDisplayRef.current = avatarSizeDisplay;
 
-  const handlePipMouseDown = useCallback((e: React.MouseEvent | React.PointerEvent) => {
+  const handlePipPointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
     if (pipResizeDraggingRef.current) return;
@@ -5554,9 +5623,8 @@ export default function App() {
         : previewRef.current ?? contentAreaRef.current;
     if (!pip) return;
     if (!useViewportCoords && !container) return;
-    const pe = e as React.PointerEvent;
-    const captureTarget = (pe.pointerId != null && e.currentTarget instanceof HTMLElement) ? e.currentTarget : pip;
-    if (pe.pointerId != null && "setPointerCapture" in captureTarget) captureTarget.setPointerCapture(pe.pointerId);
+    const captureTarget = e.currentTarget instanceof HTMLElement ? e.currentTarget : pip;
+    if ("setPointerCapture" in captureTarget) captureTarget.setPointerCapture(e.pointerId);
     const posRef = usePreviewPagePos ? pipPosRef : fullPagePipPosRef;
     const setPos = usePreviewPagePos ? setPipPos : setFullPagePipPos;
     const pos = posRef.current;
@@ -5573,14 +5641,14 @@ export default function App() {
     pipDraggingRef.current = true;
     setPipDragging(true);
     let wbRecordDragRaf = 0;
-    const onMove = (ev: PointerEvent | MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const r = useViewportCoords
         ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
         : container!.getBoundingClientRect();
       const { x: ox, y: oy } = pipOffsetRef.current;
       let x = ev.clientX - r.left - ox;
       let y = ev.clientY - r.top - oy;
-      if (ev instanceof PointerEvent && ev.getCoalescedEvents) {
+      if (ev.getCoalescedEvents) {
         const coalesced = ev.getCoalescedEvents();
         if (coalesced.length > 0) {
           const last = coalesced[coalesced.length - 1];
@@ -5616,11 +5684,9 @@ export default function App() {
     };
     const cleanup = () => {
       setPos(posRef.current);
-      document.removeEventListener("pointermove", onMoveP);
+      document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onUp);
-      document.removeEventListener("mousemove", onMoveM);
-      document.removeEventListener("mouseup", onUp);
       if (wbRecordDragRaf) {
         cancelAnimationFrame(wbRecordDragRaf);
         wbRecordDragRaf = 0;
@@ -5639,13 +5705,9 @@ export default function App() {
       }
     };
     const onUp = cleanup;
-    const onMoveP = onMove as (ev: PointerEvent) => void;
-    const onMoveM = onMove as (ev: MouseEvent) => void;
-    document.addEventListener("pointermove", onMoveP);
+    document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
     document.addEventListener("pointercancel", onUp);
-    document.addEventListener("mousemove", onMoveM);
-    document.addEventListener("mouseup", onUp);
   }, [portalRect, mainLayoutPortalRect, activeScreenStream, avatarSize, fullPageWhiteboard, isRecording]);
 
   const handlePipResizePointerDown = useCallback(
@@ -5731,7 +5793,7 @@ export default function App() {
     setPreviewBoxDragging(true);
     let lastPos = { x: pos.x, y: pos.y };
     let rafId: number = 0;
-    const onMove = (ev: PointerEvent | MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const pr = parent.getBoundingClientRect();
       const { x: ox, y: oy } = previewBoxOffsetRef.current;
       let x = ev.clientX - pr.left - ox;
@@ -5750,21 +5812,17 @@ export default function App() {
     };
     const cleanup = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      document.removeEventListener("pointermove", onMove as (ev: PointerEvent) => void);
+      document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onUp);
-      document.removeEventListener("mousemove", onMove as (ev: MouseEvent) => void);
-      document.removeEventListener("mouseup", onUp);
       previewBoxDraggingRef.current = false;
       setPreviewBoxDragging(false);
       setFullPagePreviewPos(lastPos);
     };
     const onUp = cleanup;
-    document.addEventListener("pointermove", onMove as (ev: PointerEvent) => void);
+    document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
     document.addEventListener("pointercancel", onUp);
-    document.addEventListener("mousemove", onMove as (ev: MouseEvent) => void);
-    document.addEventListener("mouseup", onUp);
   }, [fullPageWhiteboard, activeScreenStream, fullPagePreviewPos]);
 
   const handlePreviewPointerDown = useCallback((e: React.PointerEvent) => {
@@ -5798,7 +5856,7 @@ export default function App() {
       if (inCameraBounds) {
         e.preventDefault();
         e.stopPropagation();
-        handlePipMouseDown(e as unknown as React.MouseEvent);
+        handlePipPointerDown(e);
       } else {
         handlePreviewBoxDrag(e);
       }
@@ -5806,18 +5864,16 @@ export default function App() {
       // Sidebar: any click in preview starts camera drag. FullPage without screen: only when on camera.
       e.preventDefault();
       e.stopPropagation();
-      handlePipMouseDown(e as unknown as React.MouseEvent);
+      handlePipPointerDown(e);
     }
-  }, [fullPageWhiteboard, activeScreenStream, showPip, avatarWidthDisplay, avatarHeightDisplay, handlePipMouseDown, handlePreviewBoxDrag, setContextFromClick]);
+  }, [fullPageWhiteboard, activeScreenStream, showPip, avatarWidthDisplay, avatarHeightDisplay, handlePipPointerDown, handlePreviewBoxDrag, setContextFromClick]);
 
   // Native document capture: any click in preview starts drag (bypasses iframe blocking)
-  const handlePipMouseDownRef = useRef(handlePipMouseDown);
-  handlePipMouseDownRef.current = handlePipMouseDown;
   const handlePreviewPointerDownRef = useRef(handlePreviewPointerDown);
   handlePreviewPointerDownRef.current = handlePreviewPointerDown;
   useEffect(() => {
     if (!fullPageWhiteboard) return;
-    const handleNative = (e: PointerEvent | MouseEvent) => {
+    const handleNative = (e: PointerEvent) => {
       const target = e.target as HTMLElement;
       const el = target?.nodeType === Node.ELEMENT_NODE ? target : (target as Node).parentElement as HTMLElement;
       if (target?.closest?.('[role="dialog"], [data-modal-overlay]')) return;
@@ -5905,10 +5961,8 @@ export default function App() {
       handlePreviewPointerDownRef.current(e as unknown as React.PointerEvent);
     };
     document.addEventListener("pointerdown", handleNative, { capture: true });
-    document.addEventListener("mousedown", handleNative, { capture: true });
     return () => {
       document.removeEventListener("pointerdown", handleNative, { capture: true });
-      document.removeEventListener("mousedown", handleNative, { capture: true });
     };
   }, [fullPageWhiteboard, showPip, activeScreenStream, setContextFromClick]);
 
@@ -6430,8 +6484,7 @@ export default function App() {
                   height: avatarHeightDisplay,
                   touchAction: "none",
                 }}
-                onMouseDown={handlePipMouseDown}
-                onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+                onPointerDown={handlePipPointerDown}
                 aria-label="Drag to move camera"
               />
               )}
@@ -6627,8 +6680,7 @@ export default function App() {
                     height: avatarHeightDisplay,
                     touchAction: "none",
                   }}
-                  onMouseDown={handlePipMouseDown}
-                  onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+                  onPointerDown={handlePipPointerDown}
                   aria-label="Drag to move camera"
                 />
               )}
@@ -6691,7 +6743,7 @@ export default function App() {
                     beautyFilter={beautySettingsToFilter(beautySettings)}
                     avatarImageSrc={avatarImageSrc}
                     pipPos={{ x: 0, y: 0 }}
-                    onPipMouseDown={handlePipMouseDown}
+                    onPipPointerDown={handlePipPointerDown}
                     pipRef={portalCameraInnerRef}
                     cameraVideoRef={cameraVideoRef}
                     avatarImgRef={avatarImgRef}
@@ -6709,8 +6761,7 @@ export default function App() {
                     zIndex: 10002,
                     borderRadius: avatarShape === "circle" ? "50%" : undefined,
                   }}
-                  onMouseDown={handlePipMouseDown}
-                  onPointerDown={(e) => handlePipMouseDown(e as unknown as React.MouseEvent<HTMLDivElement>)}
+                  onPointerDown={handlePipPointerDown}
                   aria-label="Drag to move camera"
                 />
                 {isRecording && wbOnlyUi && !avatarImageSrc && (

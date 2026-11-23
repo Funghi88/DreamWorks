@@ -112,7 +112,7 @@ export interface StoredSettings {
   fullPagePipPos?: { x: number; y: number };
   recordResolution?: RecordResolution;
   recordOutputShape?: RecordOutputShape;
-  /** Share window / whiteboard-only record: width & height scale vs output frame (40–100%). Higher = sharper, less margin. */
+  /** Share window / whiteboard-only record: width & height scale vs output frame (20–100%). Higher = sharper, less margin. */
   shareWindowFillPercent?: number;
   /** Pan share window inside letterbox ([-1,1] × [-1,1], 0 = centered). Landscape & portrait Capture. */
   sharePortraitWindowPanNorm?: { x: number; y: number };
@@ -304,7 +304,7 @@ function parseAndValidate(parsed: unknown): StoredSettings {
         : undefined,
     recordResolution: p.recordResolution === "1080p" || p.recordResolution === "2K" || p.recordResolution === "4K" ? (p.recordResolution as RecordResolution) : undefined,
     recordOutputShape: parseRecordOutputShape(p.recordOutputShape),
-    shareWindowFillPercent: validNum(p.shareWindowFillPercent, 40, 100),
+    shareWindowFillPercent: validNum(p.shareWindowFillPercent, 20, 100),
     sharePortraitWindowPanNorm: (() => {
       const raw = p.sharePortraitWindowPanNorm;
       if (!raw || typeof raw !== "object") return undefined;
@@ -447,7 +447,7 @@ function parseAndValidate(parsed: unknown): StoredSettings {
     teleprompterFontSize: validNum(p.teleprompterFontSize, 18, 52),
     teleprompterOpacity: typeof p.teleprompterOpacity === "number" && p.teleprompterOpacity >= 0.35 && p.teleprompterOpacity <= 1 ? p.teleprompterOpacity : undefined,
     teleprompterWidth: validNum(p.teleprompterWidth, 320, 900),
-    teleprompterHeight: validNum(p.teleprompterHeight, 180, 500),
+    teleprompterHeight: validNum(p.teleprompterHeight, 180, 10000),
     teleprompterPanelWidth: validNum(p.teleprompterPanelWidth, 280, 920),
     teleprompterPanelHeight: validNum(p.teleprompterPanelHeight, 320, 900),
     teleprompterVoskLang:

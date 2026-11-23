@@ -455,7 +455,7 @@ export function WbRecordLayoutMinimapPanel({
       } else if (d.kind === "resizeShare") {
         const dy = e.clientY - d.startClientY;
         const sens = 0.22;
-        const pct = clamp(Math.round(d.startPct + dy * sens), 40, 100);
+        const pct = clamp(Math.round(d.startPct + dy * sens), 20, 100);
         shareResizeLastRef.current = pct;
         if (onSharePercentLive) {
           onSharePercentLive(pct);

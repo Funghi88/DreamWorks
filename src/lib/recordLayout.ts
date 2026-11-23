@@ -1,9 +1,9 @@
 /**
- * Share / whiteboard record fill: clamp to 40–100% for all output shapes.
+ * Share / whiteboard record fill: clamp to 20–100% for all output shapes.
  */
 export function effectiveShareFillPercent(pct: number): number {
   const n = typeof pct === "number" && !Number.isNaN(pct) ? Math.round(pct) : 80;
-  return Math.min(100, Math.max(40, n));
+  return Math.min(100, Math.max(20, n));
 }
 
 /**
@@ -33,7 +33,7 @@ export function recordContentFit80(
   const ch = Math.max(1, contentH);
   const basisW = options?.basisW ?? frameW;
   const fill =
-    typeof options?.fillRatio === "number" && options.fillRatio >= 0.4 && options.fillRatio <= 1
+    typeof options?.fillRatio === "number" && options.fillRatio >= 0.2 && options.fillRatio <= 1
       ? options.fillRatio
       : 0.8;
   const targetW = Math.round(basisW * fill);

@@ -316,12 +316,16 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   }
   const followIdentityKey =
     rawFollowScriptId ?? lastNonEmptyFollowScriptIdRef.current ?? "__default_follow__";
+  const viewport = getViewportSize();
   const clampedWidth = embeddedInDetachedHelperWindow
     ? Math.max(280, overlayWidth)
     : Math.max(320, Math.min(900, overlayWidth));
+  const maxVisibleHeight = embeddedInDetachedHelperWindow
+    ? overlayHeight
+    : Math.max(180, viewport.height - 16);
   const clampedHeight = embeddedInDetachedHelperWindow
     ? Math.max(160, overlayHeight)
-    : Math.max(180, Math.min(500, overlayHeight));
+    : Math.max(180, Math.min(maxVisibleHeight, overlayHeight));
   const useDock =
     dockColumnRect != null && dockColumnRect.width >= 8 && dockColumnRect.height >= 8;
   const effectiveWidth = useDock
@@ -377,6 +381,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
   displayScriptFollowRef.current = displayScript;
   const voskLangFollowRef = useRef(voskLang);
   voskLangFollowRef.current = voskLang;
+  const followModeRef = useRef(followMode);
+  followModeRef.current = followMode;
 
   /**
    * Monotonic follow head for overlay karaoke: never snap back toward the first line after the user
@@ -402,8 +408,9 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     const rs = resetSignal ?? 0;
     if (rs > prevRs) {
       prevResetSignalForFollowRef.current = resetSignal;
-      followVisRef.current = readChars;
-      setFollowVisualChars(readChars);
+      // Follow reset must force head to start; do not reuse stale readChars from the pre-reset frame.
+      followVisRef.current = 0;
+      setFollowVisualChars(0);
       return;
     }
     prevResetSignalForFollowRef.current = resetSignal;
@@ -928,7 +935,30 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
     if (resetSignal != null) reset();
   }, [resetSignal, reset]);
 
-  const viewport = getViewportSize();
+  const prevResetSignalForFollowScrollRef = useRef<number | null>(null);
+  useEffect(() => {
+    const rs = resetSignal ?? 0;
+    const prev = prevResetSignalForFollowScrollRef.current;
+    if (prev === null) {
+      prevResetSignalForFollowScrollRef.current = rs;
+      return;
+    }
+    if (rs <= prev) return;
+    prevResetSignalForFollowScrollRef.current = rs;
+    if (!followModeRef.current) return;
+    followVisRef.current = 0;
+    setFollowVisualChars(0);
+    followLastGoodScrollTopRef.current = 0;
+    lastScrollTopRef.current = 0;
+    followScrollMaxStableRef.current = 0;
+    followEasePauseUntilRef.current = 0;
+    followSuppressScrollUpUntilRef.current = 0;
+    const vp = followContentRef.current;
+    if (!vp) return;
+    markFollowProgrammaticScroll();
+    vp.scrollTop = 0;
+  }, [resetSignal, markFollowProgrammaticScroll]);
+
   const baseLeft = (viewport.width - effectiveWidth) / 2;
   const nearCameraLeft = anchorRect
     ? Math.max(12, Math.min(viewport.width - effectiveWidth - 12, anchorRect.left + anchorRect.width / 2 - effectiveWidth / 2))
@@ -1297,7 +1327,7 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       const maxW = useDock && dockColumnRect ? dockColumnRect.width - 16 : vp.width - left - 16;
       const maxH = useDock && dockColumnRect ? dockColumnRect.height - 16 : vp.height - top - 16;
       const newWidth = Math.max(320, Math.min(900, Math.min(maxW, width + dx)));
-      const newHeight = Math.max(180, Math.min(500, Math.min(maxH, height + dy)));
+      const newHeight = Math.max(180, Math.min(maxH, height + dy));
       onOverlaySizeChange(newWidth, newHeight);
     };
     const onUp = () => {
@@ -1318,14 +1348,14 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       data-dreamwork-no-intercept
       className={
         embeddedInDetachedHelperWindow
-          ? "relative z-0 flex max-h-full max-w-full shrink-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
-          : "!fixed z-[1000000] overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+          ? "relative z-0 flex h-full min-h-0 w-full min-w-0 flex-1 flex-col self-stretch overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
+          : "!fixed z-[1000000] flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/30 bg-black/60 shadow-2xl backdrop-blur-sm"
       }
       style={
         embeddedInDetachedHelperWindow
           ? {
               width: "100%",
-              height: "100%",
+              flex: "1 1 0%",
               minWidth: 0,
               minHeight: 0,
               maxWidth: "100%",
@@ -1396,13 +1426,14 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
       </div>
       <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/80 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/80 to-transparent" />
-      {followMode ? (
-        <div className="relative h-full min-h-0 overflow-hidden">
-          <div
-            ref={followContentRef}
-            data-follow-viewport=""
-            className="relative z-0 h-full overflow-y-auto px-6 py-7 text-center text-white"
-          >
+      <div className="absolute inset-0 min-h-0 overflow-hidden">
+        {followMode ? (
+          <>
+            <div
+              ref={followContentRef}
+              data-follow-viewport=""
+              className="absolute inset-0 z-0 overflow-y-auto px-6 pb-8 pt-10 text-center text-white"
+            >
             <div
               ref={followInnerRef}
               className="relative text-center"
@@ -1433,20 +1464,20 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
               )}
             </div>
           </div>
-          <div className="pointer-events-none absolute bottom-2 inset-x-0 z-20 flex flex-col items-center justify-center gap-1 px-2">
-            <span className="rounded-full bg-black/60 px-3 py-1 text-[10px] text-emerald-200/80 backdrop-blur-sm">
-              {speechFollow.error ? speechFollow.error.slice(0, 120) : speechFollow.status || "Voice follow"}
-            </span>
-          </div>
-        </div>
-      ) : (
-        <div
-          ref={viewportRef}
-          className={`relative h-full overflow-hidden px-6 py-7 text-center text-white ${isScrollDragging ? "cursor-grabbing" : "cursor-grab"}`}
-          style={{ clipPath: scrollClip }}
-          onPointerDown={onScrollPointerDown}
-          title="Drag to scroll"
-        >
+            <div className="pointer-events-none absolute bottom-2 inset-x-0 z-20 flex flex-col items-center justify-center gap-1 px-2">
+              <span className="rounded-full bg-black/60 px-3 py-1 text-[10px] text-emerald-200/80 backdrop-blur-sm">
+                {speechFollow.error ? speechFollow.error.slice(0, 120) : speechFollow.status || "Voice follow"}
+              </span>
+            </div>
+          </>
+        ) : (
+          <div
+            ref={viewportRef}
+            className={`absolute inset-0 overflow-hidden px-6 pb-8 pt-10 text-center text-white ${isScrollDragging ? "cursor-grabbing" : "cursor-grab"}`}
+            style={{ clipPath: scrollClip }}
+            onPointerDown={onScrollPointerDown}
+            title="Drag to scroll"
+          >
           <div
             ref={scrollContentRef}
             className="text-center"
@@ -1486,7 +1517,8 @@ export const TeleprompterOverlay = memo(function TeleprompterOverlay({
             </div>
           )}
         </div>
-      )}
+        )}
+      </div>
       {!embeddedInDetachedHelperWindow && (
         <div
           role="button"

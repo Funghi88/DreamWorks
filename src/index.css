@@ -140,10 +140,22 @@
 }
 
 /* Electron teleprompter helper window: same glass stack as main overlay — no solid shell bg. */
+html.dw-teleprompter-helper {
+  height: 100%;
+}
+html.dw-teleprompter-helper body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
 html.dw-teleprompter-helper,
 html.dw-teleprompter-helper body,
 html.dw-teleprompter-helper #root {
   background: transparent !important;
+}
+html.dw-teleprompter-helper #root {
+  height: 100%;
+  min-height: 0;
 }
 
 html.dw-teleprompter-slim {
