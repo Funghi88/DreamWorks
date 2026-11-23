@@ -61,7 +61,8 @@ DreamWorks 基于 **Electron 45** 构建，支持 Apple Silicon 与 Intel Mac。
 - **黑边与内容适配**：可设黑边背景（纯黑或自定义图），内容在画幅内 **拉伸 / 等比包含 / 等比裁切**（`letterboxMode`）。
 - **共享窗口 / 白板占比**：**Share %**（约 20–100%）控制屏幕共享或白板在成片中的占比；横屏、竖屏捕获下可在黑边内 **平移** 共享窗口；仅白板录制时可 **平移** 已适配的白板表面。
 - **白板录制小地图**：录制白板时可用 **布局小地图** 预览最终成片框，在小地图内拖动 **画中画**、调整 Share 占比或平移白板区域，与主界面合成逻辑对齐。
-- **设置面板**：**可拖动、可改大小的浮动设置窗**（无全屏遮罩，便于对照画面调参），位置与尺寸会写入设置并持久化。
+- **设置面板**：**可拖动、可改大小的浮动设置窗**（无全屏遮罩，便于对照画面调参），位置与尺寸会写入设置并持久化；底部显示**版本号、构建日期与 Git commit**，便于快速确认当前运行的桌面版本。
+- **双栏分屏拖拽**：白板与 Capture Screen 之间的分隔条支持双向自由拖动，任一侧最小可缩至 **40 px** 细条且松手保持当前位置不回弹（核心计算见 `src/lib/splitPaneLayout.ts`，附单元测试保护）。
 
 **PiP 背景 vs macOS 系统摄像头效果（含 Presenter Overlay）**
 
@@ -126,11 +127,12 @@ npm run verify:vosk
 
 **Live Meeting：** 终端 1 运行 `npm run signaling`，终端 2 运行 `npm run dev`。多用户测试可在浏览器中打开 2+ 标签页访问 [http://localhost:5173](http://localhost:5173)
 
-**构建 macOS 应用：**
+**构建与安装 macOS 应用：**
 
-- `npm run pack` — 重新编译 Vosk、构建并生成 `.app`，Apple Silicon 输出至 `release/mac-arm64/DreamWorks.app`（可直接双击运行）。此命令会清空旧的 `dist/` 与 `release/` 构建产物。
-- `npm run dist` — 重新编译 Vosk、构建并生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`。
-- 日常把本次改动编译成桌面 App，运行 `npm run pack`；要给别人安装，运行 `npm run dist`。
+- `npm run pack` — 运行单元测试、重新编译 Vosk、构建并打包 `.app`（使用 `electron-builder 26`，仅打包运行时文件，并通过 `scripts/adhoc-sign-mac.cjs` 自动完成本地 ad-hoc 签名与 `codesign --verify` 严格校验），Apple Silicon 输出至 `release/mac-arm64/DreamWorks.app`。此命令会清空旧的 `dist/` 与 `release/` 构建产物。
+- `npm run install:mac` — 一键打包、校验签名、退出正在运行的旧实例、替换 `/Applications/DreamWorks.app` 并重新启动（日常更新本机桌面 App 推荐直接用这个命令，避免误开旧版本）。
+- `npm run dist` — 运行单元测试、重新编译 Vosk、构建并生成 `.dmg` 和 `.zip` 安装包，输出至 `release/`。
+- 日常更新本机桌面 App 运行 `npm run install:mac`（仅打包不安装用 `npm run pack`）；要给别人安装运行 `npm run dist`。
 
 ### 截图
 
@@ -154,7 +156,7 @@ npm run verify:vosk
 
 ### 故障排除
 
-**Capture Screen 在 macOS 上无效：** 开发时在 **系统设置 → 隐私与安全性 → 屏幕录制** 中为 **Electron** 授权；打包应用则为 **DreamWorks** 授权。
+**Capture Screen 在 macOS 上无效：** 开发时在 **系统设置 → 隐私与安全性 → 屏幕与系统音频录制** 中为 **Electron** 授权；打包应用则为 **DreamWorks** 授权。若升级或重新打包（本地 ad-hoc 签名）后开关已开启却仍无法选窗，可能是 macOS 仍绑定着旧版二进制签名哈希：先在终端运行 `tccutil reset ScreenCapture com.funghi88.dreamworks`（或在隐私列表中点 `−` 删除旧条目），再重新勾选 **DreamWorks** 并完全退出（`Cmd + Q`）后重开。
 
 ---
 
@@ -210,7 +212,8 @@ Both **Intel** and **Apple Silicon (M1/M2/M3)** are supported.
 - **Letterboxing:** Background can be black or a **custom image**; content fit modes **stretch / contain / crop** inside the encode frame (`letterboxMode`).
 - **Share / whiteboard fill:** **Share %** (~20–100%) scales how much of the frame the screen share or whiteboard occupies; pan the share window inside letterbox on landscape/portrait capture, and pan the fitted whiteboard **surface** in whiteboard-only recording.
 - **Whiteboard recording minimap:** While recording the board, use the **layout minimap** to preview the final frame—drag **PiP**, adjust Share %, or pan the board area in sync with the main compositor.
-- **Settings UI:** **Floating Settings** window—drag the header, resize from the corner, no fullscreen dimmer—geometry is **persisted** so your layout survives restarts.
+- **Settings UI:** **Floating Settings** window—drag the header, resize from the corner, no fullscreen dimmer—geometry is **persisted** so your layout survives restarts, with a **version / build date / git commit** footer at the bottom so you can verify which build is running at a glance.
+- **Split-pane resizing:** Drag the divider smoothly in either direction to narrow either Whiteboard or Capture Screen all the way down to **40 px** without snapping back on release (covered by unit tests in `src/lib/splitPaneLayout.ts`).
 
 ### Excalidraw whiteboard: UX, storage, and balancing CPU/GPU with recording
 
@@ -269,11 +272,12 @@ npm run verify:vosk
 
 **Live Meeting:** Terminal 1: `npm run signaling`. Terminal 2: `npm run dev`. For multi-user testing, open 2+ browser tabs at [http://localhost:5173](http://localhost:5173)
 
-**Build for macOS:**
+**Build & install for macOS:**
 
-- `npm run pack` — Rebuilds Vosk, builds the app, and produces an `.app` at `release/mac-arm64/DreamWorks.app` on Apple Silicon. It clears previous `dist/` and `release/` build outputs.
-- `npm run dist` — Rebuilds Vosk, builds the app, and produces `.dmg` and `.zip` installers in `release/`.
-- To compile your current changes into a desktop app, run `npm run pack`. To create an installer for someone else, run `npm run dist`.
+- `npm run pack` — Runs unit tests (`npm test`), rebuilds Vosk, builds the app, packages only runtime assets (`dist/`, `electron/`, `package.json`) with `electron-builder 26`, and automatically runs ad-hoc macOS signing + strict `codesign --verify` (`scripts/adhoc-sign-mac.cjs`) to output `release/mac-arm64/DreamWorks.app` on Apple Silicon. Clears previous `dist/` and `release/` outputs.
+- `npm run install:mac` — One-command local install: runs `npm run pack`, verifies the signature, quits any running DreamWorks instance, replaces `/Applications/DreamWorks.app`, verifies the installed bundle, and relaunches it.
+- `npm run dist` — Runs unit tests, rebuilds Vosk, builds the app, signs & verifies, and produces `.dmg` and `.zip` installers in `release/`.
+- To update your local desktop app, run `npm run install:mac` (or `npm run pack` to build without copying to `/Applications`). To create an installer for someone else, run `npm run dist`.
 
 ### Screenshots
 
@@ -301,8 +305,9 @@ npm run verify:vosk
 
 1. **Screen Recording must be ON (blue)** for the exact app you’re running — **Electron** when using `npm run dev`, **DreamWorks** when using the built `.app`. If you see both **DreamWork** and **DreamWorks** in the list, enable the one that matches your build (or enable both while testing).
 2. After changing permission, **quit and reopen** the app (macOS often won’t refresh the picker until restart).
-3. **macOS + Electron:** The main process uses a `**desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
-4. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused `**getDisplayMedia` → “Not supported”** in testing, so the app continues to use `**desktopCapturer` + the in-app sheet** for predictable full-display and window selection.
+3. **After upgrading or rebuilding an ad-hoc signed `.app`:** Even if the **DreamWorks** toggle still looks blue, macOS TCC may still be bound to the older binary’s code-signature hash. Run `tccutil reset ScreenCapture com.funghi88.dreamworks` (or click `−` to remove the stale entry in Privacy & Security), then re-enable **DreamWorks** and fully quit (`Cmd + Q`) and reopen.
+4. **macOS + Electron:** The main process uses a `**desktopCapturer`-based** `setDisplayMediaRequestHandler` (no `useSystemPicker`). **Capture Screen** opens an in-app picker (sections *Full display (entire monitor)* vs *A single window*; `screen:` sources are full displays, `window:` sources are individual windows). Enable **Screen Recording** for **Electron** / **DreamWorks**. The renderer still uses `src/lib/displayMedia.ts` (video first, then optional audio).
+5. **Apple’s system picker vs this list:** Enabling only `useSystemPicker` (true native UI) caused `**getDisplayMedia` → “Not supported”** in testing, so the app continues to use `**desktopCapturer` + the in-app sheet** for predictable full-display and window selection.
 
 **Whiteboard / teleprompter text “missing” after `npm run pack`:** Your edits are **not** inside the `.app` — they are stored in the OS user folder, e.g. macOS: `~/Library/Application Support/DreamWorks/settings.json`. The packaged app uses the **same** path, so data should carry over. If it doesn’t:
 
@@ -314,7 +319,7 @@ npm run verify:vosk
 
 ## Tech stack
 
-- **Electron 45** — Desktop framework (see `package.json` for pinned minor)
+- **Electron 45 + electron-builder 26** — Desktop framework & macOS packaging (see `package.json` for pinned versions)
 - **React 19 + TypeScript + Vite 7** — Frontend
 - **Tailwind CSS v4 + Shadcn/UI** — Styling and components
 - **getDisplayMedia + getUserMedia + MediaRecorder + Canvas 2D** — Media and recording
