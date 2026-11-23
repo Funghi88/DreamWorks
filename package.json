@@ -18,8 +18,9 @@
     "build": "tsc && node scripts/sync-mediapipe-wasm.cjs && vite build",
     "preview": "vite preview",
     "electron": "electron .",
-    "pack": "npm run create-icns && rm -rf dist release && npm run rebuild:vosk && npm run build && electron-builder --dir",
-    "dist": "npm run rebuild:vosk && npm run build && electron-builder",
+    "pack": "npm run create-icns && rm -rf dist release && npm test && npm run rebuild:vosk && npm run build && electron-builder --dir",
+    "dist": "npm test && npm run rebuild:vosk && npm run build && electron-builder",
+    "install:mac": "node scripts/install-mac.cjs",
     "signaling": "npx tsx server/signaling-server.ts",
     "create-app-icon": "node scripts/create-app-icon.js",
     "create-icns": "node scripts/create-icns.js",
@@ -71,7 +72,7 @@
     "autoprefixer": "^10.4.27",
     "concurrently": "^9.0.0",
     "electron": "^45.4.1",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.18.0",
     "electronmon": "^2.0.4",
     "happy-dom": "^20.8.8",
     "postcss": "^8.5.8",
@@ -87,6 +88,8 @@
   "build": {
     "appId": "com.funghi88.dreamworks",
     "productName": "DreamWorks",
+    "npmRebuild": false,
+    "afterPack": "scripts/adhoc-sign-mac.cjs",
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
@@ -119,9 +122,9 @@
       }
     ],
     "files": [
-      "**/*",
-      "!**/.cursor/**",
-      "!**/.vscode/**"
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
     ]
   },
   "overrides": {

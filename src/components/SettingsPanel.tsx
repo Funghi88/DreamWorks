@@ -515,6 +515,11 @@ export function SettingsPanel({
         </div>
         </div>
       </div>
+      {typeof __APP_BUILD_INFO__ !== "undefined" && (
+        <div className="border-t border-slate-200/80 pt-3 text-[11px] text-slate-400 tabular-nums select-text">
+          DreamWorks v{__APP_BUILD_INFO__.version} · {__APP_BUILD_INFO__.buildDate} ({__APP_BUILD_INFO__.commit})
+        </div>
+      )}
     </div>
   );
 }

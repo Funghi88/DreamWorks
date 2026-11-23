@@ -3,10 +3,37 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import fs from "fs";
+import { execSync } from "child_process";
+
+function resolveBuildInfo() {
+  let version = "0.0.0";
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.json"), "utf8"));
+    if (typeof pkg.version === "string") version = pkg.version;
+  } catch {
+    /* ignore */
+  }
+  let commit = "local";
+  try {
+    commit = execSync("git rev-parse --short HEAD", { cwd: __dirname, stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    /* ignore */
+  }
+  const buildDate = new Date().toISOString().slice(0, 10);
+  return { version, commit, buildDate };
+}
+
+const APP_BUILD_INFO = resolveBuildInfo();
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    __APP_BUILD_INFO__: JSON.stringify(APP_BUILD_INFO),
+  },
   build: {
     rollupOptions: {
       input: {

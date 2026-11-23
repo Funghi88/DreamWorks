@@ -82,6 +82,12 @@ import { setBackgroundThrottling, setNormalMode } from "@/lib/windowUtils";
 import { ResizeHandle } from "@/components/ResizeHandle";
 import { SplitAffordanceHint } from "@/components/SplitAffordanceHint";
 import { WbRecordLayoutMinimapPanel } from "@/components/WbRecordLayoutMinimapPanel";
+import {
+  SPLIT_STRIP_MIN_PX,
+  computeSplitDragStripWidth,
+  resolveExitSqueezeStripWidth,
+  splitGridTemplate,
+} from "@/lib/splitPaneLayout";
 
 const LiveMeetingModal = lazy(() =>
   import("@/components/LiveMeeting/LiveMeetingModal").then((m) => ({ default: m.LiveMeetingModal }))
@@ -94,34 +100,18 @@ const RECORD_BITRATES: Record<RecordResolution, number> = {
   "4K": 28_000_000,
 };
 
-/** Side strip (shared: left whiteboard / wb-only: right capture) — never narrower than this. */
-const SPLIT_STRIP_MIN_PX = 40;
 /** Capture / whiteboard column below this width: Drag-only affordance (see SplitAffordanceHint). */
 const SPLIT_COLUMN_MIN_USABLE_PX = 320;
 /** Default width of the narrow capture column after promoting whiteboard (no stream squeeze). */
 const WB_MAIN_DEFAULT_CAPTURE_STRIP_PX = 280;
 /** Strip shrink before swapping main column — slower ease-in-out feels more like a scroll / book opening. */
 const WB_PROMOTE_STRIP_MS = 780;
-const SPLIT_HANDLE_TRACK = "minmax(14px,14px)";
 /** Capture preview: drag this corner to adjust Share % (live + recording). */
 const SHARE_OVERLAY_CORNER_RESIZE_PX = 22;
 const SHARE_OVERLAY_CORNER_HANDLE_PX = 14;
 type ShareResizeCorner = "nw" | "ne" | "sw" | "se";
 /** Whiteboard recording: PiP bottom-right resize handle (CSS px). */
 const PIP_BR_RESIZE_HANDLE_PX = 18;
-
-/**
- * Tri-pane grid: **which column is main (1fr)** is `isScreenShareLayout` (`hasScreen`) — not decided by drag.
- * **stripPx** is only the **narrow column width** (drag handle); main column takes the rest. Min SPLIT_STRIP_MIN_PX.
- */
-function splitGridTemplate(stripPx: number, isScreenShareLayout: boolean): string {
-  const px = Math.max(SPLIT_STRIP_MIN_PX, Math.round(Number.isFinite(stripPx) ? stripPx : SPLIT_STRIP_MIN_PX));
-  const stripTrack = `minmax(${px}px,${px}px)`;
-  const wbMainFirst = `minmax(${SPLIT_STRIP_MIN_PX}px, 1fr)`;
-  return isScreenShareLayout
-    ? `${px}px ${SPLIT_HANDLE_TRACK} minmax(0,1fr)`
-    : `${wbMainFirst} ${SPLIT_HANDLE_TRACK} ${stripTrack}`;
-}
 /** Stop sharing: fade capture first, then clear stream + subtle whiteboard “land” (see index.css). */
 const SCREEN_SHARE_EXIT_MS = 400;
 const SCREEN_SHARE_RESTORE_MS = 460;
@@ -3813,14 +3803,13 @@ export default function App() {
     const { startX, startW } = splitClientXDragRef.current;
     const captureMain = splitMainIsCaptureRef.current;
     const contentW = contentAreaRef.current?.offsetWidth ?? 0;
-    const maxW = contentW > 0 ? contentW - 54 : Math.max(600, window.innerWidth - 480);
-    const dx = clientX - startX;
-    const d = captureMain ? dx : -dx;
-    const raw = Math.round(startW + d);
-    const next = Math.max(
-      SPLIT_STRIP_MIN_PX,
-      Math.min(maxW, Number.isFinite(raw) ? raw : SPLIT_STRIP_MIN_PX)
-    );
+    const next = computeSplitDragStripWidth({
+      startStripWidth: startW,
+      dx: clientX - startX,
+      captureMain,
+      contentWidth: contentW,
+      fallbackWindowWidth: window.innerWidth,
+    });
     if (next === whiteboardPanelWidthRef.current) return;
     whiteboardPanelWidthRef.current = next;
     const tri = splitTriPaneRef.current;
@@ -3853,10 +3842,14 @@ export default function App() {
     const exitSqueeze =
       captureMainNoStreamRef.current &&
       !activeScreenStreamRef.current &&
-      w > SPLIT_STRIP_MIN_PX + 24;
+      w > SPLIT_STRIP_MIN_PX;
     if (exitSqueeze) {
+      const cw = contentAreaRef.current?.offsetWidth ?? 0;
       setCaptureMainNoStream(false);
-      w = SPLIT_STRIP_MIN_PX;
+      w = resolveExitSqueezeStripWidth({
+        draggedLeftStripWidth: w,
+        contentWidth: cw,
+      });
     }
     whiteboardPanelWidthRef.current = w;
     splitPanelDragActiveRef.current = false;
@@ -3938,8 +3931,7 @@ export default function App() {
         setWhiteboardPanelWidth(spx);
       }
     }
-    const stripForTpl =
-      splitMain && hasStream ? spx : splitMain && !hasStream ? SPLIT_STRIP_MIN_PX : spx;
+    const stripForTpl = spx;
     tri.style.setProperty("--dreamwork-strip-px", `${stripForTpl}px`);
     if (splitMain) {
       tri.style.setProperty("grid-template-columns", splitGridTemplate(stripForTpl, true));
@@ -6085,12 +6077,7 @@ export default function App() {
   const stripBase = splitAffordanceLive
     ? splitAffordanceLive.strip
     : Math.max(SPLIT_STRIP_MIN_PX, Math.round(whiteboardPanelWidth));
-  const stripPxForGrid =
-    splitMainIsCapture && hasScreen
-      ? stripBase
-      : splitMainIsCapture && !hasScreen
-        ? SPLIT_STRIP_MIN_PX
-        : stripBase;
+  const stripPxForGrid = stripBase;
   const whiteboardTrackW = splitMainIsCapture
     ? stripPxForGrid
     : Math.max(0, contentWBase - 14 - stripBase);
@@ -6573,7 +6560,7 @@ export default function App() {
             {/* Capture Screen: main when screen selected, mini (40px bar) when whiteboard-only */}
             <div
               ref={hasScreen ? previewRef : screenMiniStripRef}
-              data-dreamwork-fixed-strip={!hasScreen ? "" : undefined}
+              data-dreamwork-fixed-strip={!splitMainIsCapture ? "" : undefined}
               className={`relative box-border flex min-h-0 min-w-0 max-w-full overflow-hidden rounded-2xl bg-slate-900 transition-[opacity,transform,filter] duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 hasScreen
                   ? isLandscapeRecordOutputShape(recordOutputShape)
